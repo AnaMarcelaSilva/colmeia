@@ -1,6 +1,6 @@
-//! Mascote do app: desenhado só com formas vetoriais do egui, sem imagens.
-//! Dois modelos (robozinho e abelha-robô) e cinco estados, cada um ligado a
-//! uma situação real do trabalho dos agentes.
+//! A abelha-robô da Colmeia: desenhada só com formas vetoriais do egui, sem
+//! imagens, com cinco estados, cada um ligado a uma situação real do trabalho
+//! dos agentes.
 
 use std::f32::consts::TAU;
 
@@ -52,21 +52,6 @@ impl Estado {
             Estado::Aguardando => Color32::from_rgb(0xf2, 0xb3, 0x5b),
             Estado::Bugado => Color32::from_rgb(0xf2, 0x5b, 0x6b),
             Estado::Comemorando => Color32::from_rgb(0xc7, 0x92, 0xea),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Modelo {
-    Robo,
-    Abelha,
-}
-
-impl Modelo {
-    pub fn nome(self) -> &'static str {
-        match self {
-            Modelo::Robo => "Robozinho",
-            Modelo::Abelha => "Abelha-robô",
         }
     }
 }
@@ -152,10 +137,10 @@ fn aleatorio(a: u32, b: u32) -> f32 {
     (x & 0xffff) as f32 / 65535.0
 }
 
-pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, estado: Estado, t: Tempo) {
+pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, estado: Estado, t: Tempo) {
     let base = Pincel { p: painter, c: centro, u: tamanho / 100.0, tinta: None };
     if estado != Estado::Bugado {
-        corpo(base, modelo, estado, t);
+        corpo(base, estado, t);
         extras(base, estado, t);
         return;
     }
@@ -166,8 +151,8 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
     let forte = t.total % 0.9 < 0.3;
     let intensidade = if forte { 1.0 } else { 0.25 };
     let deslocamento = (2.0 + 3.0 * aleatorio(semente, 0)) * intensidade;
-    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(255, 60, 90, 120)), ..base.movido(-deslocamento, 0.0) }, modelo, estado, t);
-    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(60, 230, 255, 120)), ..base.movido(deslocamento, 0.0) }, modelo, estado, t);
+    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(255, 60, 90, 120)), ..base.movido(-deslocamento, 0.0) }, estado, t);
+    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(60, 230, 255, 120)), ..base.movido(deslocamento, 0.0) }, estado, t);
 
     let area = Rect::from_center_size(centro, vec2(tamanho * 1.6, tamanho * 1.4));
     let faixas = 9;
@@ -176,7 +161,7 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
         let faixa = Rect::from_min_size(area.min + vec2(0.0, i as f32 * altura), vec2(area.width(), altura));
         let desvio = if aleatorio(semente, i + 10) > 0.55 { (aleatorio(semente, i + 30) - 0.5) * 18.0 * intensidade } else { 0.0 };
         let recorte = painter.with_clip_rect(faixa.intersect(painter.clip_rect()));
-        corpo(Pincel { p: &recorte, ..base.movido(desvio, 0.0) }, modelo, estado, t);
+        corpo(Pincel { p: &recorte, ..base.movido(desvio, 0.0) }, estado, t);
     }
 
     // Linhas de chiado atravessando o mascote.
@@ -189,7 +174,7 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
     }
 }
 
-fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo) {
+fn corpo(p: Pincel, estado: Estado, t: Tempo) {
     let tt = t.total;
     let pulo = match estado {
         Estado::Dormindo => (tt * 1.2).sin() * 1.0,
@@ -204,10 +189,7 @@ fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo) {
     p.elipse(0.0, 54.0, 26.0 * escala, 4.5 * escala, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90));
 
     let p = p.movido(0.0, pulo);
-    match modelo {
-        Modelo::Robo => robo(p, estado, t),
-        Modelo::Abelha => abelha(p, estado, t),
-    }
+    abelha(p, estado, t);
 }
 
 /// Posição da mão para um braço preso em `ombro`, em cada estado.
@@ -222,33 +204,6 @@ fn mao(lado: f32, estado: Estado, tt: f32) -> (f32, f32) {
         Estado::Comemorando => -1.0 + (tt * 9.0 + lado).sin() * 0.4,
     };
     (angulo.cos() * comprimento * lado.signum(), angulo.sin() * comprimento)
-}
-
-fn robo(p: Pincel, estado: Estado, t: Tempo) {
-    let tt = t.total;
-    let branco = Color32::from_rgb(0xe9, 0xed, 0xf3);
-    let sombra = Color32::from_rgb(0xc9, 0xcf, 0xd9);
-
-    // Antena com a luz de estado.
-    p.linha(0.0, -40.0, 0.0, -50.0, 2.6, sombra);
-    let luz = estado.cor_luz();
-    let piscando = estado == Estado::Bugado && ((tt * 9.0) as u32).is_multiple_of(2);
-    p.circulo(0.0, -53.0, 7.0, Color32::from_rgba_unmultiplied(luz.r(), luz.g(), luz.b(), 60));
-    p.circulo(0.0, -53.0, 4.5, if piscando { sombra } else { luz });
-
-    // Braços atrás do corpo.
-    for lado in [-1.0_f32, 1.0] {
-        let (ox, oy) = (32.0 * lado, 6.0);
-        let (mx, my) = mao(lado, estado, tt);
-        p.linha(ox, oy, ox + mx, oy + my, 7.0, sombra);
-    }
-
-    // Corpo em cápsula, com brilho e a barriga um pouco mais escura.
-    p.caixa(0.0, 0.0, 68.0, 80.0, 32.0, branco);
-    p.caixa(0.0, 26.0, 44.0, 12.0, 6.0, Color32::from_rgb(0xdd, 0xe2, 0xea));
-    p.circulo(-19.0, -26.0, 5.0, Color32::from_rgba_unmultiplied(255, 255, 255, 170));
-
-    rosto(p, 0.0, -8.0, estado, t);
 }
 
 fn abelha(p: Pincel, estado: Estado, t: Tempo) {
@@ -301,7 +256,7 @@ fn abelha(p: Pincel, estado: Estado, t: Tempo) {
     rosto(p, 0.0, -4.0, estado, t);
 }
 
-/// A tela no rosto, igual nos dois modelos: é ela que mostra a expressão.
+/// A tela no rosto: é ela que mostra a expressão.
 fn rosto(p: Pincel, x: f32, y: f32, estado: Estado, t: Tempo) {
     let tt = t.total;
     p.caixa(x, y, 52.0, 32.0, 11.0, TELA);

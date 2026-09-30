@@ -1,5 +1,5 @@
-//! Mascote da Colmeia: a abelha-robô (e o robozinho da primeira versão).
+//! Mascote da Colmeia: a abelha-robô.
 
 mod mascote;
 
-pub use mascote::{Estado, Modelo, Tempo, desenhar};
+pub use mascote::{Estado, Tempo, desenhar};

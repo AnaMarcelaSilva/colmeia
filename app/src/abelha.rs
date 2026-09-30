@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, Id, Order, Pos2, RichText, Sense, vec2};
-use mascote::{Estado, Modelo, Tempo};
+use mascote::{Estado, Tempo};
 
 use crate::dados::{Coluna, Tarefa};
 use crate::tema::cores;
@@ -118,7 +118,7 @@ impl Abelha {
             pintor.rect_filled(rect, 10.0, cores().realce);
         }
         let tempo = Tempo { total: t_visual as f32, no_estado: (t_visual - self.mudou_em) as f32 };
-        mascote::desenhar(&pintor, rect.center() - vec2(0.0, 16.0), 78.0, Modelo::Abelha, self.estado, tempo);
+        mascote::desenhar(&pintor, rect.center() - vec2(0.0, 16.0), 78.0, self.estado, tempo);
         pintor.text(
             rect.center_bottom() - vec2(0.0, 26.0),
             egui::Align2::CENTER_CENTER,
