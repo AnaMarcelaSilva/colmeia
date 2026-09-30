@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/demo"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
@@ -29,6 +30,10 @@ type Servidor struct {
 	Versao  string
 	// Demo liga as cargas de teste, que escrevem comandos nos terminais.
 	Demo bool
+	// Banco guarda perfis, projetos e tarefas; DirDados é onde ele e as contas
+	// separadas das ferramentas ficam.
+	Banco    *dados.Banco
+	DirDados string
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -36,6 +41,9 @@ func (s *Servidor) Rotas() http.Handler {
 	mux.HandleFunc("GET /v1/versao", s.versao)
 	mux.HandleFunc("GET /v1/estatisticas", s.estatisticas)
 	mux.HandleFunc("GET /v1/terminais/{id}", s.terminal)
+	if s.Banco != nil {
+		s.rotasDados(mux)
+	}
 	if s.Demo {
 		mux.HandleFunc("POST /v1/demo/carga", s.carga)
 	}

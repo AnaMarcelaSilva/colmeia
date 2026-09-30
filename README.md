@@ -4,7 +4,7 @@ Um app desktop para coordenar vários agentes de IA de código (Claude Code, Cod
 
 ![A abelha-robô da Colmeia nos cinco estados: dormindo, trabalhando, aguardando você, bugado e comemorando](docs/imagens/abelha.gif)
 
-> **Estado atual:** fundação. O quadro de tarefas, o painel da tarefa com terminais e caixa de mensagem, a abelha e o núcleo com canal local seguro funcionam no Linux. Tarefas ainda são de exemplo e não são gravadas; o Windows ainda não roda (veja [Plataformas](#plataformas)).
+> **Estado atual:** perfis, contas de IA, workspaces, projetos (pastas git de verdade) e tarefas são criados na tela e gravados pelo núcleo. Os agentes das tarefas chegam na próxima etapa; por enquanto, terminais e caixa de mensagem funcionam no modo demonstração. Roda no Linux; o Windows ainda não (veja [Plataformas](#plataformas)).
 
 ## Por que existe
 
@@ -14,13 +14,14 @@ Quem trabalha com vários agentes vira o gargalo: copia contexto de um terminal 
 - **Quadro de tarefas por projeto**, estilo Jira, com a branch como filtro e cartões que se movem sozinhos.
 - **Terminais dos agentes** no painel da tarefa: o que está em foco em tempo real, os outros como miniaturas.
 - **A abelha**, que resume o que mais precisa de você (erro, aprovação pendente, trabalho em andamento) e comemora quando uma tarefa termina.
+- **Perfis separados**, cada um com projetos, contas de IA e tema próprios.
 - **Registro do trabalho** para daily e sprint (planejado).
 
 É um projeto pessoal, de código aberto e gratuito, feito para ajudar colegas e qualquer dev. Não é projeto de nenhuma empresa nem tem vínculo com uma.
 
 ## Como rodar (Linux)
 
-Requisitos: Go 1.24+, Rust 1.88+ e as bibliotecas de sistema que o `eframe` usa (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo).
+Requisitos: Go 1.26+, Rust 1.88+ e as bibliotecas de sistema que o `eframe` usa (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo).
 
 ```bash
 # 1. Núcleo
@@ -38,7 +39,19 @@ cargo run --release -p mascote --example vitrine
 
 O núcleo continua rodando depois que a tela fecha, porque é dono dos terminais. Para encerrá-lo: `pkill colmeia-nucleo`.
 
-Variáveis úteis da tela: `COLMEIA_TEMA` (`claro`, `escuro`, `sistema`), `COLMEIA_TAREFA=101` (abre direto no painel de uma tarefa), `COLMEIA_CARTOES=500`, `COLMEIA_CENARIO=erro` e `COLMEIA_SEM_ABELHA=1`.
+## Primeiro uso
+
+1. **Criar perfil:** nome (Profissional, Estudo, Pessoal…) e tema (escuro, claro ou leitura).
+2. **Contas de IA:** a Colmeia mostra as ferramentas instaladas (Claude Code, Codex, Gemini CLI, OpenCode). Cada uma pode usar a conta do sistema ou uma conta só daquele perfil; nesse caso o login fica separado e é feito na primeira vez que o agente abrir.
+3. **Primeiro projeto:** a pasta de um repositório git. A Colmeia só lê o repositório.
+
+Depois disso: o perfil se troca pelo seletor no topo da barra lateral; "+ Novo projeto" adiciona outras pastas; "+ Nova tarefa" cria tarefas no Backlog; arrastar move entre colunas; o botão direito no cartão ou no projeto remove.
+
+Na caixa de mensagem do painel da tarefa, **Enter quebra a linha**, **Ctrl+Enter envia** e **Ctrl+V cola imagens**: a imagem vira um PNG em `~/.local/share/colmeia/anexos/` e o caminho vai junto na mensagem, que é como o Claude Code e o Codex recebem imagens.
+
+Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com o histórico de mudanças encadeado por hash.
+
+Variáveis úteis da tela: `COLMEIA_TEMA` (`escuro`, `claro`, `leitura`, só antes de entrar num perfil), `COLMEIA_TAREFA=101` (demonstração: abre direto no painel de uma tarefa), `COLMEIA_CARTOES=500`, `COLMEIA_CENARIO=erro` e `COLMEIA_SEM_ABELHA=1`.
 
 ## Arquitetura
 

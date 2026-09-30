@@ -22,6 +22,18 @@ pub fn diretorio() -> PathBuf {
     base.join("colmeia")
 }
 
+/// O mesmo diretório de dados do núcleo: COLMEIA_DADOS, ou $XDG_DATA_HOME/colmeia,
+/// ou ~/.local/share/colmeia.
+pub fn diretorio_dados() -> PathBuf {
+    if let Some(d) = std::env::var_os("COLMEIA_DADOS") {
+        return PathBuf::from(d);
+    }
+    if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(d).join("colmeia");
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/colmeia")).unwrap_or_else(|| std::env::temp_dir().join("colmeia"))
+}
+
 fn ler_token() -> io::Result<String> {
     Ok(std::fs::read_to_string(diretorio().join(NOME_TOKEN))?.trim().to_string())
 }
@@ -57,23 +69,32 @@ mod unix {
         tungstenite::client(pedido, fluxo).map(|(ws, _)| ws).map_err(|e| format!("recusado pelo núcleo: {e}"))
     }
 
-    /// Pedido HTTP simples ao núcleo; devolve o corpo da resposta.
+    /// Pedido HTTP simples ao núcleo; devolve o corpo se a resposta for 2xx.
     pub fn pedir(metodo: &str, caminho: &str) -> Result<String, String> {
-        let mut fluxo = conectar().map_err(|e| e.to_string())?;
-        let token = ler_token().map_err(|e| e.to_string())?;
-        fluxo.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        match pedir_com_corpo(metodo, caminho, None)? {
+            (200..=299, corpo) => Ok(corpo),
+            (status, corpo) => Err(format!("{status}: {corpo}")),
+        }
+    }
+
+    /// Pedido HTTP com corpo JSON opcional; devolve o status e o corpo.
+    pub fn pedir_com_corpo(metodo: &str, caminho: &str, corpo: Option<&str>) -> Result<(u16, String), String> {
+        let mut fluxo = conectar().map_err(|e| format!("núcleo indisponível: {e}"))?;
+        let token = ler_token().map_err(|e| format!("sem token do núcleo: {e}"))?;
+        fluxo.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        let corpo = corpo.unwrap_or("");
         write!(
             fluxo,
-            "{metodo} {caminho} HTTP/1.1\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "{metodo} {caminho} HTTP/1.0\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corpo}",
+            corpo.len()
         )
         .map_err(|e| e.to_string())?;
         let mut resposta = String::new();
         fluxo.read_to_string(&mut resposta).map_err(|e| e.to_string())?;
         let (cabecalho, corpo) = resposta.split_once("\r\n\r\n").unwrap_or((&resposta, ""));
-        if !cabecalho.starts_with("HTTP/1.1 2") {
-            return Err(cabecalho.lines().next().unwrap_or_default().to_string());
-        }
-        Ok(corpo.to_string())
+        let status = cabecalho.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("resposta inválida do núcleo")?;
+        // Em HTTP/1.0 o servidor não divide a resposta em blocos: o corpo é o resto.
+        Ok((status, corpo.to_string()))
     }
 
     /// Procura o executável do núcleo: COLMEIA_NUCLEO, ao lado do app ou no PATH.
@@ -127,6 +148,9 @@ mod outros {
         Err(AVISO.into())
     }
     pub fn pedir(_: &str, _: &str) -> Result<String, String> {
+        Err(AVISO.into())
+    }
+    pub fn pedir_com_corpo(_: &str, _: &str, _: Option<&str>) -> Result<(u16, String), String> {
         Err(AVISO.into())
     }
     pub fn garantir_nucleo() -> Result<(), String> {

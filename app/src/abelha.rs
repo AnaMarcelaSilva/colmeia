@@ -17,8 +17,8 @@ pub const CONCLUSAO_RECENTE: f64 = 30.0;
 const ANIMACAO: f64 = 2.5;
 
 pub struct Conclusao {
-    pub id: u32,
-    pub projeto: &'static str,
+    pub id: i64,
+    pub projeto_id: i64,
     pub em: f64,
 }
 
@@ -66,8 +66,8 @@ impl Abelha {
         Self { conclusoes: Vec::new(), resumo_aberto: false, estado: Estado::Dormindo, mudou_em: 0.0 }
     }
 
-    pub fn concluiu(&mut self, id: u32, projeto: &'static str, agora: f64) {
-        self.conclusoes.push(Conclusao { id, projeto, em: agora });
+    pub fn concluiu(&mut self, id: i64, projeto_id: i64, agora: f64) {
+        self.conclusoes.push(Conclusao { id, projeto_id, em: agora });
     }
 
     /// Um erro novo interrompe a comemoração: ele é mais urgente.
@@ -79,8 +79,8 @@ impl Abelha {
 
     /// Comemora se alguma tarefa do escopo foi concluída há pouco. Várias
     /// conclusões seguidas contam a partir da última: viram uma comemoração só.
-    pub fn atualizar(&mut self, base: Estado, no_escopo: impl Fn(&str) -> bool, agora: f64) -> Estado {
-        let comemorando = self.conclusoes.iter().any(|c| agora - c.em < COMEMORACAO && no_escopo(c.projeto));
+    pub fn atualizar(&mut self, base: Estado, no_escopo: impl Fn(i64) -> bool, agora: f64) -> Estado {
+        let comemorando = self.conclusoes.iter().any(|c| agora - c.em < COMEMORACAO && no_escopo(c.projeto_id));
         let novo = if comemorando { Estado::Comemorando } else { base };
         if novo != self.estado {
             self.estado = novo;
@@ -149,11 +149,11 @@ pub fn resumo(
     ctx: &egui::Context,
     ancora: Pos2,
     tarefas: &[Tarefa],
-    no_escopo: impl Fn(&str) -> bool,
+    no_escopo: impl Fn(i64) -> bool,
     conclusoes: &[Conclusao],
     agentes_rodando: bool,
     agora: f64,
-) -> (Option<u32>, egui::Response) {
+) -> (Option<i64>, egui::Response) {
     let mut escolhida = None;
     let area = egui::Area::new(Id::new("resumo-abelha")).order(Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(cores().superficie_alta).corner_radius(crate::tema::RAIO_SUPERFICIE).inner_margin(14).show(ui, |ui| {
@@ -161,7 +161,7 @@ pub fn resumo(
             ui.label(crate::tema::texto_forte("O que está acontecendo", 14.0).color(cores().texto));
             ui.add_space(6.0);
             let mut vazio = true;
-            let mut linha = |ui: &mut egui::Ui, cor: Color32, titulo: String, detalhe: String, id: u32| {
+            let mut linha = |ui: &mut egui::Ui, cor: Color32, titulo: String, detalhe: String, id: i64| {
                 vazio = false;
                 let resposta = ui
                     .vertical(|ui| {
@@ -181,14 +181,14 @@ pub fn resumo(
                 ui.add_space(4.0);
             };
 
-            let visiveis = || tarefas.iter().filter(|t| no_escopo(t.projeto));
+            let visiveis = || tarefas.iter().filter(|t| no_escopo(t.projeto_id));
             for t in visiveis().filter(|t| t.erro.is_some() && !t.erro_visto) {
                 linha(ui, cores().erro, format!("Erro em {}", t.projeto), format!("{}: {}", t.titulo, t.erro.unwrap_or_default()), t.id);
             }
             for t in visiveis().filter(|t| t.coluna == Coluna::AguardandoVoce) {
                 linha(ui, cores().alerta, format!("Aguardando você em {}", t.projeto), format!("{}: {}", t.titulo, t.motivo.unwrap_or("pede resposta")), t.id);
             }
-            for c in conclusoes.iter().rev().filter(|c| agora - c.em < CONCLUSAO_RECENTE && no_escopo(c.projeto)).take(5) {
+            for c in conclusoes.iter().rev().filter(|c| agora - c.em < CONCLUSAO_RECENTE && no_escopo(c.projeto_id)).take(5) {
                 if let Some(t) = tarefas.iter().find(|t| t.id == c.id) {
                     linha(ui, cores().destaque, format!("Concluída em {}", t.projeto), format!("{}, há {:.0} s", t.titulo, agora - c.em), t.id);
                 }

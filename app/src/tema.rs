@@ -6,7 +6,7 @@
 //! e uma única cor de destaque.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Mesh, Pos2, Rect, Response, RichText,
@@ -86,47 +86,96 @@ pub const CLARO: Paleta = Paleta {
     ],
 };
 
-static CLARO_ATIVO: AtomicBool = AtomicBool::new(false);
+/// Tema leitura: tons quentes de papel, contraste suave para ler por muito tempo.
+pub const LEITURA: Paleta = Paleta {
+    fundo: rgb(0xf3ecdc),
+    lateral: rgb(0xebe2cd),
+    superficie: rgb(0xe7ddc6),
+    superficie_alta: rgb(0xfbf7ee),
+    realce: rgb(0xe0d4b8),
+    borda: rgb(0xd6c8a8),
+    texto: rgb(0x3a2f24),
+    suave: rgb(0x77695a),
+    destaque: rgb(0x9a4a22),
+    ok: rgb(0x4d7a36),
+    alerta: rgb(0xa86a0c),
+    erro: rgb(0xb3372d),
+    favo: Color32::from_rgba_premultiplied(0, 0, 0, 12),
+    terminal_fundo: rgb(0xf7f1e3),
+    terminal_texto: rgb(0x3a2f24),
+    ansi: [
+        rgb(0x3a2f24), rgb(0xb3372d), rgb(0x4d7a36), rgb(0x8a6410), rgb(0x3b5e8c), rgb(0x86457a), rgb(0x2f7470), rgb(0x77695a),
+        rgb(0x8a7c6a), rgb(0xc7473c), rgb(0x5e8f45), rgb(0xa07418), rgb(0x4a70a3), rgb(0x9a568d), rgb(0x3a8781), rgb(0x3a2f24),
+    ],
+};
+
+/// 0 = escuro, 1 = claro, 2 = leitura.
+static ATUAL: AtomicU8 = AtomicU8::new(0);
 
 /// As cores do tema que está na tela agora.
 pub fn cores() -> &'static Paleta {
-    if CLARO_ATIVO.load(Ordering::Relaxed) { &CLARO } else { &ESCURO }
+    match ATUAL.load(Ordering::Relaxed) {
+        1 => &CLARO,
+        2 => &LEITURA,
+        _ => &ESCURO,
+    }
 }
 
+/// Tema de fundo claro (claro ou leitura).
 pub fn claro() -> bool {
-    CLARO_ATIVO.load(Ordering::Relaxed)
+    ATUAL.load(Ordering::Relaxed) != 0
 }
 
-/// Chamado a cada quadro: acompanha o tema do sistema quando a escolha é "Sistema".
-pub fn sincronizar(ctx: &egui::Context) {
-    CLARO_ATIVO.store(ctx.theme() == Theme::Light, Ordering::Relaxed);
-}
-
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Escolha {
     Escuro,
     Claro,
-    Sistema,
+    Leitura,
 }
 
 impl Escolha {
-    pub const TODAS: [Escolha; 3] = [Escolha::Escuro, Escolha::Claro, Escolha::Sistema];
+    pub const TODAS: [Escolha; 3] = [Escolha::Escuro, Escolha::Claro, Escolha::Leitura];
 
     pub fn nome(self) -> &'static str {
         match self {
             Escolha::Escuro => "Escuro",
             Escolha::Claro => "Claro",
-            Escolha::Sistema => "Sistema",
+            Escolha::Leitura => "Leitura",
         }
     }
 
+    /// Nome gravado no perfil pelo núcleo.
+    pub fn chave(self) -> &'static str {
+        match self {
+            Escolha::Escuro => "escuro",
+            Escolha::Claro => "claro",
+            Escolha::Leitura => "leitura",
+        }
+    }
+
+    pub fn da_chave(chave: &str) -> Escolha {
+        Escolha::TODAS.into_iter().find(|e| e.chave() == chave).unwrap_or(Escolha::Escuro)
+    }
+
+    /// O egui só tem os temas escuro e claro; o de leitura usa a vaga do claro
+    /// com as próprias cores.
     pub fn aplicar(self, ctx: &egui::Context) {
-        ctx.set_theme(match self {
-            Escolha::Escuro => ThemePreference::Dark,
-            Escolha::Claro => ThemePreference::Light,
-            Escolha::Sistema => ThemePreference::System,
-        });
-        sincronizar(ctx);
+        match self {
+            Escolha::Escuro => {
+                ATUAL.store(0, Ordering::Relaxed);
+                ctx.set_theme(ThemePreference::Dark);
+            }
+            Escolha::Claro => {
+                ATUAL.store(1, Ordering::Relaxed);
+                ctx.set_visuals_of(Theme::Light, visuais(&CLARO, Visuals::light()));
+                ctx.set_theme(ThemePreference::Light);
+            }
+            Escolha::Leitura => {
+                ATUAL.store(2, Ordering::Relaxed);
+                ctx.set_visuals_of(Theme::Light, visuais(&LEITURA, Visuals::light()));
+                ctx.set_theme(ThemePreference::Light);
+            }
+        }
     }
 }
 
@@ -162,6 +211,7 @@ pub fn instalar(ctx: &egui::Context) {
         s.spacing.item_spacing = vec2(8.0, 6.0);
         s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);
+        s.spacing.menu_spacing = 4.0;
         let tamanhos = [
             (TextStyle::Small, FontId::proportional(11.5)),
             (TextStyle::Body, FontId::proportional(14.0)),
@@ -258,9 +308,18 @@ pub fn chip(ui: &mut egui::Ui, rotulo: &str, valor: &str, em_uso: bool) -> Respo
 /// Seletor segmentado: várias opções numa pílula só, a escolhida preenchida.
 /// Retorna o índice clicado, se houver.
 pub fn segmentado(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usize) -> Option<usize> {
+    segmentado_com_largura(ui, opcoes, escolhida, None)
+}
+
+/// Igual ao `segmentado`, mas ocupando exatamente `largura` (partes iguais):
+/// usado onde o espaço é fixo, como a barra lateral.
+pub fn segmentado_com_largura(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usize, largura: Option<f32>) -> Option<usize> {
     let p = cores();
     let fonte = FontId::proportional(13.0);
-    let larguras: Vec<f32> = opcoes.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), fonte.clone(), p.texto).size().x + 30.0).collect();
+    let larguras: Vec<f32> = match largura {
+        Some(total) => vec![(total - 8.0) / opcoes.len() as f32; opcoes.len()],
+        None => opcoes.iter().map(|o| ui.painter().layout_no_wrap((*o).to_owned(), fonte.clone(), p.texto).size().x + 30.0).collect(),
+    };
     let (rect, _) = ui.allocate_exact_size(vec2(larguras.iter().sum::<f32>() + 8.0, 34.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(17), p.superficie);
     let mut x = rect.left() + 4.0;
@@ -282,6 +341,70 @@ pub fn segmentado(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usize) -> Optio
         x += largura;
     }
     clicada
+}
+
+/// Item de menu com respiro nas laterais, fundo ao passar o mouse e marca na
+/// opção escolhida. Retorna se foi clicado.
+pub fn opcao_menu(ui: &mut egui::Ui, texto: &str, marcada: bool) -> bool {
+    let p = cores();
+    let fonte = if marcada { forte(13.5) } else { FontId::proportional(13.5) };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), fonte, p.texto);
+    // A largura mínima do menu (set_min_width) manda; ocupar o disponível faria um
+    // menu de contexto tomar a tela inteira.
+    let largura = (galeria.size().x + 56.0).max(ui.min_rect().width());
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
+    if resposta.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(6), p.realce);
+    }
+    ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    if marcada {
+        ui.painter().circle_filled(pos2(rect.right() - 16.0, rect.center().y), 3.5, p.destaque);
+    }
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Campo de texto com rótulo em cima, no estilo da Colmeia.
+pub fn campo(ui: &mut egui::Ui, rotulo: &str, texto: &mut String, dica: &str) -> Response {
+    let p = cores();
+    ui.label(RichText::new(rotulo).color(p.suave).size(12.5));
+    ui.add_space(2.0);
+    let largura = ui.available_width();
+    egui::Frame::new()
+        .fill(p.superficie)
+        .stroke(Stroke::new(1.0, p.borda))
+        .corner_radius(CornerRadius::same(RAIO_CONTROLE))
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(texto)
+                    .frame(egui::Frame::NONE)
+                    .desired_width(largura - 22.0)
+                    .font(FontId::proportional(14.0))
+                    .hint_text(RichText::new(dica).color(p.suave)),
+            )
+        })
+        .inner
+}
+
+/// Título e explicação de uma tela ou diálogo.
+pub fn cabecalho(ui: &mut egui::Ui, titulo: &str, explicacao: &str) {
+    let p = cores();
+    ui.label(texto_forte(titulo, 19.0).color(p.texto));
+    if !explicacao.is_empty() {
+        ui.add_space(2.0);
+        ui.label(RichText::new(explicacao).color(p.suave).size(13.5));
+    }
+}
+
+/// Moldura dos diálogos e da tela de entrada.
+pub fn moldura_janela() -> egui::Frame {
+    let p = cores();
+    egui::Frame::new()
+        .fill(p.superficie_alta)
+        .stroke(Stroke::new(1.0, p.borda))
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(egui::Margin::same(24))
+        .shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(if claro() { 40 } else { 110 }) })
 }
 
 /// Botão principal: pílula preenchida na cor de destaque.
@@ -381,5 +504,28 @@ fn linha_suave(malha: &mut Mesh, a: Pos2, b: Pos2, espessura: f32, cor: Color32)
     for i in 0..3 {
         malha.add_triangle(base + i, base + i + 1, base + i + 4);
         malha.add_triangle(base + i + 1, base + i + 5, base + i + 4);
+    }
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn temas_vao_e_voltam_pela_chave_do_perfil() {
+        for e in Escolha::TODAS {
+            assert_eq!(Escolha::da_chave(e.chave()), e);
+        }
+        assert_eq!(Escolha::da_chave("sistema"), Escolha::Escuro);
+    }
+
+    #[test]
+    fn texto_e_fundo_tem_contraste_em_todos_os_temas() {
+        // Diferença de luminosidade simples entre texto e fundo, para nenhum tema ficar ilegível.
+        let luz = |c: Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+        for p in [&ESCURO, &CLARO, &LEITURA] {
+            assert!((luz(p.texto) - luz(p.fundo)).abs() > 150.0);
+            assert!((luz(p.terminal_texto) - luz(p.terminal_fundo)).abs() > 150.0);
+        }
     }
 }

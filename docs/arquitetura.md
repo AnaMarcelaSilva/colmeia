@@ -34,9 +34,26 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/versao` | Versão do protocolo e do núcleo, se o modo demonstração está ligado |
 | `GET /v1/estatisticas` | Bytes lidos dos terminais |
 | `GET /v1/terminais/{id}` | WebSocket do terminal: binário é digitação e saída; texto é controle |
+| `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
+| `GET` / `POST /v1/perfis` | Listar e criar perfis |
+| `PATCH /v1/perfis/{id}` | Mudar o tema do perfil |
+| `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
+| `GET` / `POST /v1/perfis/{id}/workspaces` | Listar e criar workspaces |
+| `GET /v1/perfis/{id}/projetos` | Projetos do perfil, com o workspace |
+| `POST /v1/workspaces/{id}/projetos` | Adicionar projeto: a pasta é conferida com o git antes de gravar |
+| `DELETE /v1/projetos/{id}` | Tirar o projeto da Colmeia (a pasta não é tocada) |
+| `GET /v1/projetos/{id}/branches` | Branches locais do repositório |
+| `GET` / `POST /v1/projetos/{id}/tarefas` | Listar e criar tarefas |
+| `PATCH` / `DELETE /v1/tarefas/{id}` | Mudar título, coluna ou branch; remover |
 | `POST /v1/demo/carga?modo=` | Só com `--demo`: cargas de teste nos terminais |
 
-Mensagens de controle da tela para o núcleo (JSON): `{"cols":120,"rows":40}` redimensiona, `{"ack":65536}` confirma o que foi desenhado e `{"intervalo":250}` muda o ritmo de envio em milissegundos.
+Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
+
+Mensagens de controle da tela para o núcleo no WebSocket (JSON): `{"cols":120,"rows":40}` redimensiona, `{"ack":65536}` confirma o que foi desenhado e `{"intervalo":250}` muda o ritmo de envio em milissegundos.
+
+## Dados
+
+SQLite em `~/.local/share/colmeia/colmeia.db` (modo WAL, diretório 0700). Tabelas de estado (perfis, contas, workspaces, projetos, tarefas) e uma tabela `eventos` só de acréscimo: cada mudança grava um evento com o hash do anterior, e o núcleo confere a corrente ao iniciar. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
 
 ## Regras de desempenho
 

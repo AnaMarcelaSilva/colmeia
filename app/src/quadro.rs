@@ -15,14 +15,16 @@ const ESPACO: f32 = 10.0;
 
 /// O que o quadro pede para a tela principal fazer.
 pub enum Acao {
-    AbrirTarefa(u32),
+    AbrirTarefa(i64),
     /// Um cartão foi arrastado para outra coluna.
-    Moveu(u32, Coluna),
+    Moveu(i64, Coluna),
+    /// Pediram para remover a tarefa (menu do botão direito).
+    Remover(i64),
 }
 
 /// Identifica o cartão sendo arrastado.
 #[derive(Clone, Copy)]
-struct Arrastando(u32);
+struct Arrastando(i64);
 
 fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
     let avisos = [t.motivo.is_some(), t.erro.is_some()].iter().filter(|a| **a).count() as f32;
@@ -34,13 +36,13 @@ fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
 pub fn mostrar(
     ui: &mut egui::Ui,
     tarefas: &mut Vec<Tarefa>,
-    projeto: Option<&str>,
+    projeto: Option<i64>,
     filtro: Option<&str>,
     terminais: &[TerminalAgente],
 ) -> Vec<Acao> {
     let mut acoes = Vec::new();
     let com_projeto = projeto.is_none();
-    let mut mover: Option<(u32, Coluna)> = None;
+    let mut mover: Option<(i64, Coluna)> = None;
 
     let area = ui.available_rect_before_wrap();
     let largura = (area.width() - 4.0 * 10.0) / 5.0;
@@ -58,7 +60,7 @@ pub fn mostrar(
         let visiveis: Vec<usize> = tarefas
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.coluna == coluna && projeto.is_none_or(|p| t.projeto == p) && filtro.is_none_or(|b| t.branch == b))
+            .filter(|(_, t)| t.coluna == coluna && projeto.is_none_or(|p| t.projeto_id == p) && filtro.is_none_or(|b| t.branch == b))
             .map(|(i, _)| i)
             .collect();
 
@@ -148,7 +150,7 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
     let largura = rect.width() - 28.0;
     let mut y = rect.top() + 12.0;
     if com_projeto {
-        linha_cortada(pintor, pos2(x, y), t.projeto, FontId::proportional(11.5), p.suave, largura);
+        linha_cortada(pintor, pos2(x, y), &t.projeto, FontId::proportional(11.5), p.suave, largura);
         y += 16.0;
     }
     linha_cortada(pintor, pos2(x, y), &t.titulo, forte(13.5), p.texto, largura);
@@ -158,7 +160,7 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
     let numero = pintor.layout_no_wrap(format!("#{}", t.id), FontId::proportional(11.5), p.suave);
     let largura_numero = numero.size().x;
     pintor.galley(pos2(x, y + 2.0), numero, p.suave);
-    let branch = pintor.layout_no_wrap(t.branch.to_owned(), FontId::monospace(11.0), p.destaque);
+    let branch = pintor.layout_no_wrap(t.branch.clone(), FontId::monospace(11.0), p.destaque);
     let etiqueta = Rect::from_min_size(pos2(x + largura_numero + 8.0, y), vec2(branch.size().x + 12.0, 19.0));
     pintor.rect_filled(etiqueta, 6.0, p.destaque.gamma_multiply(0.14));
     pintor.galley(etiqueta.center() - branch.size() / 2.0, branch, p.destaque);
@@ -186,7 +188,8 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
 
     // Registrado depois do conteúdo para ficar por cima e receber clique e arrasto.
     let resposta = ui.interact(rect, Id::new(("cartao", t.id)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    if resposta.drag_started() {
+    // Só o botão esquerdo arrasta; o direito abre o menu do cartão.
+    if resposta.drag_started_by(egui::PointerButton::Primary) {
         DragAndDrop::set_payload(ui.ctx(), Arrastando(t.id));
     }
 
@@ -201,5 +204,17 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
         linha_cortada(&pintor, fantasma.left_center() + vec2(14.0, -9.0), &t.titulo, forte(13.5), p.texto, fantasma.width() - 28.0);
     }
 
-    resposta.clicked().then_some(Acao::AbrirTarefa(t.id))
+    let mut acao = resposta.clicked().then_some(Acao::AbrirTarefa(t.id));
+    resposta.context_menu(|ui| {
+        ui.set_min_width(200.0);
+        if crate::tema::opcao_menu(ui, "Abrir tarefa", false) {
+            acao = Some(Acao::AbrirTarefa(t.id));
+            ui.close();
+        }
+        if crate::tema::opcao_menu(ui, "Remover tarefa…", false) {
+            acao = Some(Acao::Remover(t.id));
+            ui.close();
+        }
+    });
+    acao
 }

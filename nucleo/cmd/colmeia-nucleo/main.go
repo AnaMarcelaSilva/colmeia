@@ -17,17 +17,23 @@ import (
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/api"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
 const versao = "0.1.0"
 
 func main() {
-	quantidade := flag.Int("terminais", 10, "quantidade de terminais")
-	modoDemo := flag.Bool("demo", false, "liga as cargas de teste (escrevem comandos nos terminais)")
+	quantidade := flag.Int("terminais", 10, "quantidade de terminais de teste no modo demonstração")
+	modoDemo := flag.Bool("demo", false, "modo demonstração: terminais de teste e cargas que escrevem comandos neles")
 	flag.Parse()
 	if *quantidade < 1 || *quantidade > 64 {
 		log.Fatal("--terminais precisa estar entre 1 e 64")
+	}
+	// Fora da demonstração não há terminais de teste: os agentes de verdade
+	// ganham terminal quando forem adicionados a uma tarefa.
+	if !*modoDemo {
+		*quantidade = 0
 	}
 
 	listener, token, fechar, err := canal.Abrir()
@@ -38,6 +44,20 @@ func main() {
 		log.Fatalf("abrindo o canal local: %v", err)
 	}
 	defer fechar()
+
+	dirDados, err := dados.Diretorio()
+	if err != nil {
+		log.Fatalf("sem diretório de dados: %v", err)
+	}
+	banco, err := dados.Abrir(dirDados)
+	if err != nil {
+		log.Fatalf("abrindo os dados: %v", err)
+	}
+	defer banco.Fechar()
+	if err := banco.VerificarHistorico(context.Background()); err != nil {
+		// Não impede o uso, mas avisa: alguém mexeu no histórico por fora.
+		log.Printf("atenção: %v", err)
+	}
 
 	var bytes atomic.Int64
 	pasta, _ := os.UserHomeDir()
@@ -53,7 +73,7 @@ func main() {
 		go s.Ler()
 	}
 
-	servidor := &api.Servidor{Sessoes: sessoes, Bytes: &bytes, Versao: versao, Demo: *modoDemo}
+	servidor := &api.Servidor{Sessoes: sessoes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados}
 	servidorHTTP := &http.Server{
 		Handler:           canal.ExigirToken(token, servidor.Rotas()),
 		ReadHeaderTimeout: 5 * time.Second,
