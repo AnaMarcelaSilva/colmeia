@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nucleo:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: nucleo/go.mod
+      - name: Formatação
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l nucleo)"
+      - run: go -C nucleo vet ./...
+      - run: go -C nucleo build ./...
+      - name: Testes
+        if: runner.os == 'Linux'
+        run: go -C nucleo test -race ./...
+      - name: Vulnerabilidades conhecidas
+        if: runner.os == 'Linux'
+        run: go -C nucleo run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  app:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Bibliotecas do sistema
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev
+      - run: cargo build --workspace --locked
+      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  dependencias:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

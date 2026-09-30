@@ -1,0 +1,21 @@
+# Rust
+/target/
+
+# Go
+/nucleo/colmeia-nucleo
+/bin/
+
+# Editores e sistema
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Arquivo dos protótipos: só o código entra no repositório
+/arquivo/**/node_modules/
+/arquivo/**/dist/
+/arquivo/**/build/
+/arquivo/**/.dart_tool/
+/arquivo/**/target/
+/arquivo/**/gen/
+/arquivo/**/ephemeral/

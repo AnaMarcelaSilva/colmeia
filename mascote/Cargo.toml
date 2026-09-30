@@ -1,0 +1,12 @@
+[package]
+name = "mascote"
+description = "A abelha-robô da Colmeia, desenhada com formas vetoriais do egui."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eframe.workspace = true

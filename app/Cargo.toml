@@ -1,0 +1,15 @@
+[package]
+name = "colmeia"
+description = "Tela da Colmeia: quadro de tarefas, terminais dos agentes e a abelha."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mascote = { path = "../mascote" }
+alacritty_terminal = "0.26"
+eframe.workspace = true
+tungstenite = "0.30"

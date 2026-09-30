@@ -1,0 +1,59 @@
+:root {
+  --fundo: #0b0d10;
+  --painel: #14171c;
+  --borda: #262a33;
+  --texto: #d7dae0;
+  --suave: #8a90a0;
+  --destaque: #c792ea;
+  --ok: #7fd18b;
+  font-family: Inter, 'Segoe UI', Ubuntu, sans-serif;
+  font-size: 13px;
+  color: var(--texto);
+  background: var(--fundo);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+.app { display: grid; grid-template-columns: 200px 1fr; height: 100vh; overflow: hidden; }
+
+.lateral { background: var(--painel); border-right: 1px solid var(--borda); padding: 16px 12px; }
+.marca { font-weight: 700; margin-bottom: 20px; color: var(--destaque); }
+.grupo { font-weight: 600; margin: 8px 0 4px; }
+.subgrupo { color: var(--suave); margin: 4px 0 8px 8px; }
+.projeto { padding: 6px 8px 6px 16px; border-radius: 6px; color: var(--suave); }
+.projeto.ativo { background: #1f2430; color: var(--texto); }
+.projeto.novo { color: var(--destaque); }
+
+.principal { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+.topo { display: flex; align-items: center; gap: 24px; padding: 10px 16px; border-bottom: 1px solid var(--borda); }
+.caminho { display: flex; align-items: center; gap: 6px; flex: 1; }
+.caminho span { color: var(--suave); }
+.chip { margin-left: 12px; background: #1f2430; border: 1px solid var(--borda); border-radius: 12px; padding: 2px 10px; }
+
+.medidor { display: flex; gap: 16px; color: var(--suave); font-variant-numeric: tabular-nums; }
+.medidor b { color: var(--texto); }
+
+.cargas { display: flex; gap: 6px; }
+.cargas button { background: transparent; border: 1px solid var(--borda); border-radius: 6px; padding: 4px 10px; }
+.cargas button.ligado { border-color: var(--destaque); color: var(--destaque); }
+
+.tarefa { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px 4px; }
+.tarefa h1 { font-size: 15px; margin: 0; }
+.coluna { color: var(--ok); }
+.stack { margin-left: auto; color: var(--suave); }
+
+.grade {
+  flex: 1; min-height: 0; padding: 12px 16px 16px;
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.cartao { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--borda); border-radius: 8px; overflow: hidden; background: #0f1115; }
+.cabecalho { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--painel); border-bottom: 1px solid var(--borda); }
+.cabecalho span { color: var(--suave); }
+.cabecalho i { width: 7px; height: 7px; border-radius: 50%; background: var(--suave); }
+.cabecalho i.ativo { background: var(--ok); }
+.terminal { flex: 1; min-height: 0; padding: 4px; }
