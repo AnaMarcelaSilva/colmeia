@@ -56,7 +56,7 @@ func (p ptyUnix) Close() error {
 // quando o terminal muda de tamanho depois.
 func Iniciar(comando []string, env []string, dir string, tamanho Tamanho) (Pty, error) {
 	cmd := exec.Command(comando[0], comando[1:]...)
-	cmd.Env = append(append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor"), env...)
+	cmd.Env = append(append(AmbienteLimpo(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor"), env...)
 	cmd.Dir = dir
 	arquivo, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: tamanho.Colunas, Rows: tamanho.Linhas})
 	if err != nil {

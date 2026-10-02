@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,5 +97,13 @@ func TestFecharPelaColmeiaCongelaOEstado(t *testing.T) {
 	a.saida([]byte("tchau"))
 	if estado, motivo, _ := a.atual(); estado != Aguardando || motivo != EsperandoResposta {
 		t.Errorf("estado depois de congelar: %s (%s)", estado, motivo)
+	}
+}
+
+func TestAmbienteLimpoTiraSoAsVariaveisDeSessao(t *testing.T) {
+	limpo := AmbienteLimpo([]string{"HOME=/casa", "CLAUDECODE=1", "CLAUDE_CODE_CHILD_SESSION=1", "CLAUDE_CODE_MESSAGING_TOKEN=x", "CLAUDE_CONFIG_DIR=/conta", "CLAUDE_CODE_USE_VERTEX=1"})
+	esperado := []string{"HOME=/casa", "CLAUDE_CONFIG_DIR=/conta", "CLAUDE_CODE_USE_VERTEX=1"}
+	if strings.Join(limpo, " ") != strings.Join(esperado, " ") {
+		t.Errorf("ambiente limpo: %v", limpo)
 	}
 }

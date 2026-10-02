@@ -5,6 +5,7 @@ package terminal
 import (
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -280,6 +281,38 @@ func (s *Sessao) Desconectar(c *Cliente) {
 func (s *Sessao) Escrever(dados []byte) (int, error) {
 	s.marcarEntrada()
 	return s.pty.Write(dados)
+}
+
+// Variáveis que um Claude Code põe nos programas que ele abre. Se a Colmeia
+// foi aberta de dentro de um Claude Code, o núcleo herda essas variáveis, e um
+// agente que as recebesse se veria como sessão filha: não guardaria a conversa
+// (não daria para retomar) e falaria com a sessão de fora pelo canal dela.
+var variaveisDeSessao = map[string]bool{
+	"CLAUDECODE":                   true,
+	"AI_AGENT":                     true,
+	"CLAUDE_PID":                   true,
+	"CLAUDE_EFFORT":                true,
+	"CLAUDE_CODE_CHILD_SESSION":    true,
+	"CLAUDE_CODE_SESSION_ID":       true,
+	"CLAUDE_CODE_SESSION_ATTENDED": true,
+	"CLAUDE_CODE_ENTRYPOINT":       true,
+	"CLAUDE_CODE_EXECPATH":         true,
+	"CLAUDE_CODE_SSE_PORT":         true,
+	"CLAUDE_CODE_MESSAGING_SOCKET": true,
+	"CLAUDE_CODE_MESSAGING_TOKEN":  true,
+}
+
+// AmbienteLimpo tira do ambiente as variáveis de sessão de um Claude Code de
+// fora. As de configuração (conta, provedor, modelo) continuam.
+func AmbienteLimpo(ambiente []string) []string {
+	limpo := make([]string, 0, len(ambiente))
+	for _, v := range ambiente {
+		nome, _, _ := strings.Cut(v, "=")
+		if !variaveisDeSessao[nome] {
+			limpo = append(limpo, v)
+		}
+	}
+	return limpo
 }
 
 // Tamanho de um terminal em caracteres.

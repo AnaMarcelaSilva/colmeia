@@ -42,6 +42,8 @@ pub struct TerminalAgente {
     /// Quando houve a última colagem de texto, para não tratar o mesmo Ctrl+V como imagem.
     colou_texto_em: Cell<f64>,
     area: Cell<Option<egui::Rect>>,
+    /// Rolagem da rodinha que ainda não completou uma linha (a rolagem suave chega aos pedaços).
+    rolagem_pendente: Cell<f32>,
 }
 
 /// Tamanho do terminal em foco (colunas << 16 | linhas), ou 0 enquanto nenhum
@@ -106,7 +108,17 @@ impl TerminalAgente {
             encerrado_rede.store(true, Ordering::Relaxed);
             ctx.request_repaint();
         });
-        Self { term, envio, despertador, tamanho, intervalo: Cell::new(intervalo), encerrado, colou_texto_em: Cell::new(0.0), area: Cell::new(None) }
+        Self {
+            term,
+            envio,
+            despertador,
+            tamanho,
+            intervalo: Cell::new(intervalo),
+            encerrado,
+            colou_texto_em: Cell::new(0.0),
+            area: Cell::new(None),
+            rolagem_pendente: Cell::new(0.0),
+        }
     }
 
     fn mandar(&self, msg: ParaNucleo) {
@@ -181,9 +193,35 @@ impl TerminalAgente {
         let linhas = self.tamanho.1;
 
         if resposta.hovered() {
-            let rolagem = ui.input(|i| i.smooth_scroll_delta.y);
-            if rolagem.abs() >= 1.0 {
-                term.scroll_display(Scroll::Delta((rolagem / letra.y).round() as i32));
+            let delta = ui.input(|i| i.smooth_scroll_delta.y);
+            if delta != 0.0 {
+                let total = self.rolagem_pendente.get() + delta / letra.y;
+                let passos = total.trunc() as i32;
+                self.rolagem_pendente.set(total - passos as f32);
+                if passos != 0 {
+                    let modo = *term.mode();
+                    if modo.intersects(TermMode::MOUSE_MODE) {
+                        // O programa pediu o mouse (o Claude Code em tela cheia guarda a
+                        // conversa e rola sozinho): a rodinha vai para ele, na célula do ponteiro.
+                        let ponteiro = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.min);
+                        let coluna = ((ponteiro.x - rect.min.x - margem) / letra.x).max(0.0) as usize;
+                        let linha = ((ponteiro.y - rect.min.y - margem) / letra.y).max(0.0) as usize;
+                        let celula = (coluna.min(self.tamanho.0 - 1) + 1, linha.min(self.tamanho.1 - 1) + 1);
+                        let seq = rodinha(passos, celula, modo.contains(TermMode::SGR_MOUSE));
+                        self.mandar(ParaNucleo::Digitacao(seq));
+                    } else if modo.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+                        // Tela cheia sem mouse (less, man): a rodinha vira setas, como nos terminais comuns.
+                        let seta: &[u8] = match (passos > 0, modo.contains(TermMode::APP_CURSOR)) {
+                            (true, false) => b"\x1b[A",
+                            (true, true) => b"\x1bOA",
+                            (false, false) => b"\x1b[B",
+                            (false, true) => b"\x1bOB",
+                        };
+                        self.mandar(ParaNucleo::Digitacao(seta.repeat(passos.unsigned_abs().min(10) as usize)));
+                    } else {
+                        term.scroll_display(Scroll::Delta(passos));
+                    }
+                }
             }
         }
         // O terminal só recebe o teclado depois de clicado, como qualquer campo de
@@ -382,6 +420,20 @@ fn sequencia(tecla: egui::Key, m: egui::Modifiers, cursor_de_aplicacao: bool) ->
         _ => return None,
     };
     Some(seq)
+}
+
+/// Rodinha do mouse para um programa que pediu o mouse: `passos` positivos sobem.
+/// Uma sequência por passo, até 10 por quadro, no formato SGR quando o programa
+/// pediu (o Claude Code pede) ou no formato antigo do xterm.
+fn rodinha(passos: i32, (coluna, linha): (usize, usize), sgr: bool) -> Vec<u8> {
+    let botao: u8 = if passos > 0 { 64 } else { 65 };
+    let um = if sgr {
+        format!("\x1b[<{botao};{coluna};{linha}M").into_bytes()
+    } else {
+        // O formato antigo soma 32 e não passa da coluna 223.
+        vec![0x1b, b'[', b'M', 32 + botao, (32 + coluna.min(223)) as u8, (32 + linha.min(223)) as u8]
+    };
+    um.repeat(passos.unsigned_abs().min(10) as usize)
 }
 
 /// Texto colado ou enviado com várias linhas vai como "colagem" (bracketed paste):
@@ -612,6 +664,14 @@ mod testes {
     fn varias_linhas_vao_como_um_bloco_colado() {
         // Sem o bracketed paste, cada linha seria executada separadamente.
         assert_eq!(colagem("linha um\nlinha dois"), b"\x1b[200~linha um\nlinha dois\x1b[201~");
+    }
+
+    #[test]
+    fn rodinha_vai_para_o_programa_que_pediu_o_mouse() {
+        assert_eq!(rodinha(1, (10, 5), true), b"\x1b[<64;10;5M");
+        assert_eq!(rodinha(-2, (1, 1), true), b"\x1b[<65;1;1M\x1b[<65;1;1M");
+        assert_eq!(rodinha(1, (300, 5), false), vec![0x1b, b'[', b'M', 96, 255, 37]);
+        assert_eq!(rodinha(50, (1, 1), true).len(), 10 * b"\x1b[<64;1;1M".len());
     }
 
     #[test]
