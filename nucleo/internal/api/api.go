@@ -150,6 +150,11 @@ func (s *Servidor) transmitir(w http.ResponseWriter, r *http.Request, sessao *te
 	defer conn.CloseNow()
 	conn.SetReadLimit(limiteMensagem)
 
+	// A tela informa o tamanho já na conexão, para o programa redesenhar
+	// nele antes de o histórico ser enviado.
+	colunas, _ := strconv.ParseUint(r.URL.Query().Get("cols"), 10, 16)
+	linhas, _ := strconv.ParseUint(r.URL.Query().Get("rows"), 10, 16)
+	sessao.Redimensionar(uint16(colunas), uint16(linhas))
 	cliente, historico := sessao.Conectar(intervalo)
 	defer sessao.Desconectar(cliente)
 

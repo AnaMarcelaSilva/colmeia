@@ -282,10 +282,29 @@ func (s *Sessao) Escrever(dados []byte) (int, error) {
 	return s.pty.Write(dados)
 }
 
+// Tamanho de um terminal em caracteres.
+type Tamanho struct{ Colunas, Linhas uint16 }
+
+// TamanhoPadrao é o tamanho de quando a tela não informa o dela.
+var TamanhoPadrao = Tamanho{Colunas: 80, Linhas: 24}
+
+// Valido diz se o tamanho é plausível.
+func (t Tamanho) Valido() bool {
+	return t.Colunas > 0 && t.Linhas > 0 && t.Colunas <= MaxColunas && t.Linhas <= MaxLinhas
+}
+
+// OuPadrao devolve o tamanho, ou o padrão se ele não for plausível.
+func (t Tamanho) OuPadrao() Tamanho {
+	if t.Valido() {
+		return t
+	}
+	return TamanhoPadrao
+}
+
 // Redimensionar aceita só tamanhos plausíveis. O programa redesenha a tela
 // depois, e isso também não conta como trabalho.
 func (s *Sessao) Redimensionar(colunas, linhas uint16) {
-	if colunas == 0 || linhas == 0 || colunas > MaxColunas || linhas > MaxLinhas {
+	if !(Tamanho{colunas, linhas}).Valido() {
 		return
 	}
 	s.marcarEntrada()

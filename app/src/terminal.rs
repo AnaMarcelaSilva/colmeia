@@ -2,7 +2,7 @@
 //! o alacritty_terminal interpreta a saída e o egui desenha a grade.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -44,6 +44,41 @@ pub struct TerminalAgente {
     area: Cell<Option<egui::Rect>>,
 }
 
+/// Tamanho do terminal em foco (colunas << 16 | linhas), ou 0 enquanto nenhum
+/// foi medido. Só o terminal em foco decide o tamanho do terminal no núcleo:
+/// um programa como o Claude Code redesenha a cada mudança de tamanho, e um
+/// desenho feito em outra largura fica embaralhado.
+static TAMANHO_EM_FOCO: AtomicU32 = AtomicU32::new(0);
+
+/// O tamanho em que um terminal novo deve nascer, se a tela já sabe.
+pub fn tamanho_em_foco() -> Option<(u16, u16)> {
+    match TAMANHO_EM_FOCO.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(((v >> 16) as u16, v as u16)),
+    }
+}
+
+fn guardar_tamanho_em_foco(colunas: usize, linhas: usize) {
+    TAMANHO_EM_FOCO.store(((colunas.min(u16::MAX as usize) as u32) << 16) | linhas.min(u16::MAX as usize) as u32, Ordering::Relaxed);
+}
+
+const MARGEM: f32 = 4.0;
+
+/// Quantas colunas e linhas cabem em `rect` com a fonte do terminal.
+fn grade(ui: &egui::Ui, rect: egui::Rect, tamanho_fonte: f32) -> (usize, usize, egui::Vec2) {
+    let letra = ui.painter().layout_no_wrap("M".into(), FontId::monospace(tamanho_fonte), cores().terminal_texto).size();
+    let colunas = (((rect.width() - 2.0 * MARGEM) / letra.x) as usize).max(10);
+    let linhas = (((rect.height() - 2.0 * MARGEM) / letra.y) as usize).max(3);
+    (colunas, linhas, letra)
+}
+
+/// Calcula o tamanho do terminal em foco antes de ele existir (a tarefa ainda
+/// não tem agente), para o primeiro agente já nascer do tamanho certo.
+pub fn estimar_em_foco(ui: &egui::Ui, rect: egui::Rect, tamanho_fonte: f32) {
+    let (colunas, linhas, _) = grade(ui, rect, tamanho_fonte);
+    guardar_tamanho_em_foco(colunas, linhas);
+}
+
 /// Ritmos de atualização pedidos ao núcleo, em milissegundos.
 pub const TEMPO_REAL: u32 = 16;
 pub const MINIATURA: u32 = 250;
@@ -53,7 +88,13 @@ impl TerminalAgente {
     /// Liga a tela ao terminal do núcleo em `caminho` (o WebSocket de um agente
     /// ou, na demonstração, de um terminal de teste).
     pub fn conectar(caminho: String, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32) -> Self {
-        let tamanho = (80, 24);
+        // Nasce no tamanho do terminal em foco, que a conexão também informa ao
+        // núcleo: o histórico chega desenhado na largura certa.
+        let tamanho = tamanho_em_foco().map_or((80, 24), |(c, l)| (c as usize, l as usize));
+        let caminho = match tamanho_em_foco() {
+            Some((c, l)) => format!("{caminho}?cols={c}&rows={l}"),
+            None => format!("{caminho}?"),
+        };
         let term = Arc::new(Mutex::new(Term::new(Config { scrolling_history: 1000, ..Config::default() }, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
         let (envio, recebimento) = mpsc::channel();
         let term_rede = term.clone();
@@ -116,24 +157,28 @@ impl TerminalAgente {
         String::new()
     }
 
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, tamanho_fonte: f32) -> egui::Response {
+    /// Desenha o terminal. Só o terminal `em_foco` muda o tamanho do terminal
+    /// no núcleo; uma miniatura mostra a mesma grade com letra menor, cortada.
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, tamanho_fonte: f32, em_foco: bool) -> egui::Response {
         let (rect, resposta) = ui.allocate_exact_size(ui.available_size(), Sense::click());
         self.area.set(Some(rect));
         let pintor = ui.painter_at(rect);
         pintor.rect_filled(rect, 0.0, cores().terminal_fundo);
 
         let fonte = FontId::monospace(tamanho_fonte);
-        let letra = pintor.layout_no_wrap("M".into(), fonte.clone(), cores().terminal_texto).size();
-        let margem = 4.0;
-        let colunas = (((rect.width() - 2.0 * margem) / letra.x) as usize).max(10);
-        let linhas = (((rect.height() - 2.0 * margem) / letra.y) as usize).max(3);
+        let margem = MARGEM;
+        let (colunas, linhas, letra) = grade(ui, rect, tamanho_fonte);
 
         let mut term = self.term.lock().unwrap();
-        if (colunas, linhas) != self.tamanho {
-            self.tamanho = (colunas, linhas);
-            term.resize(TermSize::new(colunas, linhas));
-            self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+        if em_foco {
+            guardar_tamanho_em_foco(colunas, linhas);
+            if (colunas, linhas) != self.tamanho {
+                self.tamanho = (colunas, linhas);
+                term.resize(TermSize::new(colunas, linhas));
+                self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+            }
         }
+        let linhas = self.tamanho.1;
 
         if resposta.hovered() {
             let rolagem = ui.input(|i| i.smooth_scroll_delta.y);
@@ -437,7 +482,7 @@ fn conexao(
     use std::io::{ErrorKind, Read};
     use std::os::fd::AsRawFd;
 
-    let mut socket = match canal::websocket(&format!("{caminho}?intervalo={intervalo}")) {
+    let mut socket = match canal::websocket(&format!("{caminho}&intervalo={intervalo}")) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("terminal {caminho}: {e}");

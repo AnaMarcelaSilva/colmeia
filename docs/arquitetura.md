@@ -86,6 +86,8 @@ Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). P
 
 ### Terminais
 
+O terminal de um agente nasce no tamanho que a tela informa ao criar ou iniciar o agente (`cols` e `rows` no corpo), e a tela repete o tamanho ao conectar (`?cols=&rows=`), antes do histórico: um programa como o Claude Code desenha logo ao abrir, e um desenho feito em outra largura fica embaralhado. Só o terminal em foco muda o tamanho; as miniaturas mostram a mesma grade com letra menor.
+
 Mensagens de controle da tela para o núcleo no WebSocket (JSON): `{"cols":120,"rows":40}` redimensiona, `{"ack":65536}` confirma o que foi desenhado e `{"intervalo":250}` muda o ritmo de envio em milissegundos. Do núcleo para a tela, `{"fim":true}` avisa que o programa do terminal terminou.
 
 ## Agentes

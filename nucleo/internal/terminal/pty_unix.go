@@ -51,11 +51,14 @@ func (p ptyUnix) Close() error {
 // Iniciar abre um pseudo-terminal rodando `comando` na pasta `dir`, com as
 // variáveis `env` somadas às do núcleo. O programa vira líder de uma sessão
 // própria (e de um grupo de processos), com o terminal como controlador.
-func Iniciar(comando []string, env []string, dir string) (Pty, error) {
+// O terminal já nasce no tamanho da tela: um programa como o Claude Code
+// desenha logo ao abrir, e um desenho feito em outra largura fica embaralhado
+// quando o terminal muda de tamanho depois.
+func Iniciar(comando []string, env []string, dir string, tamanho Tamanho) (Pty, error) {
 	cmd := exec.Command(comando[0], comando[1:]...)
 	cmd.Env = append(append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor"), env...)
 	cmd.Dir = dir
-	arquivo, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+	arquivo, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: tamanho.Colunas, Rows: tamanho.Linhas})
 	if err != nil {
 		return nil, err
 	}

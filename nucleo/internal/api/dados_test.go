@@ -248,3 +248,52 @@ func TestContaSeparadaSoParaQuemPermite(t *testing.T) {
 		t.Errorf("Gemini com conta separada: status %d, esperado 400", status)
 	}
 }
+
+// O terminal do agente nasce no tamanho que a tela pediu, e a conexão da tela
+// ajusta o tamanho antes de enviar o histórico.
+func TestAgenteNasceNoTamanhoDaTela(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/workspaces", map[string]string{"nome": "W"})
+	pedir(t, "POST", srv.URL+"/v1/workspaces/1/projetos", map[string]string{"nome": "clientes", "caminho": t.TempDir()})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Analisar"})
+	status, agente := pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]any{"ferramenta": "shell", "papel": "dev", "cols": 173, "rows": 41})
+	if status != http.StatusOK {
+		t.Fatalf("criar agente: status %d, %v", status, agente)
+	}
+
+	tamanho := func(consulta, marca string) string {
+		ctx, cancelar := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelar()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/agentes/1/terminal"+consulta, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseNow()
+		// A marca é montada pelo shell (${X} é vazio), para não casar com o eco do comando.
+		conn.Write(ctx, websocket.MessageBinary, []byte("echo "+marca[:1]+"${X}"+marca[1:]+"=$(stty size)=\r"))
+		var saida strings.Builder
+		for {
+			_, dados, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("lendo o terminal: %v (até aqui: %q)", err, saida.String())
+			}
+			saida.Write(dados)
+			if _, resto, ok := strings.Cut(saida.String(), marca+"="); ok {
+				if valor, _, ok := strings.Cut(resto, "="); ok {
+					return valor
+				}
+			}
+		}
+	}
+	if got := tamanho("", "UM"); got != "41 173" {
+		t.Errorf("o terminal nasceu com %q, esperado \"41 173\"", got)
+	}
+	if got := tamanho("?cols=120&rows=30", "DOIS"); got != "30 120" {
+		t.Errorf("a conexão não ajustou o tamanho: %q", got)
+	}
+	if got := tamanho("?cols=99999&rows=30", "TRES"); got != "30 120" {
+		t.Errorf("um tamanho absurdo mudou o terminal: %q", got)
+	}
+}

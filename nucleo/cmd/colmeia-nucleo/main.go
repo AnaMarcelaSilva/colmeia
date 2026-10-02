@@ -83,7 +83,7 @@ func main() {
 	sessoes := make([]*terminal.Sessao, 0, *quantidade)
 	for i := range *quantidade {
 		prompt := fmt.Sprintf("PS1=\\[\\e[35m\\]agente-%d\\[\\e[0m\\] \\w $ ", i)
-		pty, err := terminal.Iniciar([]string{"bash", "--noprofile", "--norc"}, []string{prompt}, pasta)
+		pty, err := terminal.Iniciar([]string{"bash", "--noprofile", "--norc"}, []string{prompt}, pasta, terminal.TamanhoPadrao)
 		if err != nil {
 			log.Fatalf("abrindo terminal %d: %v", i, err)
 		}

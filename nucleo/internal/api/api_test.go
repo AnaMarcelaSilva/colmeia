@@ -20,7 +20,7 @@ func servidorDeTeste(t *testing.T, demo bool) *httptest.Server {
 	t.Helper()
 	var bytes atomic.Int64
 	// `cat` devolve o que recebe: dá para conferir a ida e a volta.
-	pty, err := terminal.Iniciar([]string{"cat"}, nil, t.TempDir())
+	pty, err := terminal.Iniciar([]string{"cat"}, nil, t.TempDir(), terminal.TamanhoPadrao)
 	if err != nil {
 		t.Fatal(err)
 	}

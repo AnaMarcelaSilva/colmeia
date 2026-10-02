@@ -417,12 +417,24 @@ pub fn contas(perfil: i64) -> Result<Vec<Conta>, String> {
 }
 
 /// Cria o agente e abre o terminal dele. `sessao` retoma uma conversa do Claude Code.
+/// O terminal do agente nasce do tamanho do terminal em foco na tela, se ela já sabe.
+fn tamanho() -> serde_json::Value {
+    match crate::terminal::tamanho_em_foco() {
+        Some((cols, rows)) => json!({ "cols": cols, "rows": rows }),
+        None => json!({}),
+    }
+}
+
 pub fn criar_agente(tarefa: i64, ferramenta: &str, papel: &str, sessao: &str) -> Result<Agente, String> {
-    chamar("POST", &format!("/v1/tarefas/{tarefa}/agentes"), Some(json!({ "ferramenta": ferramenta, "papel": papel, "sessao": sessao })))
+    let mut corpo = tamanho();
+    corpo["ferramenta"] = json!(ferramenta);
+    corpo["papel"] = json!(papel);
+    corpo["sessao"] = json!(sessao);
+    chamar("POST", &format!("/v1/tarefas/{tarefa}/agentes"), Some(corpo))
 }
 
 pub fn iniciar_agente(agente: i64) -> Result<Agente, String> {
-    chamar("POST", &format!("/v1/agentes/{agente}/iniciar"), None)
+    chamar("POST", &format!("/v1/agentes/{agente}/iniciar"), Some(tamanho()))
 }
 
 pub fn remover_agente(agente: i64) -> Result<(), String> {

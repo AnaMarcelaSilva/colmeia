@@ -1129,6 +1129,11 @@ impl Colmeia {
             return;
         }
         if agentes.is_empty() {
+            // Onde o terminal do primeiro agente vai aparecer: a área toda menos
+            // a caixa de mensagem e o cabeçalho do cartão do agente.
+            let area = ui.available_rect_before_wrap();
+            let terminal = egui::Rect::from_min_max(area.min + egui::vec2(1.5, 40.0), area.max - egui::vec2(1.5, self.compositor.altura() + 10.0 + 8.0));
+            terminal::estimar_em_foco(ui, terminal, 13.0);
             self.sem_agentes(ui, id, &pasta);
             return;
         }
@@ -1294,7 +1299,7 @@ impl Colmeia {
                 }
                 match self.terminais.get_mut(&agente.id) {
                     Some(t) => {
-                        if t.mostrar(ui, fonte).clicked() && !focado {
+                        if t.mostrar(ui, fonte, focado).clicked() && !focado {
                             pedido = Some(Pedido::Focar(agente.id));
                         }
                     }

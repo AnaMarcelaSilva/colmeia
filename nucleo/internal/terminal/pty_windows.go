@@ -5,6 +5,6 @@ package terminal
 import "errors"
 
 // No Windows os terminais vão usar ConPTY (ainda não feito).
-func Iniciar(comando []string, env []string, dir string) (Pty, error) {
+func Iniciar(comando []string, env []string, dir string, tamanho Tamanho) (Pty, error) {
 	return nil, errors.New("terminais no Windows ainda não implementados (ConPTY)")
 }

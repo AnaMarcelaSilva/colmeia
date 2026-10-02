@@ -186,7 +186,7 @@ func TestCodigoDeSaidaEQuemFechou(t *testing.T) {
 	}
 	var bytes atomic.Int64
 	abrir := func(id int64, comando ...string) *Sessao {
-		pty, err := Iniciar(comando, nil, t.TempDir())
+		pty, err := Iniciar(comando, nil, t.TempDir(), TamanhoPadrao)
 		if err != nil {
 			t.Fatal(err)
 		}

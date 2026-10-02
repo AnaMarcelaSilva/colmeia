@@ -95,7 +95,11 @@ func (s *Servidor) criarAgente(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	var pedido struct{ Ferramenta, Papel, Sessao string }
+	// Cols e Rows: o tamanho em que a tela vai mostrar o terminal.
+	var pedido struct {
+		Ferramenta, Papel, Sessao string
+		Cols, Rows                uint16
+	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
 		return
@@ -112,7 +116,7 @@ func (s *Servidor) criarAgente(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	if err := s.abrirTerminal(r.Context(), agente); err != nil {
+	if err := s.abrirTerminal(r.Context(), agente, terminal.Tamanho{Colunas: pedido.Cols, Linhas: pedido.Rows}); err != nil {
 		s.Banco.RemoverAgente(context.WithoutCancel(r.Context()), agente.ID)
 		responderErro(w, err)
 		return
@@ -131,8 +135,16 @@ func (s *Servidor) iniciarAgente(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	// O corpo é opcional: só o tamanho em que a tela vai mostrar o terminal.
+	var pedido struct{ Cols, Rows uint16 }
+	if r.ContentLength != 0 {
+		if err := ler(r, &pedido); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
 	if !s.Agentes.Ativa(id) {
-		if err := s.abrirTerminal(r.Context(), agente); err != nil {
+		if err := s.abrirTerminal(r.Context(), agente, terminal.Tamanho{Colunas: pedido.Cols, Linhas: pedido.Rows}); err != nil {
 			responderErro(w, err)
 			return
 		}
@@ -219,7 +231,7 @@ func (s *Servidor) pastaSeparada(ctx context.Context, perfil int64, ferramenta s
 // abrirTerminal inicia a ferramenta do agente na pasta da tarefa, com a conta
 // do perfil. Nada vem da tela direto para a linha de comando: a ferramenta é
 // uma da lista, e a conversa, um id já conferido.
-func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente) error {
+func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho terminal.Tamanho) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.Agentes.Ativa(a.ID) {
@@ -274,7 +286,7 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente) error {
 	if err != nil {
 		return err
 	}
-	pty, err := terminal.Iniciar(comando, env, pasta)
+	pty, err := terminal.Iniciar(comando, env, pasta, tamanho.OuPadrao())
 	if err != nil {
 		return fmt.Errorf("abrindo o terminal: %w", err)
 	}
