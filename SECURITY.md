@@ -13,6 +13,11 @@ A Colmeia controla terminais onde agentes de IA rodam comandos. Quem conseguir f
 | Uma tela com defeito ou maliciosa | Esgotar memória ou travar o núcleo | Mensagens de até 1 MB, tamanho de terminal limitado, ritmo de envio entre 8 ms e 5 s, controle de fluxo |
 | Um pedido com dados maliciosos | Injetar comandos no git ou SQL | O git roda sem shell, com os argumentos direto no executável e sem pedir senha; nomes de branch que pareçam opção (`--algo`) são recusados; o SQL usa só parâmetros; o JSON recusa campos desconhecidos e corpos acima de 64 KB |
 | Outro usuário da máquina | Ler projetos, tarefas ou imagens coladas | Dados em `~/.local/share/colmeia` (0700), banco e imagens coladas com permissão 0600 |
+| Um pedido para abrir agente | Rodar outro programa ou passar opções à ferramenta | A ferramenta é uma de uma lista fixa (ou o shell do usuário), achada no PATH; o id de conversa só passa se tiver a forma de um UUID; nada vai por shell |
+| Um agente que não termina | Deixar processos rodando depois de removido | Cada agente tem sessão e grupo de processos próprios; ao remover, o grupo recebe SIGHUP e, depois de 3 segundos, SIGKILL |
+| Remover uma tarefa com cópia isolada | Perder trabalho que ainda não está num commit | A remoção é recusada se a cópia tiver mudanças fora de um commit, e os agentes continuam rodando |
+
+Para avisar que o Claude Code está aberto na pasta fora da Colmeia, o núcleo lê em `/proc` a pasta e o nome dos processos do próprio usuário (os de outros usuários não são acessíveis); os agentes da Colmeia são reconhecidos pela variável `COLMEIA_AGENTE`. As conversas do Claude Code são só lidas, nunca alteradas.
 
 O histórico de mudanças é encadeado por hash: o núcleo refaz a corrente ao iniciar e avisa se algum evento foi alterado por fora.
 

@@ -254,7 +254,11 @@ impl Entrada {
     }
 
     fn projeto(&mut self, ui: &mut egui::Ui) -> Option<api::Perfil> {
-        tema::cabecalho(ui, "Primeiro projeto", "Passo 3 de 3 · Aponte para a pasta de um repositório git. Dá para pular e adicionar depois.");
+        tema::cabecalho(
+            ui,
+            "Primeiro projeto",
+            "Passo 3 de 3 · Aponte para um repositório git ou qualquer pasta de trabalho. Dá para pular e adicionar depois.",
+        );
         ui.add_space(18.0);
         tema::campo(ui, "Workspace", &mut self.workspace, "Ex.: Empresa X, Curso de Rust");
         ui.add_space(12.0);

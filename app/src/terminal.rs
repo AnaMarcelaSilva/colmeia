@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,7 +14,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use eframe::egui::{self, Color32, FontId, Sense, text::LayoutJob, text::TextFormat};
 use tungstenite::Message;
@@ -37,6 +37,10 @@ pub struct TerminalAgente {
     envio: Sender<ParaNucleo>,
     tamanho: (usize, usize),
     intervalo: Cell<u32>,
+    /// O programa do terminal terminou (ou a conexão caiu).
+    encerrado: Arc<AtomicBool>,
+    /// Quando houve a última colagem de texto, para não tratar o mesmo Ctrl+V como imagem.
+    colou_texto_em: Cell<f64>,
 }
 
 /// Ritmos de atualização pedidos ao núcleo, em milissegundos.
@@ -45,13 +49,25 @@ pub const MINIATURA: u32 = 250;
 pub const SO_CARTAO: u32 = 1000;
 
 impl TerminalAgente {
-    pub fn conectar(id: usize, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32) -> Self {
+    /// Liga a tela ao terminal do núcleo em `caminho` (o WebSocket de um agente
+    /// ou, na demonstração, de um terminal de teste).
+    pub fn conectar(caminho: String, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32) -> Self {
         let tamanho = (80, 24);
         let term = Arc::new(Mutex::new(Term::new(Config { scrolling_history: 1000, ..Config::default() }, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
         let (envio, recebimento) = mpsc::channel();
         let term_rede = term.clone();
-        thread::spawn(move || conexao(id, intervalo, term_rede, recebimento, ctx, bytes));
-        Self { term, envio, tamanho, intervalo: Cell::new(intervalo) }
+        let encerrado = Arc::new(AtomicBool::new(false));
+        let encerrado_rede = encerrado.clone();
+        thread::spawn(move || {
+            conexao(&caminho, intervalo, term_rede, recebimento, &ctx, bytes);
+            encerrado_rede.store(true, Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+        Self { term, envio, tamanho, intervalo: Cell::new(intervalo), encerrado, colou_texto_em: Cell::new(0.0) }
+    }
+
+    pub fn encerrado(&self) -> bool {
+        self.encerrado.load(Ordering::Relaxed)
     }
 
     /// Envia uma mensagem para o agente, como se tivesse sido digitada e seguida de Enter.
@@ -121,7 +137,7 @@ impl TerminalAgente {
             // Tab, setas e Esc vão para o terminal em vez de mover o foco da tela.
             let filtro = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
             ui.memory_mut(|m| m.set_focus_lock_filter(resposta.id, filtro));
-            self.ler_teclado(ui);
+            self.ler_teclado(ui, &mut term);
         }
 
         // Uma linha de texto por linha da tela, juntando trechos da mesma cor.
@@ -171,40 +187,142 @@ impl TerminalAgente {
         resposta
     }
 
-    fn ler_teclado(&self, ui: &egui::Ui) {
+    /// Lê o teclado da tela. Recebe o terminal já travado por quem chama, porque
+    /// o Mutex não pode ser travado duas vezes pela mesma thread.
+    fn ler_teclado(&self, ui: &egui::Ui, term: &mut Term<Ouvinte>) {
+        let cursor_de_aplicacao = term.mode().contains(TermMode::APP_CURSOR);
         let mut saida = Vec::new();
+        let mut rolar: Option<Scroll> = None;
         ui.input(|i| {
+            // Alt + tecla chega como texto; no terminal vira ESC antes da letra.
+            let alt = i.modifiers.alt && !i.modifiers.ctrl;
             for evento in &i.events {
                 match evento {
-                    egui::Event::Text(t) => saida.extend_from_slice(t.as_bytes()),
-                    egui::Event::Paste(t) => saida.extend_from_slice(&colagem(t)),
+                    egui::Event::Text(t) => {
+                        if alt {
+                            saida.push(0x1b);
+                        }
+                        saida.extend_from_slice(t.as_bytes());
+                    }
+                    egui::Event::Paste(t) => {
+                        self.colou_texto_em.set(i.time);
+                        saida.extend_from_slice(&colagem(t));
+                    }
+                    // O egui transforma Ctrl+C e Ctrl+X em copiar e recortar; no terminal
+                    // eles são os de sempre (interromper, e o Ctrl+X dos editores).
+                    egui::Event::Copy => saida.push(0x03),
+                    egui::Event::Cut => saida.push(0x18),
+                    // Ctrl+V sem texto na área de transferência (uma imagem, por exemplo):
+                    // o egui não avisa a colagem, só a tecla solta. O Ctrl+V vai para o
+                    // programa, e o Claude Code lê a imagem da área de transferência.
+                    egui::Event::Key { key: egui::Key::V, pressed: false, modifiers, .. } if modifiers.command && i.time - self.colou_texto_em.get() > 0.5 => {
+                        saida.push(0x16)
+                    }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        use egui::Key::*;
-                        let seq: &[u8] = match key {
-                            C if modifiers.ctrl => b"\x03",
-                            D if modifiers.ctrl => b"\x04",
-                            L if modifiers.ctrl => b"\x0c",
-                            Enter => b"\r",
-                            Backspace => b"\x7f",
-                            Tab => b"\t",
-                            Escape => b"\x1b",
-                            ArrowUp => b"\x1b[A",
-                            ArrowDown => b"\x1b[B",
-                            ArrowRight => b"\x1b[C",
-                            ArrowLeft => b"\x1b[D",
-                            _ => b"",
-                        };
-                        saida.extend_from_slice(seq);
+                        // Shift + PgUp/PgDn rolam o histórico da tela, como nos terminais comuns.
+                        match key {
+                            egui::Key::PageUp if modifiers.shift && !modifiers.ctrl => rolar = Some(Scroll::PageUp),
+                            egui::Key::PageDown if modifiers.shift && !modifiers.ctrl => rolar = Some(Scroll::PageDown),
+                            _ => {
+                                if let Some(seq) = sequencia(*key, *modifiers, cursor_de_aplicacao) {
+                                    saida.extend_from_slice(&seq);
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
             }
         });
+        if let Some(r) = rolar {
+            term.scroll_display(r);
+        }
         if !saida.is_empty() {
-            self.term.lock().unwrap().scroll_display(Scroll::Bottom);
+            term.scroll_display(Scroll::Bottom);
             let _ = self.envio.send(ParaNucleo::Digitacao(saida));
         }
     }
+}
+
+/// O que uma tecla especial manda para o programa do terminal, como num xterm.
+/// Letras e símbolos comuns chegam como texto e não passam por aqui.
+fn sequencia(tecla: egui::Key, m: egui::Modifiers, cursor_de_aplicacao: bool) -> Option<Vec<u8>> {
+    use egui::Key::*;
+    let esc = |resto: &[u8]| [b"\x1b".as_slice(), resto].concat();
+    // Parâmetro de modificadores do xterm: 1 + Shift + 2·Alt + 4·Ctrl.
+    let parametro = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8;
+    let com_alt = |b: Vec<u8>| if m.alt { esc(&b) } else { b };
+
+    if m.ctrl {
+        let nome = tecla.name();
+        if nome.len() == 1 && nome.as_bytes()[0].is_ascii_uppercase() {
+            // Ctrl+letra é o caractere de controle da letra (Ctrl+A = 1 ... Ctrl+Z = 26).
+            return Some(com_alt(vec![nome.as_bytes()[0] - b'A' + 1]));
+        }
+        let controle = match tecla {
+            Space => Some(0x00),
+            OpenBracket => Some(0x1b),
+            Backslash => Some(0x1c),
+            CloseBracket => Some(0x1d),
+            Slash | Minus => Some(0x1f),
+            // Ctrl+Backspace apaga a palavra anterior, como Ctrl+W.
+            Backspace => Some(0x17),
+            _ => None,
+        };
+        if let Some(c) = controle {
+            return Some(com_alt(vec![c]));
+        }
+    }
+
+    let seta = |letra: u8| {
+        if parametro > 1 {
+            format!("\x1b[1;{parametro}{}", letra as char).into_bytes()
+        } else if cursor_de_aplicacao {
+            vec![0x1b, b'O', letra]
+        } else {
+            vec![0x1b, b'[', letra]
+        }
+    };
+    let til = |n: u8| {
+        if parametro > 1 { format!("\x1b[{n};{parametro}~").into_bytes() } else { format!("\x1b[{n}~").into_bytes() }
+    };
+    let funcao = |letra: u8| {
+        if parametro > 1 { format!("\x1b[1;{parametro}{}", letra as char).into_bytes() } else { vec![0x1b, b'O', letra] }
+    };
+
+    let seq = match tecla {
+        // Shift+Enter e Alt+Enter quebram a linha no Claude Code sem enviar.
+        Enter if m.shift || m.alt => esc(b"\r"),
+        Enter => b"\r".to_vec(),
+        Tab if m.shift => b"\x1b[Z".to_vec(),
+        Tab => b"\t".to_vec(),
+        Backspace => com_alt(vec![0x7f]),
+        Escape => vec![0x1b],
+        ArrowUp => seta(b'A'),
+        ArrowDown => seta(b'B'),
+        ArrowRight => seta(b'C'),
+        ArrowLeft => seta(b'D'),
+        Home => seta(b'H'),
+        End => seta(b'F'),
+        Insert => til(2),
+        Delete => til(3),
+        PageUp => til(5),
+        PageDown => til(6),
+        F1 => funcao(b'P'),
+        F2 => funcao(b'Q'),
+        F3 => funcao(b'R'),
+        F4 => funcao(b'S'),
+        F5 => til(15),
+        F6 => til(17),
+        F7 => til(18),
+        F8 => til(19),
+        F9 => til(20),
+        F10 => til(21),
+        F11 => til(23),
+        F12 => til(24),
+        _ => return None,
+    };
+    Some(seq)
 }
 
 /// Texto colado ou enviado com várias linhas vai como "colagem" (bracketed paste):
@@ -248,11 +366,12 @@ fn cor_indexada(i: u8) -> Color32 {
     }
 }
 
-fn conexao(id: usize, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, ctx: egui::Context, bytes: Arc<AtomicU64>) {
-    let mut socket = match canal::websocket(&format!("/v1/terminais/{id}?intervalo={intervalo}")) {
+/// Roda até o programa do terminal terminar ou a conexão cair.
+fn conexao(caminho: &str, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, ctx: &egui::Context, bytes: Arc<AtomicU64>) {
+    let mut socket = match canal::websocket(&format!("{caminho}?intervalo={intervalo}")) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("terminal {id}: {e}");
+            eprintln!("terminal {caminho}: {e}");
             return;
         }
     };
@@ -284,6 +403,8 @@ fn conexao(id: usize, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, recebimen
                 }
                 ctx.request_repaint();
             }
+            // O núcleo avisa quando o programa do terminal termina.
+            Ok(Message::Text(t)) if t.contains(r#""fim":true"#) => return,
             Ok(_) => {}
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(_) => return,
@@ -313,6 +434,30 @@ mod testes {
     fn varias_linhas_vao_como_um_bloco_colado() {
         // Sem o bracketed paste, cada linha seria executada separadamente.
         assert_eq!(colagem("linha um\nlinha dois"), b"\x1b[200~linha um\nlinha dois\x1b[201~");
+    }
+
+    #[test]
+    fn teclas_especiais_seguem_o_xterm() {
+        use egui::{Key, Modifiers};
+        let nada = Modifiers::NONE;
+        let ctrl = Modifiers { ctrl: true, command: true, ..nada };
+        let shift = Modifiers { shift: true, ..nada };
+        let alt = Modifiers { alt: true, ..nada };
+        let s = |k, m| sequencia(k, m, false).unwrap();
+        assert_eq!(s(Key::R, ctrl), vec![0x12]);
+        assert_eq!(s(Key::A, ctrl), vec![0x01]);
+        assert_eq!(s(Key::Tab, shift), b"\x1b[Z");
+        assert_eq!(s(Key::Enter, shift), b"\x1b\r");
+        assert_eq!(s(Key::ArrowRight, ctrl), b"\x1b[1;5C");
+        assert_eq!(s(Key::ArrowUp, nada), b"\x1b[A");
+        assert_eq!(sequencia(Key::ArrowUp, nada, true).unwrap(), b"\x1bOA");
+        assert_eq!(s(Key::Delete, nada), b"\x1b[3~");
+        assert_eq!(s(Key::PageUp, ctrl), b"\x1b[5;5~");
+        assert_eq!(s(Key::F1, nada), b"\x1bOP");
+        assert_eq!(s(Key::F12, nada), b"\x1b[24~");
+        assert_eq!(s(Key::Backspace, alt), b"\x1b\x7f");
+        // Letras sem Ctrl chegam como texto, não por aqui.
+        assert!(sequencia(Key::A, nada, false).is_none());
     }
 
     #[test]

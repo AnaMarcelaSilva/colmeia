@@ -11,22 +11,22 @@ mod dados;
 mod dialogos;
 mod entrada;
 mod quadro;
+mod sistema;
 mod tema;
 mod terminal;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use abelha::Abelha;
 use compositor::Compositor;
-use dados::{Coluna, Projeto, Tarefa};
+use dados::{AgenteTela, Coluna, Projeto, Tarefa};
 use dialogos::{Dialogo, Resultado};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 use mascote::Estado;
 use tema::{cores, texto_forte};
 use terminal::{MINIATURA, SO_CARTAO, TEMPO_REAL, TerminalAgente, pedir_carga};
-
-pub const PAPEIS: [&str; 10] = ["líder", "dev", "dev", "revisor", "testador", "dev", "dev", "revisor", "testador", "dev"];
 
 /// O que está na tela: todos os projetos do perfil ou um projeto. A abelha resume o escopo.
 #[derive(Clone, Copy, PartialEq)]
@@ -47,7 +47,11 @@ impl Escopo {
 enum Tela {
     Entrada(Box<entrada::Entrada>),
     Quadro,
-    Tarefa { id: i64, foco: usize },
+    /// `foco` é o agente em tempo real (0 quando a tarefa não tem agentes).
+    Tarefa {
+        id: i64,
+        foco: i64,
+    },
 }
 
 struct Colmeia {
@@ -62,7 +66,13 @@ struct Colmeia {
     projetos: Vec<Projeto>,
     tarefas: Vec<Tarefa>,
     branches: Vec<String>,
-    terminais: Vec<TerminalAgente>,
+    /// Terminais dos agentes, pelo id do agente (na demonstração, o número do terminal de teste).
+    terminais: HashMap<i64, TerminalAgente>,
+    /// Ferramentas instaladas e contas do perfil, lidas quando precisa.
+    ferramentas: Option<Vec<api::Ferramenta>>,
+    contas: Option<Vec<api::Conta>>,
+    /// Editor para abrir a pasta da tarefa (IntelliJ ou VS Code), se houver.
+    editor: Option<(&'static str, &'static str)>,
     tela: Tela,
     escopo: Escopo,
     dialogo: Option<Dialogo>,
@@ -101,7 +111,10 @@ impl Colmeia {
             projetos: Vec::new(),
             tarefas: Vec::new(),
             branches: Vec::new(),
-            terminais: Vec::new(),
+            terminais: HashMap::new(),
+            ferramentas: None,
+            contas: None,
+            editor: sistema::editor(),
             tela: Tela::Quadro,
             escopo: Escopo::Perfil,
             dialogo: None,
@@ -138,11 +151,13 @@ impl Colmeia {
         {
             t.erro = Some("agente-6 parou: 3 testes falhando");
         }
-        app.terminais = (0..PAPEIS.len()).map(|id| TerminalAgente::conectar(id, cc.egui_ctx.clone(), bytes.clone(), SO_CARTAO)).collect();
+        app.terminais = (0..dados::PAPEIS_DEMO.len() as i64)
+            .map(|id| (id, TerminalAgente::conectar(format!("/v1/terminais/{id}"), cc.egui_ctx.clone(), bytes.clone(), SO_CARTAO)))
+            .collect();
         app.escopo = Escopo::Projeto(1);
         app.carregar_branches();
         if let Some(t) = std::env::var("COLMEIA_TAREFA").ok().and_then(|v| v.parse::<i64>().ok()).and_then(|id| app.tarefas.iter().find(|t| t.id == id)) {
-            app.tela = Tela::Tarefa { id: t.id, foco: t.agentes.first().copied().unwrap_or(0) };
+            app.tela = Tela::Tarefa { id: t.id, foco: t.agentes.first().map_or(0, |a| a.id) };
         }
         app
     }
@@ -172,7 +187,11 @@ impl Colmeia {
         self.perfil = Some(perfil);
         self.filtro = None;
         self.tela = Tela::Quadro;
+        // Os terminais do perfil anterior saem da tela; no núcleo eles continuam rodando.
+        self.terminais.clear();
+        self.contas = None;
         self.recarregar(ctx.input(|i| i.time));
+        self.conectar_agentes(ctx);
         self.escopo = self.projetos.first().map_or(Escopo::Perfil, |p| Escopo::Projeto(p.id));
         self.carregar_branches();
     }
@@ -189,9 +208,16 @@ impl Colmeia {
         }
         let mut tarefas = Vec::new();
         for projeto in &self.projetos {
+            let inicio = tarefas.len();
             match api::tarefas(projeto.id) {
-                Ok(lista) => tarefas.extend(lista.into_iter().map(|t| Tarefa::da_api(t, &projeto.nome))),
+                Ok(lista) => tarefas.extend(lista.into_iter().map(|t| Tarefa::da_api(t, projeto))),
                 Err(e) => self.recado = Some((format!("Não consegui ler as tarefas de {}: {e}", projeto.nome), agora)),
+            }
+            // Os agentes do projeto vêm de uma vez e são distribuídos pelas tarefas.
+            for a in api::agentes_do_projeto(projeto.id).unwrap_or_default() {
+                if let Some(t) = tarefas[inicio..].iter_mut().find(|t| t.id == a.tarefa_id) {
+                    t.agentes.push(AgenteTela { id: a.id, ferramenta: a.ferramenta, papel: a.papel, ativo: a.ativo });
+                }
             }
         }
         self.tarefas = tarefas;
@@ -199,6 +225,90 @@ impl Colmeia {
             && !self.projetos.iter().any(|p| p.id == id)
         {
             self.escopo = Escopo::Perfil;
+        }
+    }
+
+    /// Liga a tela aos terminais dos agentes que estão rodando no núcleo e
+    /// solta os que não existem mais.
+    fn conectar_agentes(&mut self, ctx: &egui::Context) {
+        if self.demo {
+            return;
+        }
+        let ativos: Vec<i64> = self.tarefas.iter().flat_map(|t| t.agentes.iter().filter(|a| a.ativo).map(|a| a.id)).collect();
+        self.terminais.retain(|id, _| ativos.contains(id));
+        for id in ativos {
+            self.terminais
+                .entry(id)
+                .or_insert_with(|| TerminalAgente::conectar(format!("/v1/agentes/{id}/terminal"), ctx.clone(), self.bytes.clone(), SO_CARTAO));
+        }
+    }
+
+    /// Ferramentas que o perfil pode abrir como agente: as instaladas que o perfil
+    /// escolheu (ou todas as instaladas, se não escolheu nenhuma) e um terminal comum.
+    fn opcoes_de_agente(&mut self) -> Vec<dialogos::Opcao> {
+        let perfil = self.perfil.as_ref().map(|p| p.id);
+        let contas = self.contas.get_or_insert_with(|| perfil.and_then(|p| api::contas(p).ok()).unwrap_or_default());
+        let instaladas = self.ferramentas.get_or_insert_with(|| api::ferramentas().unwrap_or_default());
+        let mut opcoes: Vec<dialogos::Opcao> = instaladas
+            .iter()
+            .filter(|f| f.instalada && (contas.is_empty() || contas.iter().any(|c| c.ferramenta == f.id)))
+            .map(|f| dialogos::Opcao { id: f.id.clone(), nome: f.nome.clone() })
+            .collect();
+        opcoes.push(dialogos::Opcao { id: "shell".into(), nome: "Terminal".into() });
+        opcoes
+    }
+
+    fn adicionar_agente(&mut self, tarefa: i64, retomar: bool) {
+        let Some(t) = self.tarefas.iter().find(|t| t.id == tarefa) else {
+            return;
+        };
+        let pasta = t.pasta.clone();
+        let opcoes = self.opcoes_de_agente();
+        self.dialogo = Some(Dialogo::NovoAgente(dialogos::NovoAgente::new(tarefa, pasta, opcoes, retomar)));
+    }
+
+    /// O agente acabou de ser criado: liga o terminal, põe em foco e, se a
+    /// tarefa estava no Backlog, passa para "Agente trabalhando".
+    fn agente_criado(&mut self, a: api::Agente, ctx: &egui::Context, agora: f64) {
+        let terminal = TerminalAgente::conectar(format!("/v1/agentes/{}/terminal", a.id), ctx.clone(), self.bytes.clone(), TEMPO_REAL);
+        self.terminais.insert(a.id, terminal);
+        let Some(t) = self.tarefas.iter_mut().find(|t| t.id == a.tarefa_id) else {
+            return;
+        };
+        t.agentes.push(AgenteTela { id: a.id, ferramenta: a.ferramenta, papel: a.papel, ativo: true });
+        let estava_no_backlog = t.coluna == Coluna::Backlog;
+        if estava_no_backlog {
+            t.coluna = Coluna::Trabalhando;
+        }
+        self.tela = Tela::Tarefa { id: a.tarefa_id, foco: a.id };
+        if estava_no_backlog {
+            self.mover(a.tarefa_id, Coluna::Trabalhando, agora);
+        }
+    }
+
+    fn iniciar_agente(&mut self, id: i64, ctx: &egui::Context, agora: f64) {
+        match api::iniciar_agente(id) {
+            Ok(_) => {
+                let terminal = TerminalAgente::conectar(format!("/v1/agentes/{id}/terminal"), ctx.clone(), self.bytes.clone(), TEMPO_REAL);
+                self.terminais.insert(id, terminal);
+            }
+            Err(e) => self.avisar(format!("Não consegui iniciar o agente: {e}"), agora),
+        }
+    }
+
+    fn remover_agente(&mut self, id: i64, agora: f64) {
+        if let Err(e) = api::remover_agente(id) {
+            return self.avisar(format!("Não consegui remover o agente: {e}"), agora);
+        }
+        self.terminais.remove(&id);
+        for t in &mut self.tarefas {
+            t.agentes.retain(|a| a.id != id);
+        }
+        if let Tela::Tarefa { id: tarefa, foco } = self.tela
+            && foco == id
+        {
+            let proximo = self.tarefas.iter().find(|t| t.id == tarefa).and_then(|t| t.agentes.first()).map_or(0, |a| a.id);
+            self.tela = Tela::Tarefa { id: tarefa, foco: proximo };
         }
     }
 
@@ -237,10 +347,10 @@ impl Colmeia {
             Tela::Tarefa { id, foco } => (Some(foco), self.tarefas.iter().find(|t| t.id == id)),
             _ => (None, None),
         };
-        for (i, t) in self.terminais.iter().enumerate() {
+        for (&i, t) in &self.terminais {
             let ms = if Some(i) == foco {
                 TEMPO_REAL
-            } else if tarefa.is_some_and(|t| t.agentes.contains(&i)) {
+            } else if tarefa.is_some_and(|t| t.agentes.iter().any(|a| a.id == i)) {
                 MINIATURA
             } else {
                 SO_CARTAO
@@ -250,8 +360,10 @@ impl Colmeia {
     }
 
     fn abrir_tarefa(&mut self, id: i64) {
-        let Some(t) = self.tarefas.iter().find(|t| t.id == id) else { return };
-        let (projeto, foco) = (t.projeto_id, t.agentes.first().copied().unwrap_or(0));
+        let Some(t) = self.tarefas.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let (projeto, foco) = (t.projeto_id, t.agentes.first().map_or(0, |a| a.id));
         if !self.escopo.contem(projeto) {
             self.escopo = Escopo::Projeto(projeto);
             self.carregar_branches();
@@ -262,7 +374,9 @@ impl Colmeia {
     }
 
     fn mover(&mut self, id: i64, coluna: Coluna, agora: f64) {
-        let Some(t) = self.tarefas.iter().find(|t| t.id == id) else { return };
+        let Some(t) = self.tarefas.iter().find(|t| t.id == id) else {
+            return;
+        };
         let projeto = t.projeto_id;
         if !self.demo
             && let Err(e) = api::mover_tarefa(id, coluna.chave())
@@ -387,25 +501,29 @@ impl Colmeia {
 
     /// Barra acima do quadro: filtros à esquerda, "Nova tarefa" à direita.
     fn barra_do_quadro(&mut self, ui: &mut egui::Ui) {
+        // Pasta sem git não tem branches para filtrar.
+        let sem_branches = self.projeto_em_foco().is_some_and(|p| p.sem_git);
         ui.horizontal(|ui| {
             ui.set_height(34.0);
             let valor = self.filtro.clone().unwrap_or_else(|| "todas".into());
-            let resposta = tema::chip(ui, "Branch", &valor, self.filtro.is_some());
-            egui::Popup::menu(&resposta).show(|ui| {
-                ui.set_min_width(240.0);
-                if tema::opcao_menu(ui, "todas", self.filtro.is_none()) {
-                    self.filtro = None;
-                    ui.close();
-                }
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for b in &self.branches {
-                        if tema::opcao_menu(ui, b, self.filtro.as_deref() == Some(b)) {
-                            self.filtro = Some(b.clone());
-                            ui.close();
-                        }
+            let resposta = if sem_branches { None } else { Some(tema::chip(ui, "Branch", &valor, self.filtro.is_some())) };
+            if let Some(resposta) = resposta {
+                egui::Popup::menu(&resposta).show(|ui| {
+                    ui.set_min_width(240.0);
+                    if tema::opcao_menu(ui, "todas", self.filtro.is_none()) {
+                        self.filtro = None;
+                        ui.close();
                     }
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        for b in &self.branches {
+                            if tema::opcao_menu(ui, b, self.filtro.as_deref() == Some(b)) {
+                                self.filtro = Some(b.clone());
+                                ui.close();
+                            }
+                        }
+                    });
                 });
-            });
+            }
             if self.demo {
                 let quantidade = self.tarefas.len().to_string();
                 let resposta = tema::chip(ui, "Cartões", &quantidade, false);
@@ -441,7 +559,7 @@ impl Colmeia {
             ui.allocate_ui(egui::vec2(460.0, 0.0), |ui| {
                 tema::moldura_janela().show(ui, |ui| {
                     ui.set_width(412.0);
-                    tema::cabecalho(ui, "Nenhum projeto ainda", "Adicione a pasta de um repositório git para começar a organizar as tarefas.");
+                    tema::cabecalho(ui, "Nenhum projeto ainda", "Adicione um repositório git ou uma pasta de trabalho para começar a organizar as tarefas.");
                     ui.add_space(16.0);
                     if tema::botao_principal(ui, "Adicionar projeto", true).clicked()
                         && let Some(perfil) = &self.perfil
@@ -455,7 +573,7 @@ impl Colmeia {
 
     fn lateral(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str) -> (Option<egui::Rect>, bool) {
         let p = cores();
-        let rodando = self.carga != "parada";
+        let rodando = !self.demo || self.carga != "parada";
         let (mut caixa_abelha, mut abelha_clicada) = (None, false);
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
@@ -575,74 +693,141 @@ impl Colmeia {
         (caixa_abelha, abelha_clicada)
     }
 
-    fn painel_tarefa(&mut self, ui: &mut egui::Ui, id: i64, foco: usize) {
+    fn painel_tarefa(&mut self, ui: &mut egui::Ui, id: i64, foco: i64, agora: f64) {
         let Some(tarefa) = self.tarefas.iter().find(|t| t.id == id) else {
             self.tela = Tela::Quadro;
             return;
         };
         let agentes = tarefa.agentes.clone();
+        let pasta = tarefa.pasta.clone();
         let p = cores();
-        let mut voltar = false;
+        let (mut voltar, mut novo_agente, mut abrir_editor, mut abrir_pasta) = (false, false, false, false);
         ui.horizontal(|ui| {
             voltar = tema::botao_secundario(ui, "‹ Quadro").clicked();
             ui.add_space(8.0);
             ui.label(texto_forte(&tarefa.titulo, 16.0).color(p.texto));
             ui.label(RichText::new(format!("#{}", tarefa.id)).color(p.suave));
-            ui.label(RichText::new(&tarefa.branch).color(p.destaque).monospace());
+            if tarefa.branch.is_empty() {
+                ui.label(RichText::new("pasta").color(p.suave).monospace());
+            } else {
+                ui.label(RichText::new(&tarefa.branch).color(p.destaque).monospace());
+            }
+            if tarefa.em_copia && !self.demo {
+                ui.label(RichText::new("cópia isolada").color(p.suave)).on_hover_text(&tarefa.pasta);
+            }
             ui.label(RichText::new(tarefa.coluna.nome()).color(p.ok));
             if let Some(erro) = tarefa.erro {
                 ui.label(RichText::new(format!("erro: {erro}")).color(p.erro));
             }
+            if self.demo {
+                return;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                novo_agente = !agentes.is_empty() && tema::botao_principal(ui, "+ Agente", true).clicked();
+                ui.add_space(6.0);
+                abrir_pasta = tema::botao_secundario(ui, "Abrir pasta").on_hover_text(&pasta).clicked();
+                if let Some((nome, _)) = self.editor {
+                    ui.add_space(6.0);
+                    abrir_editor = tema::botao_secundario(ui, &format!("Abrir no {nome}")).on_hover_text(&pasta).clicked();
+                }
+            });
         });
         ui.add_space(8.0);
+        if abrir_editor
+            && let Some((nome, comando)) = self.editor
+            && let Err(e) = sistema::abrir_com(comando, &pasta)
+        {
+            self.avisar(format!("Não consegui abrir o {nome}: {e}"), agora);
+        }
+        if abrir_pasta && let Err(e) = sistema::abrir_pasta(&pasta) {
+            self.avisar(format!("Não consegui abrir a pasta: {e}"), agora);
+        }
+        if novo_agente {
+            self.adicionar_agente(id, false);
+        }
         if voltar || ui.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.ctrl) {
             self.tela = Tela::Quadro;
             return;
         }
         if agentes.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.2);
-                ui.allocate_ui(egui::vec2(500.0, 0.0), |ui| {
-                    tema::moldura_janela().show(ui, |ui| {
-                        ui.set_width(452.0);
-                        tema::cabecalho(
-                            ui,
-                            "Esta tarefa ainda não tem agentes",
-                            "Na próxima versão, \"Adicionar agente\" abre o Claude Code (ou outra ferramenta do perfil) numa cópia isolada do repositório, nesta branch. O terminal e a caixa de mensagem aparecem aqui.",
-                        );
-                    });
-                });
-            });
+            self.sem_agentes(ui, id, &pasta);
             return;
         }
+        let foco = if agentes.iter().any(|a| a.id == foco) { foco } else { agentes[0].id };
 
         let area = ui.available_rect_before_wrap();
-        let outros: Vec<usize> = agentes.iter().copied().filter(|&a| a != foco).collect();
+        let outros: Vec<AgenteTela> = agentes.iter().filter(|a| a.id != foco).cloned().collect();
+        let em_foco = agentes.iter().find(|a| a.id == foco).cloned().expect("o foco é um dos agentes");
         let largura_lateral = if outros.is_empty() { 0.0 } else { (area.width() * 0.3).max(280.0) };
         let coluna = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x - largura_lateral - if outros.is_empty() { 0.0 } else { 10.0 }, area.max.y));
         let principal = egui::Rect::from_min_max(coluna.min, egui::pos2(coluna.max.x, coluna.max.y - self.compositor.altura() - 10.0));
-        self.caixa_terminal(ui, principal, foco, true, 13.0, "tempo real");
+        let mut pedidos = vec![self.caixa_terminal(ui, principal, &em_foco, true, 13.0, "tempo real")];
         let caixa_mensagem = egui::Rect::from_min_max(egui::pos2(coluna.min.x, principal.max.y + 10.0), coluna.max);
-        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco, &PAPEIS) {
+        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco) {
             for agente in envio.destinos {
-                self.terminais[agente].enviar(&envio.texto);
+                if let Some(t) = self.terminais.get(&agente) {
+                    t.enviar(&envio.texto);
+                }
             }
         }
 
         let altura = if outros.is_empty() { 0.0 } else { (area.height() - 10.0 * (outros.len() as f32 - 1.0)) / outros.len() as f32 };
-        for (n, &agente) in outros.iter().enumerate() {
+        for (n, agente) in outros.iter().enumerate() {
             let min = egui::pos2(area.max.x - largura_lateral, area.min.y + n as f32 * (altura + 10.0));
             let caixa = egui::Rect::from_min_size(min, egui::vec2(largura_lateral, altura));
-            if self.caixa_terminal(ui, caixa, agente, false, 10.0, "miniatura · clique para focar") {
-                self.tela = Tela::Tarefa { id, foco: agente };
+            pedidos.push(self.caixa_terminal(ui, caixa, agente, false, 10.0, "miniatura · clique para focar"));
+        }
+        for pedido in pedidos.into_iter().flatten() {
+            match pedido {
+                Pedido::Focar(agente) => self.tela = Tela::Tarefa { id, foco: agente },
+                Pedido::Iniciar(agente) => self.iniciar_agente(agente, ui.ctx(), agora),
+                Pedido::Remover(agente) => self.remover_agente(agente, agora),
             }
         }
     }
 
-    /// Desenha um cartão com cabeçalho e terminal. Retorna se foi clicado.
-    fn caixa_terminal(&mut self, ui: &mut egui::Ui, caixa: egui::Rect, agente: usize, focado: bool, fonte: f32, ritmo: &str) -> bool {
+    /// Tarefa sem agentes: abrir um novo ou retomar uma conversa do Claude Code
+    /// começada em outro lugar (no IntelliJ, por exemplo) na mesma pasta.
+    fn sem_agentes(&mut self, ui: &mut egui::Ui, id: i64, pasta: &str) {
+        let tem_claude = self.opcoes_de_agente().iter().any(|o| o.id == "claude");
+        let (mut novo, mut retomar) = (false, false);
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.2);
+            ui.allocate_ui(egui::vec2(520.0, 0.0), |ui| {
+                tema::moldura_janela().show(ui, |ui| {
+                    ui.set_width(472.0);
+                    let texto = if self.demo {
+                        "Na demonstração, os agentes são terminais de teste.".to_string()
+                    } else {
+                        format!("O agente abre em {pasta}, com a conta de IA do perfil. Se você já conversava com o Claude Code nessa pasta, dá para continuar a mesma conversa aqui.")
+                    };
+                    tema::cabecalho(ui, "Esta tarefa ainda não tem agentes", &texto);
+                    if self.demo {
+                        return;
+                    }
+                    ui.add_space(18.0);
+                    ui.horizontal(|ui| {
+                        novo = tema::botao_principal(ui, "Adicionar agente", true).clicked();
+                        if tem_claude {
+                            ui.add_space(8.0);
+                            retomar = tema::botao_secundario(ui, "Retomar conversa do Claude Code").clicked();
+                        }
+                    });
+                });
+            });
+        });
+        if novo || retomar {
+            self.adicionar_agente(id, retomar);
+        }
+    }
+
+    /// Desenha o cartão de um agente com cabeçalho e terminal. Um agente parado
+    /// mostra o que ficou na tela e o botão para iniciar de novo.
+    fn caixa_terminal(&mut self, ui: &mut egui::Ui, caixa: egui::Rect, agente: &AgenteTela, focado: bool, fonte: f32, ritmo: &str) -> Option<Pedido> {
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa));
-        let mut clicado = false;
+        let mut pedido = None;
+        let demo = self.demo;
+        let parado = self.terminais.get(&agente.id).is_none_or(|t| t.encerrado());
         egui::Frame::new()
             .fill(cores().superficie_alta)
             .stroke(Stroke::new(if focado { 1.5 } else { 1.0 }, if focado { cores().destaque } else { cores().borda }))
@@ -650,25 +835,54 @@ impl Colmeia {
             .inner_margin(egui::Margin::symmetric(0, 6))
             .show(&mut filho, |ui| {
                 ui.set_min_size(caixa.size() - egui::vec2(2.0, 2.0));
-                ui.horizontal(|ui| {
+                let cabecalho = ui.horizontal(|ui| {
                     ui.add_space(10.0);
                     let (ponto, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(ponto.center(), 3.5, cores().ok);
-                    ui.label(texto_forte(format!("agente-{agente}"), 13.5).color(cores().texto));
-                    ui.label(RichText::new(format!("· {}", PAPEIS[agente])).color(cores().suave));
+                    ui.painter().circle_filled(ponto.center(), 3.5, if parado { cores().suave } else { cores().ok });
+                    ui.label(texto_forte(agente.nome(), 13.5).color(cores().texto));
+                    ui.label(RichText::new(format!("· {}", agente.papel)).color(cores().suave));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(10.0);
-                        ui.label(RichText::new(ritmo).color(cores().suave).small());
+                        ui.label(RichText::new(if parado { "parado" } else { ritmo }).color(cores().suave).small());
                     });
                 });
-                clicado = self.terminais[agente].mostrar(ui, fonte).clicked();
+                if !demo {
+                    cabecalho.response.interact(egui::Sense::click()).context_menu(|ui| {
+                        ui.set_min_width(220.0);
+                        if tema::opcao_menu(ui, "Parar e remover agente", false) {
+                            pedido = Some(Pedido::Remover(agente.id));
+                            ui.close();
+                        }
+                    });
+                }
+                match self.terminais.get_mut(&agente.id) {
+                    Some(t) => {
+                        if t.mostrar(ui, fonte).clicked() && !focado {
+                            pedido = Some(Pedido::Focar(agente.id));
+                        }
+                    }
+                    None => {
+                        ui.allocate_space(ui.available_size());
+                    }
+                }
+                if parado && !demo {
+                    let centro = ui.min_rect().center();
+                    let rotulo = if agente.ferramenta == "claude" { "Retomar conversa" } else { "Iniciar de novo" };
+                    let area = egui::Rect::from_center_size(centro, egui::vec2(220.0, 40.0));
+                    let mut botao = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Center)));
+                    if tema::botao_principal(&mut botao, rotulo, true).clicked() {
+                        pedido = Some(Pedido::Iniciar(agente.id));
+                    }
+                }
             });
-        clicado
+        pedido
     }
 
     /// Aviso passageiro no rodapé da tela, some sozinho depois de 6 segundos.
     fn mostrar_recado(&mut self, ctx: &egui::Context, agora: f64) {
-        let Some((texto, desde)) = &self.recado else { return };
+        let Some((texto, desde)) = &self.recado else {
+            return;
+        };
         if agora - desde > 6.0 {
             self.recado = None;
             return;
@@ -684,6 +898,13 @@ impl Colmeia {
         });
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
+}
+
+/// O que o cartão de um agente pede ao painel da tarefa.
+enum Pedido {
+    Focar(i64),
+    Iniciar(i64),
+    Remover(i64),
 }
 
 /// Item da barra lateral: linha inteira clicável, fundo ao passar o mouse e um
@@ -730,6 +951,14 @@ impl eframe::App for Colmeia {
             return;
         }
         self.ajustar_ritmos();
+        // O ponto de cada agente (no cartão e na abelha) segue o terminal dele.
+        if !self.demo {
+            for t in &mut self.tarefas {
+                for a in &mut t.agentes {
+                    a.ativo = self.terminais.get(&a.id).is_some_and(|t| !t.encerrado());
+                }
+            }
+        }
 
         // Abrir a tarefa conta como ver o erro: a abelha para de ficar bugada.
         if let Tela::Tarefa { id, .. } = self.tela
@@ -738,12 +967,15 @@ impl eframe::App for Colmeia {
             t.erro_visto = true;
         }
 
-        let rodando = self.carga != "parada";
+        // Na demonstração, "rodando" é a carga de teste; no uso normal, os agentes ativos.
+        let rodando = !self.demo || self.carga != "parada";
         let escopo = self.escopo;
         let base = abelha::estado_base(self.tarefas.iter().filter(|t| escopo.contem(t.projeto_id)), rodando);
         let estado = self.abelha.atualizar(base, |p| escopo.contem(p), agora);
         let no_escopo = || self.tarefas.iter().filter(|t| escopo.contem(t.projeto_id));
-        let plural = |n: usize, um: &str, varios: &str| if n == 1 { format!("1 {um}") } else { format!("{n} {varios}") };
+        let plural = |n: usize, um: &str, varios: &str| {
+            if n == 1 { format!("1 {um}") } else { format!("{n} {varios}") }
+        };
         let linha = match estado {
             Estado::Bugado => plural(no_escopo().filter(|t| t.erro.is_some() && !t.erro_visto).count(), "erro", "erros"),
             Estado::Aguardando => plural(no_escopo().filter(|t| t.coluna == Coluna::AguardandoVoce).count(), "tarefa esperando", "tarefas esperando"),
@@ -787,7 +1019,7 @@ impl eframe::App for Colmeia {
                         };
                         acoes = quadro::mostrar(ui, &mut self.tarefas, projeto, self.filtro.as_deref(), &self.terminais);
                     }
-                    Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco),
+                    Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
                     Tela::Entrada(_) => {}
                 }
             },
@@ -799,7 +1031,7 @@ impl eframe::App for Colmeia {
                 quadro::Acao::Remover(id) if self.demo => self.tarefas.retain(|t| t.id != id),
                 quadro::Acao::Remover(id) => {
                     if let Some(t) = self.tarefas.iter().find(|t| t.id == id) {
-                        self.dialogo = Some(Dialogo::RemoverTarefa { id, titulo: t.titulo.clone(), erro: None });
+                        self.dialogo = Some(Dialogo::RemoverTarefa { id, titulo: t.titulo.clone(), copia: t.em_copia, erro: None });
                     }
                 }
             }
@@ -814,11 +1046,16 @@ impl eframe::App for Colmeia {
                     self.dialogo = None;
                     self.recarregar(agora);
                     self.carregar_branches();
+                    self.conectar_agentes(ui.ctx());
                 }
                 Resultado::ProjetoCriado(id) => {
                     self.dialogo = None;
                     self.recarregar(agora);
                     self.mudar_escopo(Escopo::Projeto(id));
+                }
+                Resultado::AgenteCriado(agente) => {
+                    self.dialogo = None;
+                    self.agente_criado(agente, ui.ctx(), agora);
                 }
             }
         }

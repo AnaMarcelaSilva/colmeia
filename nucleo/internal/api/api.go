@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,7 +26,10 @@ const VersaoProtocolo = 1
 const limiteMensagem = 1 << 20
 
 type Servidor struct {
+	// Sessoes são os terminais de teste do modo demonstração; Agentes, os
+	// terminais dos agentes de verdade, que aparecem e somem.
 	Sessoes []*terminal.Sessao
+	Agentes *terminal.Gerente
 	Bytes   *atomic.Int64
 	Versao  string
 	// Demo liga as cargas de teste, que escrevem comandos nos terminais.
@@ -34,6 +38,8 @@ type Servidor struct {
 	// separadas das ferramentas ficam.
 	Banco    *dados.Banco
 	DirDados string
+
+	mu sync.Mutex // um agente abre por vez
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -41,6 +47,9 @@ func (s *Servidor) Rotas() http.Handler {
 	mux.HandleFunc("GET /v1/versao", s.versao)
 	mux.HandleFunc("GET /v1/estatisticas", s.estatisticas)
 	mux.HandleFunc("GET /v1/terminais/{id}", s.terminal)
+	if s.Agentes == nil {
+		s.Agentes = terminal.NovoGerente()
+	}
 	if s.Banco != nil {
 		s.rotasDados(mux)
 	}
@@ -60,7 +69,7 @@ func (s *Servidor) versao(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Servidor) estatisticas(w http.ResponseWriter, _ *http.Request) {
-	responderJSON(w, map[string]any{"terminais": len(s.Sessoes), "bytes": s.Bytes.Load()})
+	responderJSON(w, map[string]any{"terminais": len(s.Sessoes), "agentes": s.Agentes.Quantidade(), "bytes": s.Bytes.Load()})
 }
 
 func (s *Servidor) carga(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +93,13 @@ func (s *Servidor) terminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "terminal inexistente", http.StatusNotFound)
 		return
 	}
+	s.transmitir(w, r, s.Sessoes[id])
+}
+
+// transmitir liga a tela a um terminal pelo WebSocket. Quando o programa do
+// terminal termina, a tela recebe {"fim":true} e a conexão continua aberta
+// para ela ver o que ficou escrito.
+func (s *Servidor) transmitir(w http.ResponseWriter, r *http.Request, sessao *terminal.Sessao) {
 	intervalo := terminal.IntervaloPadrao
 	if ms, err := strconv.ParseInt(r.URL.Query().Get("intervalo"), 10, 64); err == nil {
 		intervalo = time.Duration(ms) * time.Millisecond
@@ -96,7 +112,6 @@ func (s *Servidor) terminal(w http.ResponseWriter, r *http.Request) {
 	defer conn.CloseNow()
 	conn.SetReadLimit(limiteMensagem)
 
-	sessao := s.Sessoes[id]
 	cliente, historico := sessao.Conectar(intervalo)
 	defer sessao.Desconectar(cliente)
 
@@ -111,11 +126,21 @@ func (s *Servidor) terminal(w http.ResponseWriter, r *http.Request) {
 	// para juntar mais e envia tudo de uma vez.
 	espera := time.NewTimer(0)
 	<-espera.C
+	fim := sessao.Fim()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-cliente.Aviso:
+		case <-fim:
+			fim = nil
+			if bloco := sessao.Retirar(cliente); len(bloco) > 0 && conn.Write(ctx, websocket.MessageBinary, bloco) != nil {
+				return
+			}
+			if conn.Write(ctx, websocket.MessageText, []byte(`{"fim":true}`)) != nil {
+				return
+			}
+			continue
 		}
 		espera.Reset(cliente.Intervalo())
 		select {

@@ -4,7 +4,8 @@
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{self, Color32, DragAndDrop, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 
-use crate::PAPEIS;
+use std::collections::HashMap;
+
 use crate::dados::{Coluna, Tarefa};
 use crate::tema::{RAIO_SUPERFICIE, cores, forte};
 use crate::terminal::TerminalAgente;
@@ -33,7 +34,13 @@ fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
 }
 
 /// `projeto` = None mostra o perfil inteiro, com o nome do projeto em cada cartão.
-pub fn mostrar(ui: &mut egui::Ui, tarefas: &mut Vec<Tarefa>, projeto: Option<i64>, filtro: Option<&str>, terminais: &[TerminalAgente]) -> Vec<Acao> {
+pub fn mostrar(
+    ui: &mut egui::Ui,
+    tarefas: &mut Vec<Tarefa>,
+    projeto: Option<i64>,
+    filtro: Option<&str>,
+    terminais: &HashMap<i64, TerminalAgente>,
+) -> Vec<Acao> {
     let mut acoes = Vec::new();
     let com_projeto = projeto.is_none();
     let mut mover: Option<(i64, Coluna)> = None;
@@ -123,7 +130,7 @@ fn linha_cortada(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, 
     altura
 }
 
-fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente], com_projeto: bool) -> Option<Acao> {
+fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, TerminalAgente>, com_projeto: bool) -> Option<Acao> {
     let p = cores();
     let arrastado = DragAndDrop::payload::<Arrastando>(ui.ctx()).is_some_and(|p| p.0 == t.id);
     let em_cima = ui.rect_contains_pointer(rect) && !arrastado;
@@ -147,14 +154,15 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
     linha_cortada(pintor, pos2(x, y), &t.titulo, forte(13.5), p.texto, largura);
     y += 22.0;
 
-    // Número da tarefa e a branch numa etiqueta.
+    // Número da tarefa e a branch numa etiqueta (uma pasta sem git não tem branch).
     let numero = pintor.layout_no_wrap(format!("#{}", t.id), FontId::proportional(11.5), p.suave);
     let largura_numero = numero.size().x;
     pintor.galley(pos2(x, y + 2.0), numero, p.suave);
-    let branch = pintor.layout_no_wrap(t.branch.clone(), FontId::monospace(11.0), p.destaque);
+    let (texto, cor) = if t.branch.is_empty() { ("pasta".to_string(), p.suave) } else { (t.branch.clone(), p.destaque) };
+    let branch = pintor.layout_no_wrap(texto, FontId::monospace(11.0), cor);
     let etiqueta = Rect::from_min_size(pos2(x + largura_numero + 8.0, y), vec2(branch.size().x + 12.0, 19.0));
-    pintor.rect_filled(etiqueta, 6.0, p.destaque.gamma_multiply(0.14));
-    pintor.galley(etiqueta.center() - branch.size() / 2.0, branch, p.destaque);
+    pintor.rect_filled(etiqueta, 6.0, cor.gamma_multiply(0.14));
+    pintor.galley(etiqueta.center() - branch.size() / 2.0, branch, cor);
     y += 28.0;
 
     if let Some(erro) = t.erro {
@@ -165,15 +173,17 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &[TerminalAgente
         linha_cortada(pintor, pos2(x, y), &format!("Aguardando: {motivo}"), FontId::proportional(12.0), p.alerta, largura);
         y += 19.0;
     }
-    for &agente in &t.agentes {
+    for agente in &t.agentes {
+        let terminal = terminais.get(&agente.id).filter(|t| !t.encerrado());
         y += 2.0;
-        pintor.circle_filled(pos2(x + 3.5, y + 8.0), 3.5, p.ok);
-        let nome = pintor.layout_no_wrap(format!("agente-{agente}"), FontId::proportional(12.5), p.texto);
+        pintor.circle_filled(pos2(x + 3.5, y + 8.0), 3.5, if terminal.is_some() { p.ok } else { p.suave });
+        let nome = pintor.layout_no_wrap(agente.nome(), FontId::proportional(12.5), p.texto);
         let largura_nome = nome.size().x;
         pintor.galley(pos2(x + 13.0, y), nome, p.texto);
-        pintor.text(pos2(x + 19.0 + largura_nome, y), egui::Align2::LEFT_TOP, PAPEIS[agente], FontId::proportional(12.0), p.suave);
+        pintor.text(pos2(x + 19.0 + largura_nome, y), egui::Align2::LEFT_TOP, &agente.papel, FontId::proportional(12.0), p.suave);
         y += 18.0;
-        linha_cortada(pintor, pos2(x + 13.0, y), &terminais[agente].ultima_linha(), FontId::monospace(11.0), p.suave, largura - 13.0);
+        let ultima = terminal.map_or_else(|| "parado".to_string(), |t| t.ultima_linha());
+        linha_cortada(pintor, pos2(x + 13.0, y), &ultima, FontId::monospace(11.0), p.suave, largura - 13.0);
         y += 20.0;
     }
 

@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS tarefas (
 	atualizado_em TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tarefas_por_projeto ON tarefas (projeto_id, coluna, ordem);
+CREATE TABLE IF NOT EXISTS agentes (
+	id INTEGER PRIMARY KEY,
+	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	ferramenta TEXT NOT NULL,
+	papel TEXT NOT NULL,
+	sessao TEXT NOT NULL DEFAULT '',
+	criado_em TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS eventos (
 	id INTEGER PRIMARY KEY,
 	momento TEXT NOT NULL,
@@ -118,6 +126,10 @@ func Abrir(dir string) (*Banco, error) {
 		db.Close()
 		return nil, fmt.Errorf("aplicando o esquema: %w", err)
 	}
+	if err := migrar(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("atualizando o banco: %w", err)
+	}
 	for _, sufixo := range []string{"", "-wal", "-shm"} {
 		os.Chmod(caminho+sufixo, 0o600)
 	}
@@ -125,6 +137,41 @@ func Abrir(dir string) (*Banco, error) {
 }
 
 func (b *Banco) Fechar() error { return b.db.Close() }
+
+// migrar acrescenta as colunas que surgiram depois da primeira versão, sem
+// perder o que já está gravado.
+func migrar(db *sql.DB) error {
+	colunas := []struct{ tabela, coluna, definicao string }{
+		// "git" (repositório) ou "pasta" (pasta de trabalho sem git).
+		{"projetos", "tipo", "TEXT NOT NULL DEFAULT 'git'"},
+		// Onde os agentes da tarefa trabalham: "pasta" (a do projeto) ou "copia" (worktree).
+		{"tarefas", "local", "TEXT NOT NULL DEFAULT 'pasta'"},
+		{"tarefas", "copia", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, c := range colunas {
+		existe := false
+		linhas, err := db.Query(`SELECT name FROM pragma_table_info(?)`, c.tabela)
+		if err != nil {
+			return err
+		}
+		for linhas.Next() {
+			var nome string
+			if err := linhas.Scan(&nome); err != nil {
+				linhas.Close()
+				return err
+			}
+			existe = existe || nome == c.coluna
+		}
+		linhas.Close()
+		if !existe {
+			// Nomes fixos daqui, nunca vindos de fora: seguro montar o comando.
+			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.tabela, c.coluna, c.definicao)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 func agora() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
@@ -225,9 +272,14 @@ func BranchValida(nome string) error {
 }
 
 var (
-	Temas       = []string{"escuro", "claro", "leitura"}
-	Colunas     = []string{"backlog", "trabalhando", "aguardando", "revisao", "concluido"}
-	Ferramentas = []string{"claude", "codex", "gemini", "opencode"}
+	TiposProjeto = []string{"git", "pasta"}
+	Locais       = []string{"pasta", "copia"}
+	Papeis       = []string{"líder", "dev", "revisor", "testador"}
+	Temas        = []string{"escuro", "claro", "leitura"}
+	Colunas      = []string{"backlog", "trabalhando", "aguardando", "revisao", "concluido"}
+	Ferramentas  = []string{"claude", "codex", "gemini", "opencode"}
+	// Um agente pode ser uma das ferramentas ou um shell comum.
+	TiposAgente = append([]string{"shell"}, Ferramentas...)
 	ModosConta  = []string{"sistema", "separada"}
 )
 

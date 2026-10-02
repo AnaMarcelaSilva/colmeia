@@ -8,10 +8,10 @@ Tudo se organiza em Perfil › Workspace › Projeto › Branch. A branch é a u
 | --- | --- | --- |
 | Perfil | Contexto de vida, com credenciais, contas, provedor de IA e registros próprios | Profissional, Estudo, Pessoal |
 | Workspace | Agrupador de projetos que andam juntos | Empresa X, Curso de Rust |
-| Projeto | Um repositório, exibido como aba | loja-web, api-pedidos |
-| Branch | Cópia isolada do projeto com pasta, portas, banco e contêineres próprios | dev, main |
-| Tarefa | Unidade de trabalho do quadro, de um projeto, em uma ou mais branches | Nova tela de pedidos |
-| Agente | Uma sessão de IA com papel definido, rodando numa branch | líder, dev, revisor, testador |
+| Projeto | Um repositório git ou uma pasta de trabalho sem git (sem branches) | loja-web, clientes |
+| Branch | Filtro do quadro; a tarefa pode ter uma cópia isolada (git worktree) na branch dela | dev, main |
+| Tarefa | Unidade de trabalho do quadro, de um projeto; os agentes trabalham na pasta do projeto ou na cópia isolada | Nova tela de pedidos |
+| Agente | Uma ferramenta de IA (ou um terminal comum) com papel definido, rodando na pasta da tarefa | líder, dev, revisor, testador |
 | Evento | Tudo que acontece: commit, PR, pergunta do agente, teste, print, aprovação | agente abriu PR na dev |
 
 Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, sprint e busca são visões calculadas sobre eles.
@@ -33,27 +33,39 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | --- | --- |
 | `GET /v1/versao` | Versão do protocolo e do núcleo, se o modo demonstração está ligado |
 | `GET /v1/estatisticas` | Bytes lidos dos terminais |
-| `GET /v1/terminais/{id}` | WebSocket do terminal: binário é digitação e saída; texto é controle |
+| `GET /v1/terminais/{id}` | Só com `--demo`: WebSocket de um terminal de teste |
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
 | `PATCH /v1/perfis/{id}` | Mudar o tema do perfil |
 | `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
 | `GET` / `POST /v1/perfis/{id}/workspaces` | Listar e criar workspaces |
 | `GET /v1/perfis/{id}/projetos` | Projetos do perfil, com o workspace |
-| `POST /v1/workspaces/{id}/projetos` | Adicionar projeto: a pasta é conferida com o git antes de gravar |
-| `DELETE /v1/projetos/{id}` | Tirar o projeto da Colmeia (a pasta não é tocada) |
-| `GET /v1/projetos/{id}/branches` | Branches locais do repositório |
-| `GET` / `POST /v1/projetos/{id}/tarefas` | Listar e criar tarefas |
-| `PATCH` / `DELETE /v1/tarefas/{id}` | Mudar título, coluna ou branch; remover |
+| `POST /v1/workspaces/{id}/projetos` | Adicionar projeto: um repositório entra pela raiz, com a branch atual; outra pasta entra como pasta de trabalho |
+| `DELETE /v1/projetos/{id}` | Tirar o projeto da Colmeia: para os agentes e tira as cópias isoladas (a pasta não é tocada) |
+| `GET /v1/projetos/{id}/branches` | Branches locais do repositório (vazio numa pasta sem git) |
+| `GET` / `POST /v1/projetos/{id}/tarefas` | Listar e criar tarefas; `local: "copia"` cria a cópia isolada (branch nova a partir de `base`, ou existente) |
+| `PATCH` / `DELETE /v1/tarefas/{id}` | Mudar título, coluna ou branch; remover (recusa se a cópia tiver mudanças sem commit) |
+| `GET /v1/projetos/{id}/agentes` | Agentes de todas as tarefas do projeto, com `ativo` |
+| `GET` / `POST /v1/tarefas/{id}/agentes` | Listar agentes da tarefa; criar um (ferramenta, papel e, no Claude Code, a conversa a retomar) e já abrir o terminal |
+| `GET /v1/tarefas/{id}/sessoes` | Conversas do Claude Code guardadas para a pasta da tarefa, e se ele está aberto nela fora da Colmeia |
+| `POST /v1/agentes/{id}/iniciar` | Abrir de novo o terminal de um agente parado |
+| `DELETE /v1/agentes/{id}` | Encerrar e remover o agente |
+| `GET /v1/agentes/{id}/terminal` | WebSocket do terminal do agente: binário é digitação e saída; texto é controle |
 | `POST /v1/demo/carga?modo=` | Só com `--demo`: cargas de teste nos terminais |
 
 Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
 
-Mensagens de controle da tela para o núcleo no WebSocket (JSON): `{"cols":120,"rows":40}` redimensiona, `{"ack":65536}` confirma o que foi desenhado e `{"intervalo":250}` muda o ritmo de envio em milissegundos.
+Mensagens de controle da tela para o núcleo no WebSocket (JSON): `{"cols":120,"rows":40}` redimensiona, `{"ack":65536}` confirma o que foi desenhado e `{"intervalo":250}` muda o ritmo de envio em milissegundos. Do núcleo para a tela, `{"fim":true}` avisa que o programa do terminal terminou.
+
+## Agentes
+
+O núcleo é dono dos terminais: fechar a tela não encerra os agentes, e a tela, ao abrir, se liga de novo aos que estão rodando. Cada agente roda a ferramenta (ou o shell do usuário) num pseudo-terminal próprio, na pasta da tarefa, em sessão e grupo de processos próprios. Ao encerrar, o grupo recebe SIGHUP, como ao fechar uma janela de terminal, e só é forçado se não terminar em 3 segundos; assim o Claude Code salva a conversa.
+
+Um agente do Claude Code sempre tem um id de conversa: o de uma conversa retomada ou um novo, passado com `--session-id`. Ao iniciar de novo, a conversa que já existe é aberta com `--resume`. As conversas ficam onde o Claude Code guarda: `<configuração>/projects/<pasta com tudo que não é letra ou número trocado por "-">/<id>.jsonl`; a Colmeia lê só o fim de cada arquivo para achar o título.
 
 ## Dados
 
-SQLite em `~/.local/share/colmeia/colmeia.db` (modo WAL, diretório 0700). Tabelas de estado (perfis, contas, workspaces, projetos, tarefas) e uma tabela `eventos` só de acréscimo: cada mudança grava um evento com o hash do anterior, e o núcleo confere a corrente ao iniciar. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+SQLite em `~/.local/share/colmeia/colmeia.db` (modo WAL, diretório 0700). Tabelas de estado (perfis, contas, workspaces, projetos, tarefas, agentes) e uma tabela `eventos` só de acréscimo: cada mudança grava um evento com o hash do anterior, e o núcleo confere a corrente ao iniciar. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
 
 ## Regras de desempenho
 

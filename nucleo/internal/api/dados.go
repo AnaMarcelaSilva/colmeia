@@ -2,10 +2,12 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
@@ -33,6 +35,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projetos/{id}/tarefas", s.criarTarefa)
 	mux.HandleFunc("PATCH /v1/tarefas/{id}", s.atualizarTarefa)
 	mux.HandleFunc("DELETE /v1/tarefas/{id}", s.removerTarefa)
+	s.rotasAgentes(mux)
 }
 
 // responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.
@@ -47,6 +50,8 @@ func responderErro(w http.ResponseWriter, err error) {
 		status, mensagem = http.StatusNotFound, "não encontrado"
 	case errors.Is(err, dados.ErrJaExiste):
 		status, mensagem = http.StatusConflict, "já existe um com esse nome"
+	case errors.Is(err, git.ErrMudancas):
+		status, mensagem = http.StatusConflict, "A cópia isolada tem mudanças que não estão em nenhum commit. Salve num commit ou descarte antes de remover."
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -222,7 +227,9 @@ func (s *Servidor) listarProjetos(w http.ResponseWriter, r *http.Request) {
 	responderJSON(w, lista)
 }
 
-// criarProjeto confere a pasta com o git antes de gravar: só entra repositório de verdade.
+// criarProjeto confere a pasta antes de gravar. Um repositório git entra pela
+// raiz, com a branch atual como padrão; uma pasta sem git entra como pasta de
+// trabalho, sem branches.
 func (s *Servidor) criarProjeto(w http.ResponseWriter, r *http.Request) {
 	id, err := idDaRota(r)
 	if err != nil {
@@ -234,12 +241,16 @@ func (s *Servidor) criarProjeto(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	tipo := "git"
 	raiz, branch, err := git.Repositorio(r.Context(), pedido.Caminho)
+	if errors.Is(err, git.ErrNaoRepositorio) {
+		tipo, raiz, branch, err = "pasta", filepath.Clean(pedido.Caminho), "", nil
+	}
 	if err != nil {
 		responderErro(w, dados.ErrInvalido{Motivo: err.Error()})
 		return
 	}
-	projeto, err := s.Banco.CriarProjeto(r.Context(), id, pedido.Nome, raiz, branch)
+	projeto, err := s.Banco.CriarProjeto(r.Context(), id, pedido.Nome, raiz, tipo, branch)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -252,6 +263,28 @@ func (s *Servidor) removerProjeto(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		responderErro(w, err)
 		return
+	}
+	// Antes de esquecer o projeto: para os agentes e tira as cópias isoladas.
+	// Uma cópia com mudanças sem commit impede a remoção.
+	tarefas, err := s.Banco.ListarTarefas(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	projeto, err := s.Banco.Projeto(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	for _, t := range tarefas {
+		if err := s.fecharAgentesDaTarefa(r.Context(), t.ID); err != nil {
+			responderErro(w, err)
+			return
+		}
+		if err := s.removerCopia(r.Context(), t, projeto); err != nil {
+			responderErro(w, err)
+			return
+		}
 	}
 	if err := s.Banco.RemoverProjeto(r.Context(), id); err != nil {
 		responderErro(w, err)
@@ -269,6 +302,10 @@ func (s *Servidor) listarBranches(w http.ResponseWriter, r *http.Request) {
 	projeto, err := s.Banco.Projeto(r.Context(), id)
 	if err != nil {
 		responderErro(w, err)
+		return
+	}
+	if projeto.Tipo == "pasta" {
+		responderJSON(w, []string{})
 		return
 	}
 	branches, err := git.Branches(r.Context(), projeto.Caminho)
@@ -299,15 +336,30 @@ func (s *Servidor) criarTarefa(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	var pedido struct{ Titulo, Branch string }
+	// Local "copia" tira uma cópia isolada na branch da tarefa: nova (Nova,
+	// a partir de Base) ou uma que já existe.
+	var pedido struct {
+		Titulo, Branch, Local, Base string
+		Nova                        bool
+	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
 		return
 	}
-	tarefa, err := s.Banco.CriarTarefa(r.Context(), id, pedido.Titulo, pedido.Branch)
+	tarefa, err := s.Banco.CriarTarefa(r.Context(), id, pedido.Titulo, pedido.Branch, pedido.Local)
 	if err != nil {
 		responderErro(w, err)
 		return
+	}
+	if tarefa.Local == "copia" {
+		projeto, err := s.Banco.Projeto(r.Context(), id)
+		if err == nil {
+			tarefa, err = s.criarCopia(r.Context(), tarefa, projeto, pedido.Base, pedido.Nova)
+		}
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
 	}
 	responderJSON(w, tarefa)
 }
@@ -334,6 +386,28 @@ func (s *Servidor) atualizarTarefa(w http.ResponseWriter, r *http.Request) {
 func (s *Servidor) removerTarefa(w http.ResponseWriter, r *http.Request) {
 	id, err := idDaRota(r)
 	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	tarefa, projeto, _, err := s.Banco.Tarefa(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	// Uma cópia com mudanças sem commit impede a remoção, e aí os agentes
+	// continuam rodando. Senão eles param antes, para ninguém escrever na cópia
+	// enquanto ela sai.
+	if tarefa.Local == "copia" {
+		if mudou, err := git.TemMudancas(r.Context(), tarefa.Copia); err != nil || mudou {
+			responderErro(w, cmp.Or(err, git.ErrMudancas))
+			return
+		}
+	}
+	if err := s.fecharAgentesDaTarefa(r.Context(), id); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if err := s.removerCopia(r.Context(), tarefa, projeto); err != nil {
 		responderErro(w, err)
 		return
 	}

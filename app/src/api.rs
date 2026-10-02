@@ -14,7 +14,7 @@ pub struct Perfil {
     pub tema: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Conta {
     pub ferramenta: String,
     pub modo: String,
@@ -42,6 +42,9 @@ pub struct Projeto {
     pub workspace: String,
     pub nome: String,
     pub caminho: String,
+    /// "git" ou "pasta" (pasta de trabalho sem git).
+    #[serde(default)]
+    pub tipo: String,
     pub branch_padrao: String,
 }
 
@@ -52,6 +55,45 @@ pub struct Tarefa {
     pub titulo: String,
     pub coluna: String,
     pub branch: String,
+    /// "pasta" (a do projeto) ou "copia" (cópia isolada em `copia`).
+    #[serde(default)]
+    pub local: String,
+    #[serde(default)]
+    pub copia: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Agente {
+    pub id: i64,
+    pub tarefa_id: i64,
+    pub ferramenta: String,
+    pub papel: String,
+    pub ativo: bool,
+}
+
+/// Uma conversa do Claude Code guardada para a pasta da tarefa.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Sessao {
+    pub id: String,
+    pub titulo: String,
+    pub alterada: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Sessoes {
+    pub sessoes: Vec<Sessao>,
+    /// O Claude Code está aberto nesta pasta fora da Colmeia.
+    pub aberto_fora: bool,
+}
+
+/// Como criar a tarefa: onde os agentes trabalham e, numa cópia isolada, de qual branch.
+pub struct NovaTarefa<'a> {
+    pub titulo: &'a str,
+    pub branch: &'a str,
+    pub copia: bool,
+    /// Com cópia: criar a branch a partir de `base`, ou usar uma que já existe.
+    pub nova: bool,
+    pub base: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -121,8 +163,13 @@ pub fn tarefas(projeto: i64) -> Result<Vec<Tarefa>, String> {
     chamar("GET", &format!("/v1/projetos/{projeto}/tarefas"), None)
 }
 
-pub fn criar_tarefa(projeto: i64, titulo: &str, branch: &str) -> Result<Tarefa, String> {
-    chamar("POST", &format!("/v1/projetos/{projeto}/tarefas"), Some(json!({ "titulo": titulo, "branch": branch })))
+pub fn criar_tarefa(projeto: i64, t: &NovaTarefa) -> Result<Tarefa, String> {
+    let local = if t.copia { "copia" } else { "pasta" };
+    chamar(
+        "POST",
+        &format!("/v1/projetos/{projeto}/tarefas"),
+        Some(json!({ "titulo": t.titulo, "branch": t.branch, "local": local, "nova": t.nova, "base": t.base })),
+    )
 }
 
 pub fn mover_tarefa(tarefa: i64, coluna: &str) -> Result<Tarefa, String> {
@@ -131,4 +178,29 @@ pub fn mover_tarefa(tarefa: i64, coluna: &str) -> Result<Tarefa, String> {
 
 pub fn remover_tarefa(tarefa: i64) -> Result<(), String> {
     chamar::<Ok>("DELETE", &format!("/v1/tarefas/{tarefa}"), None).map(|_| ())
+}
+
+pub fn contas(perfil: i64) -> Result<Vec<Conta>, String> {
+    chamar("GET", &format!("/v1/perfis/{perfil}/contas"), None)
+}
+
+pub fn agentes_do_projeto(projeto: i64) -> Result<Vec<Agente>, String> {
+    chamar("GET", &format!("/v1/projetos/{projeto}/agentes"), None)
+}
+
+/// Cria o agente e abre o terminal dele. `sessao` retoma uma conversa do Claude Code.
+pub fn criar_agente(tarefa: i64, ferramenta: &str, papel: &str, sessao: &str) -> Result<Agente, String> {
+    chamar("POST", &format!("/v1/tarefas/{tarefa}/agentes"), Some(json!({ "ferramenta": ferramenta, "papel": papel, "sessao": sessao })))
+}
+
+pub fn iniciar_agente(agente: i64) -> Result<Agente, String> {
+    chamar("POST", &format!("/v1/agentes/{agente}/iniciar"), None)
+}
+
+pub fn remover_agente(agente: i64) -> Result<(), String> {
+    chamar::<Ok>("DELETE", &format!("/v1/agentes/{agente}"), None).map(|_| ())
+}
+
+pub fn sessoes(tarefa: i64) -> Result<Sessoes, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/sessoes"), None)
 }

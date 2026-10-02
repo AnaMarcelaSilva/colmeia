@@ -48,12 +48,38 @@ pub struct Projeto {
     pub nome: String,
     pub workspace: String,
     pub caminho: String,
+    /// Pasta de trabalho sem git: sem branches nem cópias isoladas.
+    pub sem_git: bool,
     pub branch_padrao: String,
 }
 
 impl From<api::Projeto> for Projeto {
     fn from(p: api::Projeto) -> Self {
-        Projeto { id: p.id, nome: p.nome, workspace: p.workspace, caminho: p.caminho, branch_padrao: p.branch_padrao }
+        Projeto { id: p.id, nome: p.nome, workspace: p.workspace, caminho: p.caminho, sem_git: p.tipo == "pasta", branch_padrao: p.branch_padrao }
+    }
+}
+
+/// Um agente da tarefa como a tela mostra. `id` também é a chave do terminal.
+#[derive(Clone, Debug)]
+pub struct AgenteTela {
+    pub id: i64,
+    pub ferramenta: String,
+    pub papel: String,
+    /// O terminal do agente está rodando (a tela atualiza a cada quadro).
+    pub ativo: bool,
+}
+
+impl AgenteTela {
+    /// Nome da ferramenta para mostrar.
+    pub fn nome(&self) -> String {
+        match self.ferramenta.as_str() {
+            "claude" => "Claude Code".into(),
+            "codex" => "Codex".into(),
+            "gemini" => "Gemini CLI".into(),
+            "opencode" => "OpenCode".into(),
+            "shell" => "Terminal".into(),
+            outro => outro.into(),
+        }
     }
 }
 
@@ -65,8 +91,11 @@ pub struct Tarefa {
     pub titulo: String,
     pub coluna: Coluna,
     pub branch: String,
-    /// Terminais do núcleo que trabalham nesta tarefa.
-    pub agentes: Vec<usize>,
+    /// Onde os agentes trabalham: a pasta do projeto ou a cópia isolada da tarefa.
+    pub pasta: String,
+    pub em_copia: bool,
+    /// Agentes da tarefa; cada um tem um terminal no núcleo enquanto roda.
+    pub agentes: Vec<AgenteTela>,
     /// Por que a tarefa está esperando você.
     pub motivo: Option<&'static str>,
     /// Erro de um agente ou integração, e se você já abriu a tarefa depois dele.
@@ -75,14 +104,17 @@ pub struct Tarefa {
 }
 
 impl Tarefa {
-    pub fn da_api(t: api::Tarefa, projeto: &str) -> Tarefa {
+    pub fn da_api(t: api::Tarefa, projeto: &Projeto) -> Tarefa {
+        let em_copia = t.local == "copia" && !t.copia.is_empty();
         Tarefa {
             id: t.id,
             projeto_id: t.projeto_id,
-            projeto: projeto.to_string(),
+            projeto: projeto.nome.clone(),
             titulo: t.titulo,
             coluna: Coluna::da_chave(&t.coluna),
             branch: t.branch,
+            pasta: if em_copia { t.copia } else { projeto.caminho.clone() },
+            em_copia,
             agentes: Vec::new(),
             motivo: None,
             erro: None,
@@ -93,26 +125,41 @@ impl Tarefa {
 
 // Modo demonstração: três projetos e tarefas de exemplo, com agentes de mentira.
 
+/// Papéis dos dez terminais de teste da demonstração.
+pub const PAPEIS_DEMO: [&str; 10] = ["líder", "dev", "dev", "revisor", "testador", "dev", "dev", "revisor", "testador", "dev"];
+
 pub const BRANCHES_DEMO: [&str; 5] = ["dev", "main", "feature/pedidos", "feature/clientes", "hotfix/desconto"];
 
 pub fn projetos_demo() -> Vec<Projeto> {
     ["loja-web", "api-pedidos", "estudos-rust"]
         .into_iter()
         .enumerate()
-        .map(|(i, nome)| Projeto { id: i as i64 + 1, nome: nome.into(), workspace: "Empresa X".into(), caminho: String::new(), branch_padrao: "main".into() })
+        .map(|(i, nome)| Projeto {
+            id: i as i64 + 1,
+            nome: nome.into(),
+            workspace: "Empresa X".into(),
+            caminho: String::new(),
+            sem_git: false,
+            branch_padrao: "main".into(),
+        })
         .collect()
 }
 
 pub fn gerar_demo(quantidade: usize) -> Vec<Tarefa> {
     let projetos = projetos_demo();
-    let nova = |id: i64, projeto: usize, titulo: &str, coluna: Coluna, branch: &str, agentes: Vec<usize>, motivo: Option<&'static str>| Tarefa {
+    let nova = |id: i64, projeto: usize, titulo: &str, coluna: Coluna, branch: &str, agentes: Vec<i64>, motivo: Option<&'static str>| Tarefa {
         id,
         projeto_id: projetos[projeto].id,
         projeto: projetos[projeto].nome.clone(),
         titulo: titulo.into(),
         coluna,
         branch: branch.into(),
-        agentes,
+        pasta: String::new(),
+        em_copia: true,
+        agentes: agentes
+            .into_iter()
+            .map(|i| AgenteTela { id: i, ferramenta: format!("agente-{i}"), papel: PAPEIS_DEMO[i as usize].into(), ativo: true })
+            .collect(),
         motivo,
         erro: None,
         erro_visto: false,

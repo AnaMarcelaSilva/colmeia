@@ -55,8 +55,9 @@ func (c *Cliente) acordar() {
 }
 
 type Sessao struct {
-	ID        int
+	ID        int64
 	pty       Pty
+	fim       chan struct{} // fechado quando o programa do terminal termina
 	mu        sync.Mutex
 	liberado  *sync.Cond
 	historico []byte
@@ -64,8 +65,8 @@ type Sessao struct {
 	bytes     *atomic.Int64
 }
 
-func NovaSessao(id int, pty Pty, bytes *atomic.Int64) *Sessao {
-	s := &Sessao{ID: id, pty: pty, clientes: map[*Cliente]struct{}{}, bytes: bytes}
+func NovaSessao(id int64, pty Pty, bytes *atomic.Int64) *Sessao {
+	s := &Sessao{ID: id, pty: pty, fim: make(chan struct{}), clientes: map[*Cliente]struct{}{}, bytes: bytes}
 	s.liberado = sync.NewCond(&s.mu)
 	return s
 }
@@ -108,6 +109,7 @@ func (s *Sessao) Ler() {
 		if err != nil {
 			// O conteúdo do terminal nunca vai para o log.
 			log.Printf("terminal %d encerrado", s.ID)
+			close(s.fim)
 			return
 		}
 	}
@@ -166,3 +168,81 @@ func (s *Sessao) Redimensionar(colunas, linhas uint16) {
 }
 
 func (s *Sessao) Fechar() error { return s.pty.Close() }
+
+// Fim avisa quando o programa do terminal termina.
+func (s *Sessao) Fim() <-chan struct{} { return s.fim }
+
+// Encerrada diz se o programa do terminal já terminou.
+func (s *Sessao) Encerrada() bool {
+	select {
+	case <-s.fim:
+		return true
+	default:
+		return false
+	}
+}
+
+// Gerente guarda os terminais dos agentes, que aparecem e somem enquanto o
+// núcleo roda.
+type Gerente struct {
+	mu      sync.Mutex
+	sessoes map[int64]*Sessao
+}
+
+func NovoGerente() *Gerente { return &Gerente{sessoes: map[int64]*Sessao{}} }
+
+// Adicionar registra a sessão e começa a ler dela. Se já havia uma com o mesmo
+// id, a antiga é fechada.
+func (g *Gerente) Adicionar(s *Sessao) {
+	g.mu.Lock()
+	antiga := g.sessoes[s.ID]
+	g.sessoes[s.ID] = s
+	g.mu.Unlock()
+	if antiga != nil {
+		antiga.Fechar()
+	}
+	go s.Ler()
+}
+
+func (g *Gerente) Pegar(id int64) (*Sessao, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s, ok := g.sessoes[id]
+	return s, ok
+}
+
+// Ativa diz se há um terminal rodando para o id.
+func (g *Gerente) Ativa(id int64) bool {
+	s, ok := g.Pegar(id)
+	return ok && !s.Encerrada()
+}
+
+// Fechar encerra e esquece o terminal do id, se houver.
+func (g *Gerente) Fechar(id int64) {
+	g.mu.Lock()
+	s := g.sessoes[id]
+	delete(g.sessoes, id)
+	g.mu.Unlock()
+	if s != nil {
+		s.Fechar()
+	}
+}
+
+func (g *Gerente) Quantidade() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.sessoes)
+}
+
+// FecharTodos encerra todos os terminais, ao desligar o núcleo.
+func (g *Gerente) FecharTodos() {
+	g.mu.Lock()
+	sessoes := g.sessoes
+	g.sessoes = map[int64]*Sessao{}
+	g.mu.Unlock()
+	var espera sync.WaitGroup
+	for _, s := range sessoes {
+		espera.Go(func() { s.Fechar() })
+	}
+	espera.Wait()
+}

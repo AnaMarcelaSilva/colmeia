@@ -58,7 +58,7 @@ func TestCicloCompleto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projeto, err := b.CriarProjeto(ctx, ws.ID, "loja-web", "/tmp/loja-web", "main")
+	projeto, err := b.CriarProjeto(ctx, ws.ID, "loja-web", "/tmp/loja-web", "git", "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,8 +67,8 @@ func TestCicloCompleto(t *testing.T) {
 		t.Errorf("projetos listados: %+v", projetos)
 	}
 
-	primeira, _ := b.CriarTarefa(ctx, projeto.ID, "Nova tela de pedidos", "main")
-	segunda, _ := b.CriarTarefa(ctx, projeto.ID, "Corrigir filtro", "main")
+	primeira, _ := b.CriarTarefa(ctx, projeto.ID, "Nova tela de pedidos", "main", "")
+	segunda, _ := b.CriarTarefa(ctx, projeto.ID, "Corrigir filtro", "main", "")
 	if segunda.Ordem <= primeira.Ordem {
 		t.Error("a tarefa nova deveria ir para o fim do Backlog")
 	}
@@ -141,5 +141,88 @@ func TestHistoricoAdulteradoEDetectado(t *testing.T) {
 	}
 	if err := b.VerificarHistorico(ctx); err == nil {
 		t.Error("um evento alterado passou despercebido")
+	}
+}
+
+func TestPastaSemGitEAgentes(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	ws, _ := b.CriarWorkspace(ctx, perfil.ID, "Trabalho")
+	pasta, err := b.CriarProjeto(ctx, ws.ID, "clientes", "/tmp/clientes", "pasta", "ignorada")
+	if err != nil || pasta.BranchPadrao != "" || pasta.Tipo != "pasta" {
+		t.Fatalf("pasta sem git: %+v %v", pasta, err)
+	}
+	if _, err := b.CriarTarefa(ctx, pasta.ID, "Com branch", "main", ""); err == nil {
+		t.Error("tarefa com branch numa pasta sem git deveria ser recusada")
+	}
+	if _, err := b.CriarTarefa(ctx, pasta.ID, "Com cópia", "", "copia"); err == nil {
+		t.Error("cópia isolada numa pasta sem git deveria ser recusada")
+	}
+	tarefa, err := b.CriarTarefa(ctx, pasta.ID, "Analisar problema do cliente", "", "")
+	if err != nil || tarefa.Local != "pasta" {
+		t.Fatalf("tarefa na pasta: %+v %v", tarefa, err)
+	}
+	lida, projeto, dono, err := b.Tarefa(ctx, tarefa.ID)
+	if err != nil || dono != perfil.ID || lida.Pasta(projeto) != "/tmp/clientes" {
+		t.Fatalf("contexto da tarefa: %+v %+v %d %v", lida, projeto, dono, err)
+	}
+
+	id := "81701644-dffb-4e29-9873-ea49ec35ec50"
+	if _, err := b.CriarAgente(ctx, tarefa.ID, "codex", "dev", id); err == nil {
+		t.Error("só o Claude Code retoma conversa")
+	}
+	if _, err := b.CriarAgente(ctx, tarefa.ID, "claude", "chefe", ""); err == nil {
+		t.Error("papel inventado deveria ser recusado")
+	}
+	if _, err := b.CriarAgente(ctx, 9999, "claude", "dev", ""); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("agente de tarefa inexistente: %v", err)
+	}
+	agente, err := b.CriarAgente(ctx, tarefa.ID, "claude", "dev", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.CriarAgente(ctx, tarefa.ID, "shell", "testador", "")
+	agentes, _ := b.ListarAgentes(ctx, tarefa.ID)
+	if len(agentes) != 2 || agentes[0].ID != agente.ID || agentes[0].Sessao != id {
+		t.Fatalf("agentes listados: %+v", agentes)
+	}
+	// Remover a tarefa leva os agentes junto.
+	b.RemoverTarefa(ctx, tarefa.ID)
+	if _, err := b.Agente(ctx, agente.ID); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("agente de tarefa removida: %v", err)
+	}
+}
+
+func TestBancoAntigoGanhaAsColunasNovas(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Antigo", "")
+	ws, _ := b.CriarWorkspace(ctx, perfil.ID, "W")
+	// Volta o banco para como era na primeira versão, com um projeto gravado.
+	for _, c := range []string{
+		`DROP TABLE agentes`, `DROP TABLE tarefas`, `ALTER TABLE projetos DROP COLUMN tipo`,
+		`INSERT INTO projetos (workspace_id, nome, caminho, branch_padrao) VALUES (1, 'velho', '/tmp/velho', 'main')`,
+	} {
+		if _, err := b.db.Exec(c); err != nil {
+			t.Fatalf("%s: %v", c, err)
+		}
+	}
+	b.Fechar()
+	b, err = Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Fechar()
+	projetos, err := b.ListarProjetos(ctx, perfil.ID)
+	if err != nil || len(projetos) != 1 || projetos[0].Tipo != "git" || projetos[0].WorkspaceID != ws.ID {
+		t.Fatalf("projeto antigo: %+v %v", projetos, err)
+	}
+	if _, err := b.CriarTarefa(ctx, projetos[0].ID, "Depois da atualização", "main", ""); err != nil {
+		t.Fatal(err)
 	}
 }

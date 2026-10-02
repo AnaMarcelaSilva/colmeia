@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, ColorImage, CornerRadius, Event, Key, Modifiers, TextureHandle, TextureOptions, vec2};
 
+use crate::dados::AgenteTela;
 use crate::tema::{self, cores};
 
 /// Maior imagem aceita (em pixels), para uma colagem acidental não travar a tela.
@@ -31,7 +32,7 @@ pub struct Compositor {
 
 /// O que enviar e para quem.
 pub struct Envio {
-    pub destinos: Vec<usize>,
+    pub destinos: Vec<i64>,
     pub texto: String,
 }
 
@@ -44,7 +45,7 @@ impl Compositor {
         54.0 + 19.0 * (linhas - 1.0) + imagens + 24.0
     }
 
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[usize], foco: usize, papeis: &[&str]) -> Option<Envio> {
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64) -> Option<Envio> {
         let p = cores();
         let id = egui::Id::new("compositor");
         if std::mem::take(&mut self.focar) {
@@ -81,11 +82,12 @@ impl Compositor {
         }
 
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(interno).layout(egui::Layout::left_to_right(egui::Align::Min)));
-        let destino = if self.para_todos { format!("todos ({})", agentes.len()) } else { format!("agente-{foco} · {}", papeis[foco]) };
+        let em_foco = agentes.iter().find(|a| a.id == foco).map_or_else(String::new, |a| format!("{} · {}", a.nome(), a.papel));
+        let destino = if self.para_todos { format!("todos ({})", agentes.len()) } else { em_foco.clone() };
         let resposta = tema::chip(&mut filho, "Para", &destino, self.para_todos);
         egui::Popup::menu(&resposta).show(|ui| {
             ui.set_min_width(250.0);
-            if tema::opcao_menu(ui, &format!("agente-{foco} ({}, em foco)", papeis[foco]), !self.para_todos) {
+            if tema::opcao_menu(ui, &format!("{em_foco} (em foco)"), !self.para_todos) {
                 self.para_todos = false;
                 ui.close();
             }
@@ -101,7 +103,7 @@ impl Compositor {
                 enviar = true;
             }
             ui.add_space(8.0);
-            let dica = if self.para_todos { "Mensagem para todos os agentes da tarefa".to_string() } else { format!("Mensagem para agente-{foco}") };
+            let dica = if self.para_todos { "Mensagem para todos os agentes da tarefa".to_string() } else { format!("Mensagem para {em_foco}") };
             let campo = egui::TextEdit::multiline(&mut self.rascunho)
                 .id(id)
                 .frame(egui::Frame::NONE)
@@ -138,7 +140,7 @@ impl Compositor {
         self.anexos.clear();
         self.aviso = None;
         ui.memory_mut(|m| m.request_focus(id));
-        Some(Envio { destinos: if self.para_todos { agentes.to_vec() } else { vec![foco] }, texto })
+        Some(Envio { destinos: if self.para_todos { agentes.iter().map(|a| a.id).collect() } else { vec![foco] }, texto })
     }
 
     fn miniaturas(&mut self, ui: &mut egui::Ui, fileira: egui::Rect) {
@@ -168,7 +170,9 @@ impl Compositor {
     }
 
     fn colar_imagem(&mut self, ctx: &egui::Context) {
-        let Ok(mut area) = arboard::Clipboard::new() else { return };
+        let Ok(mut area) = arboard::Clipboard::new() else {
+            return;
+        };
         // Sem imagem na área de transferência é uma colagem de texto comum.
         let Ok(imagem) = area.get_image() else { return };
         if imagem.width * imagem.height > MAIOR_IMAGEM {

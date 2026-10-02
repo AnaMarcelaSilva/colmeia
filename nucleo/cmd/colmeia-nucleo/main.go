@@ -68,12 +68,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("abrindo terminal %d: %v", i, err)
 		}
-		s := terminal.NovaSessao(i, pty, &bytes)
+		s := terminal.NovaSessao(int64(i), pty, &bytes)
 		sessoes = append(sessoes, s)
 		go s.Ler()
 	}
 
-	servidor := &api.Servidor{Sessoes: sessoes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados}
+	agentes := terminal.NovoGerente()
+	servidor := &api.Servidor{Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados}
 	servidorHTTP := &http.Server{
 		Handler:           canal.ExigirToken(token, servidor.Rotas()),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -93,6 +94,8 @@ func main() {
 	if err := servidorHTTP.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("servidor: %v", err)
 	}
+	// Fechar o terminal avisa cada agente, que tem uns segundos para salvar a conversa.
+	agentes.FecharTodos()
 	for _, s := range sessoes {
 		s.Fechar()
 	}

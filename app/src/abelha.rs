@@ -35,7 +35,7 @@ pub fn estado_base<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, agentes_rodand
     for t in tarefas {
         erro |= t.erro.is_some() && !t.erro_visto;
         aguardando |= t.coluna == Coluna::AguardandoVoce;
-        trabalhando |= agentes_rodando && t.coluna == Coluna::Trabalhando && !t.agentes.is_empty();
+        trabalhando |= agentes_rodando && t.coluna == Coluna::Trabalhando && t.agentes.iter().any(|a| a.ativo);
     }
     if erro {
         Estado::Bugado
@@ -187,7 +187,8 @@ pub fn resumo(
                     linha(ui, cores().destaque, format!("Concluída em {}", t.projeto), format!("{}, há {:.0} s", t.titulo, agora - c.em), t.id);
                 }
             }
-            let rodando: Vec<&Tarefa> = visiveis().filter(|t| agentes_rodando && t.coluna == Coluna::Trabalhando && !t.agentes.is_empty()).collect();
+            let rodando: Vec<&Tarefa> =
+                visiveis().filter(|t| agentes_rodando && t.coluna == Coluna::Trabalhando && t.agentes.iter().any(|a| a.ativo)).collect();
             if let Some(primeira) = rodando.first() {
                 let agentes: usize = rodando.iter().map(|t| t.agentes.len()).sum();
                 linha(ui, cores().ok, format!("{} tarefas com agentes trabalhando", rodando.len()), format!("{agentes} agentes no total"), primeira.id);
