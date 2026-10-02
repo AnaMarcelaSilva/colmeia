@@ -1,9 +1,8 @@
 //! Caixa de mensagem do painel da tarefa. Enter quebra a linha, Ctrl+Enter
-//! envia, e Ctrl+V com uma imagem na área de transferência anexa a imagem:
-//! ela é gravada como PNG numa pasta só do usuário e o caminho vai junto na
-//! mensagem, que é como o Claude Code e o Codex recebem imagens.
-
-use std::path::{Path, PathBuf};
+//! envia, e Ctrl+V com uma imagem na área de transferência anexa a imagem: ela
+//! vai para o núcleo como PNG (a tela não escreve nos dados), fica anexada à
+//! tarefa, e o caminho que o núcleo devolve vai junto na mensagem, que é como
+//! o Claude Code e o Codex recebem imagens.
 
 use eframe::egui::{self, ColorImage, CornerRadius, Event, Key, Modifiers, TextureHandle, TextureOptions, vec2};
 
@@ -15,7 +14,8 @@ const MAIOR_IMAGEM: usize = 40_000_000;
 const LADO_MINIATURA: f32 = 52.0;
 
 struct Anexo {
-    caminho: PathBuf,
+    id: i64,
+    caminho: String,
     miniatura: TextureHandle,
 }
 
@@ -30,6 +30,10 @@ pub struct Compositor {
     colou_texto_em: f64,
 }
 
+/// Altura da linha de dica embaixo da caixa.
+pub const ALTURA_DICA: f32 = 24.0;
+const ID: &str = "compositor";
+
 /// O que enviar e para quem.
 pub struct Envio {
     pub destinos: Vec<i64>,
@@ -42,12 +46,17 @@ impl Compositor {
     pub fn altura(&self) -> f32 {
         let linhas = self.rascunho.split('\n').count().clamp(1, 5) as f32;
         let imagens = if self.anexos.is_empty() { 0.0 } else { LADO_MINIATURA + 10.0 };
-        54.0 + 19.0 * (linhas - 1.0) + imagens + 24.0
+        54.0 + 19.0 * (linhas - 1.0) + imagens + ALTURA_DICA
     }
 
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64) -> Option<Envio> {
+    /// O teclado está na caixa de mensagem.
+    pub fn com_foco(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(egui::Id::new(ID)))
+    }
+
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64) -> Option<Envio> {
         let p = cores();
-        let id = egui::Id::new("compositor");
+        let id = egui::Id::new(ID);
         if std::mem::take(&mut self.focar) {
             ui.memory_mut(|m| m.request_focus(id));
         }
@@ -67,10 +76,10 @@ impl Compositor {
             self.colou_texto_em = agora;
         }
         if com_foco && soltou_ctrl_v && agora - self.colou_texto_em > 0.5 {
-            self.colar_imagem(ui.ctx());
+            self.colar_imagem(ui.ctx(), tarefa);
         }
 
-        let caixa = egui::Rect::from_min_size(area.min, vec2(area.width(), area.height() - 24.0));
+        let caixa = egui::Rect::from_min_size(area.min, vec2(area.width(), area.height() - ALTURA_DICA));
         let contorno = if com_foco { egui::Stroke::new(1.5, p.destaque) } else { egui::Stroke::new(1.0, p.borda) };
         ui.painter().rect(caixa, CornerRadius::same(18), p.superficie_alta, contorno, egui::StrokeKind::Inside);
 
@@ -97,26 +106,36 @@ impl Compositor {
             }
         });
         filho.add_space(6.0);
+        // Só um agente rodando recebe mensagem: o texto de um parado se perderia.
+        let destinos: Vec<i64> = agentes.iter().filter(|a| a.ativo && (self.para_todos || a.id == foco)).map(|a| a.id).collect();
         let tem_conteudo = !self.rascunho.trim().is_empty() || !self.anexos.is_empty();
+        let pode_enviar = tem_conteudo && !destinos.is_empty();
         filho.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if tema::botao_principal(ui, "Enviar", tem_conteudo).clicked() {
+            if tema::botao_principal(ui, "Enviar", pode_enviar).clicked() {
                 enviar = true;
             }
             ui.add_space(8.0);
             let dica = if self.para_todos { "Mensagem para todos os agentes da tarefa".to_string() } else { format!("Mensagem para {em_foco}") };
             let campo = egui::TextEdit::multiline(&mut self.rascunho)
                 .id(id)
-                .frame(egui::Frame::NONE)
+                // A margem vai na moldura: com uma moldura dada, o TextEdit
+                // ignora `.margin()`, e o texto ficava 7 px acima de "Para:".
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 7)))
                 .desired_rows(1)
                 .desired_width(ui.available_width())
                 .font(egui::FontId::proportional(14.0))
-                .margin(egui::Margin::symmetric(4, 7))
                 .hint_text(dica);
             ui.add(campo);
         });
 
+        let parou = if self.para_todos {
+            "Nenhum agente da tarefa está rodando. Inicie um para mandar mensagens."
+        } else {
+            "O agente parou. Inicie de novo para mandar mensagens."
+        };
         let (texto_dica, cor_dica) = match &self.aviso {
             Some(aviso) => (aviso.as_str(), p.erro),
+            None if destinos.is_empty() => (parou, p.alerta),
             None => ("Ctrl+Enter envia · Enter quebra a linha · Ctrl+V cola imagens · clique no terminal para digitar direto nele", p.suave),
         };
         ui.painter().text(
@@ -127,12 +146,12 @@ impl Compositor {
             cor_dica,
         );
 
-        if !(enviar && tem_conteudo) {
+        if !(enviar && pode_enviar) {
             return None;
         }
         let mut texto = self.rascunho.trim().to_string();
         if !self.anexos.is_empty() {
-            let caminhos: Vec<String> = self.anexos.iter().map(|a| a.caminho.display().to_string()).collect();
+            let caminhos: Vec<String> = self.anexos.iter().map(|a| a.caminho.clone()).collect();
             let rotulo = if caminhos.len() == 1 { "Imagem anexada:" } else { "Imagens anexadas:" };
             texto = format!("{texto}\n\n{rotulo}\n{}", caminhos.join("\n")).trim().to_string();
         }
@@ -140,7 +159,7 @@ impl Compositor {
         self.anexos.clear();
         self.aviso = None;
         ui.memory_mut(|m| m.request_focus(id));
-        Some(Envio { destinos: if self.para_todos { agentes.iter().map(|a| a.id).collect() } else { vec![foco] }, texto })
+        Some(Envio { destinos, texto })
     }
 
     fn miniaturas(&mut self, ui: &mut egui::Ui, fileira: egui::Rect) {
@@ -165,11 +184,11 @@ impl Compositor {
         }
         if let Some(i) = remover {
             let anexo = self.anexos.remove(i);
-            let _ = std::fs::remove_file(anexo.caminho);
+            let _ = crate::api::remover_anexo(anexo.id);
         }
     }
 
-    fn colar_imagem(&mut self, ctx: &egui::Context) {
+    fn colar_imagem(&mut self, ctx: &egui::Context, tarefa: i64) {
         let Ok(mut area) = arboard::Clipboard::new() else {
             return;
         };
@@ -179,52 +198,27 @@ impl Compositor {
             self.aviso = Some("Imagem grande demais para anexar.".into());
             return;
         }
-        match gravar_png(&imagem) {
-            Ok(caminho) => {
+        let enviado = codificar_png(&imagem).and_then(|png| crate::api::anexar(tarefa, "mensagem", None, &png));
+        match enviado {
+            Ok(anexo) => {
                 let cor = ColorImage::from_rgba_unmultiplied([imagem.width, imagem.height], &imagem.bytes);
-                let miniatura = ctx.load_texture(caminho.display().to_string(), cor, TextureOptions::LINEAR);
-                self.anexos.push(Anexo { caminho, miniatura });
+                let miniatura = ctx.load_texture(format!("anexo-{}", anexo.id), cor, TextureOptions::LINEAR);
+                self.anexos.push(Anexo { id: anexo.id, caminho: anexo.caminho, miniatura });
                 self.aviso = None;
             }
-            Err(e) => self.aviso = Some(format!("Não consegui guardar a imagem: {e}")),
+            Err(e) => self.aviso = Some(format!("Não consegui anexar a imagem: {e}")),
         }
     }
 }
 
-/// Grava a imagem como PNG em <dados>/anexos, com permissão só do usuário.
-fn gravar_png(imagem: &arboard::ImageData) -> Result<PathBuf, String> {
-    let dir = crate::canal::diretorio_dados().join("anexos");
-    criar_pasta_privada(&dir).map_err(|e| e.to_string())?;
-    let agora = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let caminho = dir.join(format!("imagem-{}-{:03}.png", agora.as_secs(), agora.subsec_millis()));
-    let arquivo = criar_arquivo_privado(&caminho).map_err(|e| e.to_string())?;
-    let mut codificador = png::Encoder::new(std::io::BufWriter::new(arquivo), imagem.width as u32, imagem.height as u32);
+/// Codifica a imagem colada como PNG, para enviar ao núcleo.
+fn codificar_png(imagem: &arboard::ImageData) -> Result<Vec<u8>, String> {
+    let mut png = Vec::new();
+    let mut codificador = png::Encoder::new(&mut png, imagem.width as u32, imagem.height as u32);
     codificador.set_color(png::ColorType::Rgba);
     codificador.set_depth(png::BitDepth::Eight);
     let mut escritor = codificador.write_header().map_err(|e| e.to_string())?;
     escritor.write_image_data(&imagem.bytes).map_err(|e| e.to_string())?;
-    Ok(caminho)
-}
-
-#[cfg(unix)]
-fn criar_pasta_privada(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(unix)]
-fn criar_arquivo_privado(caminho: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(caminho)
-}
-
-#[cfg(not(unix))]
-fn criar_pasta_privada(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
-}
-
-#[cfg(not(unix))]
-fn criar_arquivo_privado(caminho: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(caminho)
+    escritor.finish().map_err(|e| e.to_string())?;
+    Ok(png)
 }

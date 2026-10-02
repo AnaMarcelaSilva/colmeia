@@ -16,8 +16,14 @@ const esperaAoFechar = 3 * time.Second
 
 type ptyUnix struct {
 	*os.File
-	cmd *exec.Cmd
-	fim chan struct{} // fechado quando o processo termina
+	cmd   *exec.Cmd
+	fim   chan struct{} // fechado quando o processo termina
+	saida *Saida        // gravada antes de fim fechar
+}
+
+func (p ptyUnix) Esperar() Saida {
+	<-p.fim
+	return *p.saida
 }
 
 func (p ptyUnix) Redimensionar(colunas, linhas uint16) error {
@@ -54,9 +60,15 @@ func Iniciar(comando []string, env []string, dir string) (Pty, error) {
 		return nil, err
 	}
 	fim := make(chan struct{})
+	saida := &Saida{}
 	go func() {
 		cmd.Wait()
+		if estado, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && estado.Signaled() {
+			*saida = Saida{Codigo: 128 + int(estado.Signal()), PorSinal: true}
+		} else {
+			saida.Codigo = cmd.ProcessState.ExitCode()
+		}
 		close(fim)
 	}()
-	return ptyUnix{File: arquivo, cmd: cmd, fim: fim}, nil
+	return ptyUnix{File: arquivo, cmd: cmd, fim: fim, saida: saida}, nil
 }

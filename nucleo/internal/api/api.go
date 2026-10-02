@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/avisos"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/demo"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
@@ -38,8 +39,23 @@ type Servidor struct {
 	// separadas das ferramentas ficam.
 	Banco    *dados.Banco
 	DirDados string
+	// Avisos leva as mudanças às telas conectadas, na hora.
+	Avisos *avisos.Barramento
+	// Tempos do acompanhamento dos agentes (os testes encurtam).
+	Tempos terminal.Tempos
+	// AvisoHistorico explica à tela que o histórico foi alterado por fora.
+	AvisoHistorico string
+	// AoEncerrar desliga o núcleo (POST /v1/encerrar).
+	AoEncerrar func()
 
 	mu sync.Mutex // um agente abre por vez
+
+	// Trabalhador das mudanças dos agentes (veja eventos.go).
+	mudancas    chan mudancaAgente
+	parado      chan struct{}
+	trabalhou   chan struct{}
+	muContextos sync.Mutex
+	contextos   map[int64]dados.ContextoAgente
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -50,7 +66,16 @@ func (s *Servidor) Rotas() http.Handler {
 	if s.Agentes == nil {
 		s.Agentes = terminal.NovoGerente()
 	}
+	if s.Avisos == nil {
+		s.Avisos = avisos.Novo()
+	}
+	if s.Tempos == (terminal.Tempos{}) {
+		s.Tempos = terminal.TemposPadrao
+	}
+	mux.HandleFunc("POST /v1/encerrar", s.encerrar)
 	if s.Banco != nil {
+		s.Banco.AoGravar(s.publicarEventos)
+		s.iniciarTrabalhador()
 		s.rotasDados(mux)
 	}
 	if s.Demo {
@@ -70,6 +95,19 @@ func (s *Servidor) versao(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Servidor) estatisticas(w http.ResponseWriter, _ *http.Request) {
 	responderJSON(w, map[string]any{"terminais": len(s.Sessoes), "agentes": s.Agentes.Quantidade(), "bytes": s.Bytes.Load()})
+}
+
+// encerrar desliga o núcleo pelo canal, sem precisar de kill: responde antes
+// e desliga em seguida, encerrando os agentes como num SIGTERM.
+func (s *Servidor) encerrar(w http.ResponseWriter, _ *http.Request) {
+	if s.AoEncerrar == nil {
+		http.Error(w, "este núcleo não pode ser encerrado pela API", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	go s.AoEncerrar()
 }
 
 func (s *Servidor) carga(w http.ResponseWriter, r *http.Request) {

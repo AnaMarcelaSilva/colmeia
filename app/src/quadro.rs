@@ -7,10 +7,8 @@ use eframe::egui::{self, Color32, DragAndDrop, FontId, Id, Pos2, Rect, Sense, St
 use std::collections::HashMap;
 
 use crate::dados::{Coluna, Tarefa};
-use crate::tema::{RAIO_SUPERFICIE, cores, forte};
+use crate::tema::{self, EstadoVisual, RAIO_CARTAO, RAIO_SUPERFICIE, cores, forte};
 use crate::terminal::TerminalAgente;
-
-const RAIO_CARTAO: u8 = 10;
 
 const ESPACO: f32 = 10.0;
 
@@ -19,7 +17,7 @@ pub enum Acao {
     AbrirTarefa(i64),
     /// Um cartão foi arrastado para outra coluna.
     Moveu(i64, Coluna),
-    /// Pediram para remover a tarefa (menu do botão direito).
+    /// Pediram para remover a tarefa (menu do botão direito ou do "⋯").
     Remover(i64),
 }
 
@@ -27,19 +25,28 @@ pub enum Acao {
 #[derive(Clone, Copy)]
 struct Arrastando(i64);
 
+/// A linha de espera da tarefa só aparece quando nenhum agente dela já diz
+/// que espera você (na demonstração, onde o motivo é fixo). Com um agente
+/// esperando, a coluna e a linha do agente já contam tudo.
+fn mostra_motivo(t: &Tarefa) -> bool {
+    t.motivo.is_some() && !t.agentes.iter().any(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez))
+}
+
 fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
-    let avisos = [t.motivo.is_some(), t.erro.is_some()].iter().filter(|a| **a).count() as f32;
+    let avisos = [mostra_motivo(t), t.erro.is_some()].iter().filter(|a| **a).count() as f32;
     let projeto = if com_projeto { 16.0 } else { 0.0 };
     66.0 + projeto + 19.0 * avisos + 40.0 * t.agentes.len() as f32
 }
 
 /// `projeto` = None mostra o perfil inteiro, com o nome do projeto em cada cartão.
+/// Sem `pode_mudar` (núcleo fora), nada se arrasta nem se remove.
 pub fn mostrar(
     ui: &mut egui::Ui,
     tarefas: &mut Vec<Tarefa>,
     projeto: Option<i64>,
     filtro: Option<&str>,
     terminais: &HashMap<i64, TerminalAgente>,
+    pode_mudar: bool,
 ) -> Vec<Acao> {
     let mut acoes = Vec::new();
     let com_projeto = projeto.is_none();
@@ -97,7 +104,7 @@ pub fn mostrar(
                 // Virtualização: pula o que está fora da parte visível.
                 if y + h >= janela.min.y && y <= janela.max.y {
                     let rect = Rect::from_min_size(origem + vec2(0.0, y), vec2(largura, h));
-                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, com_projeto) {
+                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, com_projeto, pode_mudar) {
                         acoes.push(a);
                     }
                 }
@@ -130,7 +137,7 @@ fn linha_cortada(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, 
     altura
 }
 
-fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, TerminalAgente>, com_projeto: bool) -> Option<Acao> {
+fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, TerminalAgente>, com_projeto: bool, pode_mudar: bool) -> Option<Acao> {
     let p = cores();
     let arrastado = DragAndDrop::payload::<Arrastando>(ui.ctx()).is_some_and(|p| p.0 == t.id);
     let em_cima = ui.rect_contains_pointer(rect) && !arrastado;
@@ -140,6 +147,7 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, Te
     pintor.rect(rect, RAIO_CARTAO, fundo, Stroke::new(1.0, contorno), StrokeKind::Inside);
     if t.erro.is_some() {
         // Erro como faixa na lateral: chama atenção sem pintar o cartão inteiro.
+        // Só o erro tem faixa: "aguardando" já é dito pela coluna.
         let faixa = Rect::from_min_size(rect.min + vec2(0.0, 10.0), vec2(3.0, rect.height() - 20.0));
         pintor.rect_filled(faixa, 2.0, p.erro);
     }
@@ -158,39 +166,51 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, Te
     let numero = pintor.layout_no_wrap(format!("#{}", t.id), FontId::proportional(11.5), p.suave);
     let largura_numero = numero.size().x;
     pintor.galley(pos2(x, y + 2.0), numero, p.suave);
-    let (texto, cor) = if t.branch.is_empty() { ("pasta".to_string(), p.suave) } else { (t.branch.clone(), p.destaque) };
-    let branch = pintor.layout_no_wrap(texto, FontId::monospace(11.0), cor);
-    let etiqueta = Rect::from_min_size(pos2(x + largura_numero + 8.0, y), vec2(branch.size().x + 12.0, 19.0));
-    pintor.rect_filled(etiqueta, 6.0, cor.gamma_multiply(0.14));
-    pintor.galley(etiqueta.center() - branch.size() / 2.0, branch, cor);
+    let (texto, cor) = if t.branch.is_empty() { ("pasta", p.suave) } else { (t.branch.as_str(), p.destaque) };
+    tema::etiqueta(pintor, pos2(x + largura_numero + 8.0, y), texto, FontId::monospace(11.0), cor);
+    let y_etiqueta = y;
     y += 28.0;
 
-    if let Some(erro) = t.erro {
+    if let Some(erro) = &t.erro {
         linha_cortada(pintor, pos2(x, y), &format!("Erro: {erro}"), FontId::proportional(12.0), p.erro, largura);
         y += 19.0;
     }
-    if let Some(motivo) = t.motivo {
+    if let Some(motivo) = t.motivo.as_ref().filter(|_| mostra_motivo(t)) {
         linha_cortada(pintor, pos2(x, y), &format!("Aguardando: {motivo}"), FontId::proportional(12.0), p.alerta, largura);
         y += 19.0;
     }
     for agente in &t.agentes {
         let terminal = terminais.get(&agente.id).filter(|t| !t.encerrado());
+        // Na demonstração os agentes são os terminais de teste: o estado vem deles.
+        let estado = if agente.fim.is_none() && agente.ativo && agente.desde.is_empty() && agente.motivo.is_empty() {
+            if terminal.is_some() { EstadoVisual::Trabalhando } else { EstadoVisual::Terminou }
+        } else {
+            agente.visual()
+        };
         y += 2.0;
-        pintor.circle_filled(pos2(x + 3.5, y + 8.0), 3.5, if terminal.is_some() { p.ok } else { p.suave });
+        tema::ponto(pintor, pos2(x + 3.5, y + 8.0), 3.5, estado);
         let nome = pintor.layout_no_wrap(agente.nome(), FontId::proportional(12.5), p.texto);
         let largura_nome = nome.size().x;
         pintor.galley(pos2(x + 13.0, y), nome, p.texto);
         pintor.text(pos2(x + 19.0 + largura_nome, y), egui::Align2::LEFT_TOP, &agente.papel, FontId::proportional(12.0), p.suave);
         y += 18.0;
-        let ultima = terminal.map_or_else(|| "parado".to_string(), |t| t.ultima_linha());
-        linha_cortada(pintor, pos2(x + 13.0, y), &ultima, FontId::monospace(11.0), p.suave, largura - 13.0);
+        // Trabalhando: a última linha do terminal. Fora disso, o estado (que não muda a cada quadro).
+        if estado == EstadoVisual::Trabalhando {
+            // O fim da linha (o prompt, o caminho) é o que importa: corta pelo começo.
+            let ultima = terminal.map_or_else(String::new, |t| t.ultima_linha());
+            tema::texto_sem_inicio(pintor, pos2(x + 13.0, y), &ultima, FontId::monospace(11.0), p.suave, largura - 13.0);
+        } else {
+            let (texto, hora) = if agente.ativo || agente.fim.is_some() { agente.estado_curto() } else { ("Parado".to_string(), String::new()) };
+            tema::texto_com_fim(pintor, pos2(x + 13.0, y), &texto, &hora, FontId::proportional(12.0), estado.cor(), p.suave, largura - 13.0);
+        }
         y += 20.0;
     }
 
     // Registrado depois do conteúdo para ficar por cima e receber clique e arrasto.
-    let resposta = ui.interact(rect, Id::new(("cartao", t.id)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    // Só o botão esquerdo arrasta; o direito abre o menu do cartão.
-    if resposta.drag_started_by(egui::PointerButton::Primary) {
+    let resposta = ui.interact(rect, Id::new(("cartao", t.id)), Sense::click_and_drag());
+    let resposta = if pode_mudar { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta };
+    // Só o botão esquerdo arrasta; o direito abre o menu do cartão. Sem o núcleo, nada se move.
+    if pode_mudar && resposta.drag_started_by(egui::PointerButton::Primary) {
         DragAndDrop::set_payload(ui.ctx(), Arrastando(t.id));
     }
 
@@ -206,16 +226,28 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, Te
     }
 
     let mut acao = resposta.clicked().then_some(Acao::AbrirTarefa(t.id));
-    resposta.context_menu(|ui| {
+    let menu = |ui: &mut egui::Ui, acao: &mut Option<Acao>| {
         ui.set_min_width(200.0);
-        if crate::tema::opcao_menu(ui, "Abrir tarefa", false) {
-            acao = Some(Acao::AbrirTarefa(t.id));
+        if tema::opcao_menu(ui, "Abrir tarefa", false) {
+            *acao = Some(Acao::AbrirTarefa(t.id));
             ui.close();
         }
-        if crate::tema::opcao_menu(ui, "Remover tarefa…", false) {
-            acao = Some(Acao::Remover(t.id));
+        if tema::opcao_menu_com(ui, "Remover tarefa…", None, pode_mudar) {
+            *acao = Some(Acao::Remover(t.id));
             ui.close();
         }
-    });
+    };
+    resposta.context_menu(|ui| menu(ui, &mut acao));
+    // O "⋯" só aparece com o mouse em cima, na linha do número (não corta o
+    // título nem faz o texto pular). Registrado depois do cartão, fica por cima.
+    let menu_aberto = egui::Popup::is_id_open(ui.ctx(), Id::new(("menu-cartao", t.id)));
+    if em_cima || menu_aberto {
+        let botao = Rect::from_min_size(pos2(rect.right() - 10.0 - 24.0, y_etiqueta + 9.5 - 12.0), vec2(24.0, 24.0));
+        let mais = tema::botao_icone_em(ui, botao, Id::new(("mais-cartao", t.id)), tema::Icone::Mais);
+        if mais.clicked() {
+            acao = None;
+        }
+        egui::Popup::menu(&mais).id(Id::new(("menu-cartao", t.id))).show(|ui| menu(ui, &mut acao));
+    }
     acao
 }

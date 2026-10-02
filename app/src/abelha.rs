@@ -1,5 +1,6 @@
 //! A abelha da barra lateral: resume o que mais precisa de você no escopo que
-//! está na tela (o perfil inteiro ou um projeto) e só anima quando o estado muda.
+//! está na tela (o perfil inteiro ou um projeto) e só anima quando o estado
+//! muda ou o mouse chega nela.
 
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use eframe::egui::{self, Color32, Id, Order, Pos2, RichText, Sense, vec2};
 use mascote::{Estado, Tempo};
 
 use crate::dados::{Coluna, Tarefa};
-use crate::tema::cores;
+use crate::tema::{EstadoVisual, cores};
 
 /// Quanto dura a comemoração de uma tarefa concluída.
 pub const COMEMORACAO: f64 = 3.0;
@@ -27,15 +28,23 @@ pub struct Abelha {
     pub resumo_aberto: bool,
     estado: Estado,
     mudou_em: f64,
+    /// Até quando a abelha anima (troca de estado ou mouse em cima).
+    animar_ate: f64,
+    em_cima: bool,
 }
 
+/// Quadros por segundo da animação: suave o bastante para uma abelha de 78 px
+/// e metade do custo de redesenhar a janela inteira a 60 por segundo.
+const QUADROS_ANIMACAO: f64 = 30.0;
+
 /// O estado de um conjunto de tarefas, sem contar a comemoração (que é um momento).
+/// Prioridade: erro, aguardando você, trabalhando.
 pub fn estado_base<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, agentes_rodando: bool) -> Estado {
     let (mut erro, mut aguardando, mut trabalhando) = (false, false, false);
     for t in tarefas {
         erro |= t.erro.is_some() && !t.erro_visto;
-        aguardando |= t.coluna == Coluna::AguardandoVoce;
-        trabalhando |= agentes_rodando && t.coluna == Coluna::Trabalhando && t.agentes.iter().any(|a| a.ativo);
+        aguardando |= t.coluna == Coluna::AguardandoVoce || t.agentes.iter().any(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez));
+        trabalhando |= agentes_rodando && t.agentes.iter().any(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando);
     }
     if erro {
         Estado::Bugado
@@ -63,7 +72,7 @@ pub fn cor_ponto(estado: Estado, tem_erro: bool, concluiu_ha_pouco: bool) -> Opt
 
 impl Abelha {
     pub fn new() -> Self {
-        Self { conclusoes: Vec::new(), resumo_aberto: false, estado: Estado::Dormindo, mudou_em: 0.0 }
+        Self { conclusoes: Vec::new(), resumo_aberto: false, estado: Estado::Dormindo, mudou_em: 0.0, animar_ate: 0.0, em_cima: false }
     }
 
     pub fn concluiu(&mut self, id: i64, projeto_id: i64, agora: f64) {
@@ -85,6 +94,7 @@ impl Abelha {
         if novo != self.estado {
             self.estado = novo;
             self.mudou_em = agora;
+            self.animar_ate = agora + ANIMACAO;
         }
         novo
     }
@@ -93,24 +103,22 @@ impl Abelha {
         let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), 132.0), Sense::click());
         let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
 
-        // Anima só na troca de estado, na comemoração e em rajadas curtas
-        // (a falha do bugado, uma piscada nos outros). No resto do tempo o
-        // desenho usa um tempo parado e nenhum redesenho é pedido.
-        let desde = agora - self.mudou_em;
+        // Anima só depois de uma troca de estado, durante a comemoração e por
+        // uns segundos quando o mouse chega nela; no resto do tempo fica parada
+        // e não pede redesenho nenhum (a janela inteira é redesenhada a cada
+        // quadro, então uma abelha sempre animada custaria a janela inteira).
         let ctx = ui.ctx().clone();
-        let (intervalo, rajada) = if self.estado == Estado::Bugado { (4.0, 0.5) } else { (6.0, 0.35) };
-        let t_visual = if desde < ANIMACAO || self.estado == Estado::Comemorando {
-            ctx.request_repaint();
+        let em_cima = resposta.hovered();
+        if em_cima && !self.em_cima {
+            self.animar_ate = self.animar_ate.max(agora + ANIMACAO);
+        }
+        self.em_cima = em_cima;
+        let animando = agora < self.animar_ate || self.estado == Estado::Comemorando;
+        let t_visual = if animando {
+            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / QUADROS_ANIMACAO));
             agora
         } else {
-            let fase = (desde - ANIMACAO) % intervalo;
-            if fase < rajada {
-                ctx.request_repaint();
-                agora
-            } else {
-                ctx.request_repaint_after(Duration::from_secs_f64(intervalo - fase));
-                self.tempo_parado()
-            }
+            self.tempo_parado()
         };
 
         let pintor = ui.painter_at(rect);
@@ -137,8 +145,31 @@ impl Abelha {
     }
 }
 
-/// Resumo aberto ao clicar na abelha: uma linha por ocorrência, que leva ao cartão.
-/// Retorna a tarefa clicada e a resposta da área, para fechar ao clicar fora.
+/// A linha embaixo da abelha: quantos precisam de você, ou o que está acontecendo.
+pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tarefa> + Clone) -> String {
+    let plural = |n: usize, um: &str, varios: &str| if n == 1 { format!("1 {um}") } else { format!("{n} {varios}") };
+    let agentes = || tarefas.clone().flat_map(|t| &t.agentes);
+    match estado {
+        Estado::Bugado => {
+            let n = agentes().filter(|a| a.erro_novo()).count() + tarefas.clone().filter(|t| t.erro.is_some() && !t.erro_visto && t.agentes.is_empty()).count();
+            plural(n.max(1), "erro", "erros")
+        }
+        Estado::Aguardando => {
+            let n = agentes().filter(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez)).count();
+            let n = n.max(tarefas.clone().filter(|t| t.coluna == Coluna::AguardandoVoce).count());
+            plural(n, "esperando você", "esperando você")
+        }
+        Estado::Comemorando => "tarefa concluída".to_string(),
+        Estado::Trabalhando => {
+            plural(agentes().filter(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando).count(), "agente trabalhando", "agentes trabalhando")
+        }
+        Estado::Dormindo => "tudo quieto".to_string(),
+    }
+}
+
+/// Resumo aberto ao clicar na abelha: uma linha por agente que precisa de
+/// você (e por tarefa concluída), que leva à tarefa com foco nesse agente.
+/// Retorna a tarefa (e o agente) clicados e a resposta da área, para fechar ao clicar fora.
 pub fn resumo(
     ctx: &egui::Context,
     ancora: Pos2,
@@ -147,7 +178,7 @@ pub fn resumo(
     conclusoes: &[Conclusao],
     agentes_rodando: bool,
     agora: f64,
-) -> (Option<i64>, egui::Response) {
+) -> (Option<(i64, Option<i64>)>, egui::Response) {
     let mut escolhida = None;
     let area = egui::Area::new(Id::new("resumo-abelha")).order(Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(cores().superficie_alta).corner_radius(crate::tema::RAIO_SUPERFICIE).inner_margin(14).show(ui, |ui| {
@@ -155,43 +186,127 @@ pub fn resumo(
             ui.label(crate::tema::texto_forte("O que está acontecendo", 14.0).color(cores().texto));
             ui.add_space(6.0);
             let mut vazio = true;
-            let mut linha = |ui: &mut egui::Ui, cor: Color32, titulo: String, detalhe: String, id: i64| {
+            // Cada texto vem em duas partes: o começo pode ser cortado com "…",
+            // o fim (o projeto, a hora) fica sempre inteiro.
+            let mut linha = |ui: &mut egui::Ui, estado: EstadoVisual, titulo: (String, String), detalhe: (String, String), alvo: (i64, Option<i64>)| {
                 vazio = false;
-                let resposta = ui
-                    .vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            let (ponto, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                            ui.painter().circle_filled(ponto.center(), 3.5, cor);
-                            ui.label(RichText::new(titulo).color(cores().texto));
-                        });
-                        ui.label(RichText::new(detalhe).color(cores().suave).size(11.5));
-                    })
-                    .response
-                    .interact(Sense::click())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if resposta.clicked() {
-                    escolhida = Some(id);
+                let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
+                let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resposta.hovered() {
+                    ui.painter().rect_filled(rect, crate::tema::RAIO_CONTROLE, cores().realce);
                 }
-                ui.add_space(4.0);
+                let interno = rect.shrink2(vec2(6.0, 4.0));
+                crate::tema::ponto(ui.painter(), egui::pos2(interno.left() + 4.0, interno.top() + 9.0), 3.5, estado);
+                let largura = interno.width() - 16.0;
+                let (fonte, fonte_detalhe) = (egui::FontId::proportional(13.5), egui::FontId::proportional(11.5));
+                let altura = ui.fonts_mut(|f| f.row_height(&fonte));
+                let altura_detalhe = ui.fonts_mut(|f| f.row_height(&fonte_detalhe));
+                let x = interno.left() + 16.0;
+                let (texto, suave) = (cores().texto, cores().suave);
+                let cortou_titulo = crate::tema::texto_com_fim(
+                    ui.painter(),
+                    egui::pos2(x, interno.top() + 9.0 - altura / 2.0),
+                    &titulo.0,
+                    &titulo.1,
+                    fonte,
+                    texto,
+                    texto,
+                    largura,
+                );
+                let cortou_detalhe = crate::tema::texto_com_fim(
+                    ui.painter(),
+                    egui::pos2(x, interno.bottom() - 7.0 - altura_detalhe / 2.0),
+                    &detalhe.0,
+                    &detalhe.1,
+                    fonte_detalhe,
+                    suave,
+                    suave,
+                    largura,
+                );
+                // A dica com o texto inteiro só quando algo foi cortado.
+                let resposta = if cortou_titulo || cortou_detalhe {
+                    resposta.on_hover_text(format!("{}{}\n{}{}", titulo.0, titulo.1, detalhe.0, detalhe.1))
+                } else {
+                    resposta
+                };
+                if resposta.clicked() {
+                    escolhida = Some(alvo);
+                }
             };
 
             let visiveis = || tarefas.iter().filter(|t| no_escopo(t.projeto_id));
-            for t in visiveis().filter(|t| t.erro.is_some() && !t.erro_visto) {
-                linha(ui, cores().erro, format!("Erro em {}", t.projeto), format!("{}: {}", t.titulo, t.erro.unwrap_or_default()), t.id);
+            // Erros que você ainda não viu, um por agente.
+            for t in visiveis() {
+                for a in t.agentes.iter().filter(|a| a.erro_novo()) {
+                    let hora = a.fim.as_ref().map(|f| format!(" · às {}", f.hora)).unwrap_or_default();
+                    linha(
+                        ui,
+                        EstadoVisual::Erro,
+                        (format!("{} parou com erro", a.nome_com_papel()), format!(" em {}", t.projeto)),
+                        (format!("“{}”", t.titulo), hora),
+                        (t.id, Some(a.id)),
+                    );
+                }
+                // Na demonstração o erro é da tarefa, sem agente.
+                if t.agentes.iter().all(|a| !a.erro_novo()) && t.erro.is_some() && !t.erro_visto && t.agentes.iter().all(|a| a.fim.is_none()) {
+                    linha(
+                        ui,
+                        EstadoVisual::Erro,
+                        ("Erro".into(), format!(" em {}", t.projeto)),
+                        (format!("{}: {}", t.titulo, t.erro.clone().unwrap_or_default()), String::new()),
+                        (t.id, None),
+                    );
+                }
             }
-            for t in visiveis().filter(|t| t.coluna == Coluna::AguardandoVoce) {
-                linha(ui, cores().alerta, format!("Aguardando você em {}", t.projeto), format!("{}: {}", t.titulo, t.motivo.unwrap_or("pede resposta")), t.id);
+            // Quem espera você, um por agente; cartões em "Aguardando" sem agente esperando também.
+            for t in visiveis() {
+                let mut algum = false;
+                for a in &t.agentes {
+                    let estado = a.visual();
+                    if matches!(estado, EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez) {
+                        algum = true;
+                        let acao = if estado == EstadoVisual::PedeAprovacao { "pede aprovação" } else { "espera sua resposta" };
+                        let desde = if a.desde.is_empty() { String::new() } else { format!(" · desde {}", a.desde) };
+                        linha(
+                            ui,
+                            estado,
+                            (format!("{} {acao}", a.nome_com_papel()), format!(" em {}", t.projeto)),
+                            (format!("“{}”", t.titulo), desde),
+                            (t.id, Some(a.id)),
+                        );
+                    }
+                }
+                if !algum && t.coluna == Coluna::AguardandoVoce {
+                    let detalhe = match &t.motivo {
+                        Some(m) => format!("“{}”: {m}", t.titulo),
+                        None => format!("“{}”", t.titulo),
+                    };
+                    linha(ui, EstadoVisual::SuaVez, ("Aguardando você".into(), format!(" em {}", t.projeto)), (detalhe, String::new()), (t.id, None));
+                }
             }
             for c in conclusoes.iter().rev().filter(|c| agora - c.em < CONCLUSAO_RECENTE && no_escopo(c.projeto_id)).take(5) {
                 if let Some(t) = tarefas.iter().find(|t| t.id == c.id) {
-                    linha(ui, cores().destaque, format!("Concluída em {}", t.projeto), format!("{}, há {:.0} s", t.titulo, agora - c.em), t.id);
+                    linha(
+                        ui,
+                        EstadoVisual::Concluiu,
+                        ("Concluída".into(), format!(" em {}", t.projeto)),
+                        (t.titulo.clone(), format!(", há {:.0} s", agora - c.em)),
+                        (t.id, None),
+                    );
                 }
             }
             let rodando: Vec<&Tarefa> =
-                visiveis().filter(|t| agentes_rodando && t.coluna == Coluna::Trabalhando && t.agentes.iter().any(|a| a.ativo)).collect();
+                visiveis().filter(|t| agentes_rodando && t.agentes.iter().any(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando)).collect();
             if let Some(primeira) = rodando.first() {
-                let agentes: usize = rodando.iter().map(|t| t.agentes.len()).sum();
-                linha(ui, cores().ok, format!("{} tarefas com agentes trabalhando", rodando.len()), format!("{agentes} agentes no total"), primeira.id);
+                // Conta só os agentes que estão trabalhando, não os parados da mesma tarefa.
+                let agentes: usize = rodando.iter().map(|t| t.agentes.iter().filter(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando).count()).sum();
+                let tarefas_texto = if rodando.len() == 1 {
+                    "1 tarefa com agentes trabalhando".to_string()
+                } else {
+                    format!("{} tarefas com agentes trabalhando", rodando.len())
+                };
+                let agentes_texto = if agentes == 1 { "1 agente no total".to_string() } else { format!("{agentes} agentes no total") };
+                linha(ui, EstadoVisual::Trabalhando, (tarefas_texto, String::new()), (agentes_texto, String::new()), (primeira.id, None));
             }
             if vazio {
                 ui.label(RichText::new("Nada precisa de você agora.").color(cores().suave));

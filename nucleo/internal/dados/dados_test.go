@@ -2,6 +2,7 @@ package dados
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -73,7 +74,7 @@ func TestCicloCompleto(t *testing.T) {
 		t.Error("a tarefa nova deveria ir para o fim do Backlog")
 	}
 	coluna := "revisao"
-	movida, err := b.AtualizarTarefa(ctx, primeira.ID, Mudanca{Coluna: &coluna})
+	movida, err := b.AtualizarTarefa(ctx, primeira.ID, Mudanca{Coluna: &coluna}, OrigemVoce)
 	if err != nil || movida.Coluna != "revisao" {
 		t.Fatalf("mover tarefa: %+v, %v", movida, err)
 	}
@@ -224,5 +225,140 @@ func TestBancoAntigoGanhaAsColunasNovas(t *testing.T) {
 	}
 	if _, err := b.CriarTarefa(ctx, projetos[0].ID, "Depois da atualização", "main", ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEventosLevamOEscopo(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	var avisados []Evento
+	b.AoGravar(func(e []Evento) { avisados = append(avisados, e...) })
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	ws, _ := b.CriarWorkspace(ctx, perfil.ID, "W")
+	projeto, _ := b.CriarProjeto(ctx, ws.ID, "loja-web", "/tmp/loja-web", "git", "main")
+	tarefa, _ := b.CriarTarefa(ctx, projeto.ID, "Nova tela de pedidos", "main", "")
+	coluna := "concluido"
+	b.AtualizarTarefa(ctx, tarefa.ID, Mudanca{Coluna: &coluna}, OrigemVoce)
+	b.RemoverTarefa(ctx, tarefa.ID)
+
+	eventos, err := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// perfil, workspace, projeto, tarefa criada, atualizada e removida, do mais novo ao mais antigo.
+	if len(eventos) != 6 || eventos[0].Tipo != "tarefa.removida" {
+		t.Fatalf("eventos do perfil: %+v", eventos)
+	}
+	removida := eventos[0]
+	if removida.Escopo != (Escopo{Perfil: perfil.ID, Projeto: projeto.ID, Tarefa: tarefa.ID}) {
+		t.Errorf("escopo da remoção: %+v", removida.Escopo)
+	}
+	// O título fica no evento: a linha do tempo não depende da tarefa existir.
+	var d struct {
+		Titulo      string
+		ProjetoNome string `json:"projeto_nome"`
+	}
+	json.Unmarshal(removida.Dados, &d)
+	if d.Titulo != "Nova tela de pedidos" || d.ProjetoNome != "loja-web" {
+		t.Errorf("dados da remoção: %s", removida.Dados)
+	}
+	if outros, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: outro.ID}); len(outros) != 1 {
+		t.Errorf("o outro perfil vê eventos que não são dele: %+v", outros)
+	}
+	if len(avisados) != 7 {
+		t.Errorf("avisados %d eventos, esperados 7", len(avisados))
+	}
+
+	// Uma transação desfeita não avisa nada.
+	antes := len(avisados)
+	if _, err := b.CriarPerfil(ctx, "Profissional", ""); err == nil {
+		t.Fatal("perfil repetido foi aceito")
+	}
+	erroProposital := errors.New("desfazer")
+	if err := b.emTransacao(ctx, func(tx *transacao) error {
+		if err := registrar(ctx, tx, "teste", Escopo{Perfil: perfil.ID}, map[string]any{}); err != nil {
+			return err
+		}
+		return erroProposital
+	}); !errors.Is(err, erroProposital) {
+		t.Fatal(err)
+	}
+	if len(avisados) != antes {
+		t.Error("transação desfeita avisou eventos")
+	}
+	if err := b.VerificarHistorico(ctx); err != nil {
+		t.Errorf("histórico íntegro acusou problema: %v", err)
+	}
+}
+
+func TestEscopoMudadoPorForaEDetectado(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	b.CriarPerfil(ctx, "Profissional", "")
+	b.CriarPerfil(ctx, "Pessoal", "")
+	if _, err := b.db.Exec(`UPDATE eventos SET perfil_id = 2 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.VerificarHistorico(ctx); err == nil {
+		t.Error("um evento mudado de perfil passou despercebido")
+	}
+}
+
+// Um banco da entrega B: eventos sem escopo, com tarefas e agentes já removidos.
+func TestEventosAntigosGanhamOEscopo(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Antigo", "")
+	ws, _ := b.CriarWorkspace(ctx, perfil.ID, "W")
+	projeto, _ := b.CriarProjeto(ctx, ws.ID, "loja-web", "/tmp/loja-web", "git", "main")
+	tarefa, _ := b.CriarTarefa(ctx, projeto.ID, "Antiga", "main", "")
+	agente, _ := b.CriarAgente(ctx, tarefa.ID, "shell", "dev", "")
+	b.RemoverAgente(ctx, agente.ID)
+	b.RemoverTarefa(ctx, tarefa.ID)
+	// Refaz o histórico como a entrega B gravava: sem _escopo, sem colunas, versão 0.
+	b.db.Exec(`DELETE FROM eventos`)
+	anterior := ""
+	for _, e := range []struct{ tipo, dados string }{
+		{"perfil.criado", `{"id":1,"nome":"Antigo","tema":"escuro","criado_em":"x"}`},
+		{"workspace.criado", `{"id":1,"perfil_id":1,"nome":"W"}`},
+		{"projeto.criado", `{"id":1,"workspace_id":1,"nome":"loja-web"}`},
+		{"tarefa.criada", `{"id":1,"projeto_id":1,"titulo":"Antiga"}`},
+		{"agente.criado", `{"id":1,"tarefa_id":1,"ferramenta":"shell"}`},
+		{"agente.removido", `{"agente":1}`},
+		{"tarefa.atualizada", `{"tarefa":1,"mudanca":{"coluna":"revisao"}}`},
+		{"tarefa.removida", `{"tarefa":1}`},
+		{"misterio", `{}`},
+	} {
+		momento := agora()
+		hash := hashEvento(anterior, momento, e.tipo, e.dados)
+		if _, err := b.db.Exec(`INSERT INTO eventos (momento, tipo, dados, hash_anterior, hash) VALUES (?, ?, ?, ?, ?)`, momento, e.tipo, e.dados, anterior, hash); err != nil {
+			t.Fatal(err)
+		}
+		anterior = hash
+	}
+	b.db.Exec(`PRAGMA user_version = 0`)
+	b.Fechar()
+
+	b, err = Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Fechar()
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID})
+	if len(eventos) != 8 {
+		t.Fatalf("esperados 8 eventos ligados ao perfil (o desconhecido fica de fora), vieram %d", len(eventos))
+	}
+	for _, e := range eventos {
+		if e.Tipo == "agente.removido" && e.Escopo != (Escopo{Perfil: 1, Projeto: 1, Tarefa: 1, Agente: 1}) {
+			t.Errorf("agente removido sem o caminho até o perfil: %+v", e.Escopo)
+		}
+	}
+	if err := b.VerificarHistorico(ctx); err != nil {
+		t.Errorf("a migração quebrou o histórico: %v", err)
 	}
 }

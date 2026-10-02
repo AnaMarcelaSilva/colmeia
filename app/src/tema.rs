@@ -13,9 +13,13 @@ use eframe::egui::{
     ThemePreference, Visuals, pos2, vec2,
 };
 
-/// Cantos: controles, superfícies (colunas, cartões, janelas) e chips.
+/// Cantos: etiquetas, controles, cartões, superfícies (colunas, painéis) e
+/// janelas. Uma pílula usa metade da altura. As peças novas usam só estes.
+pub const RAIO_ETIQUETA: u8 = 6;
 pub const RAIO_CONTROLE: u8 = 8;
+pub const RAIO_CARTAO: u8 = 10;
 pub const RAIO_SUPERFICIE: u8 = 12;
+pub const RAIO_JANELA: u8 = 16;
 
 pub struct Paleta {
     pub fundo: Color32,
@@ -76,8 +80,8 @@ pub const CLARO: Paleta = Paleta {
     texto: rgb(0x1b1f27),
     suave: rgb(0x667085),
     destaque: rgb(0x7c4ddb),
-    ok: rgb(0x23915a),
-    alerta: rgb(0xc2780e),
+    ok: rgb(0x1f8450),
+    alerta: rgb(0xa86400),
     erro: rgb(0xd6364a),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 13),
     terminal_fundo: rgb(0xfbfbfd),
@@ -101,7 +105,7 @@ pub const LEITURA: Paleta = Paleta {
     suave: rgb(0x77695a),
     destaque: rgb(0x9a4a22),
     ok: rgb(0x4d7a36),
-    alerta: rgb(0xa86a0c),
+    alerta: rgb(0x965d08),
     erro: rgb(0xb3372d),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 12),
     terminal_fundo: rgb(0xf7f1e3),
@@ -111,6 +115,19 @@ pub const LEITURA: Paleta = Paleta {
         rgb(0x8a7c6a), rgb(0xc7473c), rgb(0x5e8f45), rgb(0xa07418), rgb(0x4a70a3), rgb(0x9a568d), rgb(0x3a8781), rgb(0x3a2f24),
     ],
 };
+
+/// Mistura opaca de `a` para `b` (t = 0 dá `a`, t = 1 dá `b`). Para fundos
+/// tingidos: uma cor translúcida sobre um painel sem nada embaixo se mistura
+/// com o preto da janela, não com o fundo do tema.
+pub fn misturar(a: Color32, b: Color32, t: f32) -> Color32 {
+    let canal = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(canal(a.r(), b.r()), canal(a.g(), b.g()), canal(a.b(), b.b()))
+}
+
+/// Fundo de faixa tingido pela cor do aviso, já opaco sobre o fundo do tema.
+pub fn fundo_tingido(p: &Paleta, cor: Color32, claro: bool) -> Color32 {
+    misturar(p.fundo, cor, if claro { 0.12 } else { 0.18 })
+}
 
 /// 0 = escuro, 1 = claro, 2 = leitura.
 static ATUAL: AtomicU8 = AtomicU8::new(0);
@@ -208,7 +225,9 @@ pub fn instalar(ctx: &egui::Context) {
 
     ctx.set_visuals_of(Theme::Dark, visuais(&ESCURO, Visuals::dark()));
     ctx.set_visuals_of(Theme::Light, visuais(&CLARO, Visuals::light()));
-    ctx.global_style_mut(|s| {
+    // Nos dois estilos (escuro e claro): o claro e o leitura usam a vaga do
+    // claro e, sem isto, ficariam com os tamanhos e espaçamentos padrão do egui.
+    ctx.all_styles_mut(|s| {
         s.interaction.selectable_labels = false;
         s.spacing.button_padding = vec2(12.0, 6.0);
         s.spacing.item_spacing = vec2(8.0, 6.0);
@@ -375,7 +394,7 @@ pub fn campo(ui: &mut egui::Ui, rotulo: &str, texto: &mut String, dica: &str) ->
     ui.add_space(2.0);
     let largura = ui.available_width();
     egui::Frame::new()
-        .fill(p.superficie)
+        .fill(fundo_campo(p, false))
         .stroke(Stroke::new(1.0, p.borda))
         .corner_radius(CornerRadius::same(RAIO_CONTROLE))
         .inner_margin(egui::Margin::symmetric(10, 7))
@@ -389,6 +408,13 @@ pub fn campo(ui: &mut egui::Ui, rotulo: &str, texto: &mut String, dica: &str) ->
             )
         })
         .inner
+}
+
+/// Fundo de um campo de texto. Nos temas claros, o editável fica no tom mais
+/// claro (como um papel em branco) e o só leitura no recuado; no escuro, o
+/// recuado já se destaca do painel.
+fn fundo_campo(p: &Paleta, so_leitura: bool) -> Color32 {
+    if claro() && !so_leitura { p.superficie_alta } else { p.superficie }
 }
 
 /// Título e explicação de uma tela ou diálogo.
@@ -407,7 +433,7 @@ pub fn moldura_janela() -> egui::Frame {
     egui::Frame::new()
         .fill(p.superficie_alta)
         .stroke(Stroke::new(1.0, p.borda))
-        .corner_radius(CornerRadius::same(16))
+        .corner_radius(CornerRadius::same(RAIO_JANELA))
         .inner_margin(egui::Margin::same(24))
         .shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(if claro() { 40 } else { 110 }) })
 }
@@ -438,13 +464,349 @@ pub fn botao_principal(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response 
 
 /// Botão secundário: pílula discreta, sem seta (para ações, não para menus).
 pub fn botao_secundario(ui: &mut egui::Ui, texto: &str) -> Response {
+    botao_secundario_com(ui, texto, true)
+}
+
+/// Botão secundário que pode ficar inativo: texto suave, sem fundo e com a
+/// borda apagada, para parecer do mesmo estado que o principal inativo.
+pub fn botao_secundario_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response {
     let p = cores();
-    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.texto);
+    let cor = if ativo { p.texto } else { p.suave };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), cor);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), if ativo { Sense::click() } else { Sense::hover() });
+    let (fundo, borda) = match (ativo, resposta.hovered()) {
+        (false, _) => (Color32::TRANSPARENT, p.borda.gamma_multiply(0.5)),
+        (true, true) => (p.realce, p.borda),
+        (true, false) => (p.superficie_alta, p.borda),
+    };
+    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, cor);
+    if ativo { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta }
+}
+
+/// Botão de uma ação que encerra algo (parar agentes, por exemplo): pílula
+/// com borda e texto na cor de erro, sem preencher (o principal continua
+/// sendo o caminho seguro).
+pub fn botao_alerta(ui: &mut egui::Ui, texto: &str) -> Response {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.erro);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
-    let fundo = if resposta.hovered() { p.realce } else { p.superficie_alta };
-    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
-    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
+    let fundo = if resposta.hovered() { p.erro.gamma_multiply(0.12) } else { p.superficie_alta };
+    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, p.erro), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.erro);
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Estado de um agente (ou de uma tarefa concluída) como a tela mostra: a
+/// mesma cor, forma e palavra no cartão, no painel, na abelha e na linha do tempo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EstadoVisual {
+    Trabalhando,
+    PedeAprovacao,
+    SuaVez,
+    Parado,
+    Terminou,
+    Interrompido,
+    Erro,
+    Concluiu,
+}
+
+impl EstadoVisual {
+    pub fn cor(self) -> Color32 {
+        let p = cores();
+        match self {
+            EstadoVisual::Trabalhando => p.ok,
+            EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez | EstadoVisual::Interrompido => p.alerta,
+            EstadoVisual::Parado | EstadoVisual::Terminou => p.suave,
+            EstadoVisual::Erro => p.erro,
+            EstadoVisual::Concluiu => p.destaque,
+        }
+    }
+
+    /// Palavra do selo.
+    pub fn selo(self) -> &'static str {
+        match self {
+            EstadoVisual::Trabalhando => "Trabalhando",
+            EstadoVisual::PedeAprovacao => "Pede aprovação",
+            EstadoVisual::SuaVez => "Sua vez",
+            EstadoVisual::Parado => "Parado",
+            EstadoVisual::Terminou => "Terminou",
+            EstadoVisual::Interrompido => "Interrompido",
+            EstadoVisual::Erro => "Erro",
+            EstadoVisual::Concluiu => "Concluiu",
+        }
+    }
+
+    /// Ponto cheio: está acontecendo ou pede você. Anel: parou. Assim os
+    /// estados se separam mesmo sem distinguir a cor.
+    pub fn cheio(self) -> bool {
+        !matches!(self, EstadoVisual::Parado | EstadoVisual::Terminou | EstadoVisual::Interrompido)
+    }
+
+    /// Pede você: aparece na abelha, no aviso e no título da janela.
+    pub fn pede_voce(self) -> bool {
+        matches!(self, EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez | EstadoVisual::Erro)
+    }
+}
+
+/// Ponto de estado: cheio ou anel; o erro ganha um anel externo de leve.
+pub fn ponto(pintor: &egui::Painter, centro: Pos2, raio: f32, estado: EstadoVisual) {
+    let cor = estado.cor();
+    if estado.cheio() {
+        pintor.circle_filled(centro, raio, cor);
+    } else {
+        pintor.circle_stroke(centro, raio - 0.75, Stroke::new(1.5, cor));
+    }
+    if estado == EstadoVisual::Erro {
+        pintor.circle_stroke(centro, raio + 2.5, Stroke::new(1.0, cor.gamma_multiply(0.4)));
+    }
+}
+
+/// Etiqueta: texto na cor sobre um fundo bem leve da mesma cor. Serve para a
+/// branch, o selo de estado e de coluna e o projeto na linha do tempo.
+/// `pos` é o canto de cima à esquerda; devolve onde ficou.
+pub fn etiqueta(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, cor: Color32) -> Rect {
+    let galeria = pintor.layout_no_wrap(texto.to_owned(), fonte, cor);
+    let rect = Rect::from_min_size(pos, vec2(galeria.size().x + 12.0, 19.0));
+    pintor.rect_filled(rect, CornerRadius::same(RAIO_ETIQUETA), cor.gamma_multiply(0.14));
+    pintor.galley(rect.center() - galeria.size() / 2.0, galeria, cor);
+    rect
+}
+
+/// Etiqueta dentro de um layout (ocupa o lugar dela na linha).
+pub fn etiqueta_ui(ui: &mut egui::Ui, texto: &str, fonte: FontId, cor: Color32) -> Response {
+    let largura = ui.painter().layout_no_wrap(texto.to_owned(), fonte.clone(), cor).size().x + 12.0;
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 19.0), Sense::hover());
+    etiqueta(ui.painter(), rect.min, texto, fonte, cor);
+    resposta
+}
+
+/// Fonte das etiquetas de texto (selos de estado, coluna e projeto).
+pub fn fonte_etiqueta() -> FontId {
+    forte(11.5)
+}
+
+/// Cor de cada coluna, usada no selo do cabeçalho da tarefa.
+pub fn cor_coluna(coluna: crate::dados::Coluna) -> Color32 {
+    use crate::dados::Coluna;
+    let p = cores();
+    match coluna {
+        Coluna::Backlog => p.suave,
+        Coluna::Trabalhando => p.ok,
+        Coluna::AguardandoVoce => p.alerta,
+        Coluna::Revisao => p.texto,
+        Coluna::Concluido => p.destaque,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Icone {
+    Mais,
+    Fechar,
+}
+
+/// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
+/// fundo parado, `realce` ao passar o mouse.
+pub fn botao_icone(ui: &mut egui::Ui, icone: Icone, lado: f32) -> Response {
+    let (rect, resposta) = ui.allocate_exact_size(vec2(lado, lado), Sense::click());
+    pintar_icone(ui, rect, icone, &resposta);
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// O mesmo botão num retângulo fixo (por cima de um cartão, por exemplo).
+pub fn botao_icone_em(ui: &mut egui::Ui, rect: Rect, id: egui::Id, icone: Icone) -> Response {
+    let resposta = ui.interact(rect, id, Sense::click());
+    pintar_icone(ui, rect, icone, &resposta);
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
+    let p = cores();
+    let pintor = ui.painter();
+    if resposta.hovered() {
+        pintor.rect_filled(rect, CornerRadius::same(RAIO_CONTROLE), p.realce);
+    }
+    let cor = if resposta.hovered() { p.texto } else { p.suave };
+    let c = rect.center();
+    match icone {
+        Icone::Mais => {
+            for dx in [-5.0, 0.0, 5.0] {
+                pintor.circle_filled(c + vec2(dx, 0.0), 1.6, cor);
+            }
+        }
+        Icone::Fechar => {
+            let m = 4.5;
+            pintor.line_segment([c + vec2(-m, -m), c + vec2(m, m)], Stroke::new(1.5, cor));
+            pintor.line_segment([c + vec2(-m, m), c + vec2(m, -m)], Stroke::new(1.5, cor));
+        }
+    }
+}
+
+/// Campo de várias linhas, com a moldura do `campo` (e borda de destaque com foco).
+pub fn campo_multilinha(ui: &mut egui::Ui, texto: &mut String, linhas: usize, altura_maxima: f32, id: egui::Id, so_leitura: bool) -> Response {
+    let p = cores();
+    let com_foco = ui.memory(|m| m.has_focus(id));
+    let largura = ui.available_width();
+    egui::Frame::new()
+        .fill(fundo_campo(p, so_leitura))
+        .stroke(if com_foco { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, p.borda) })
+        .corner_radius(CornerRadius::same(RAIO_CONTROLE))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(altura_maxima)
+                .id_salt(id.with("rolagem"))
+                .show(ui, |ui| {
+                    let cor = if so_leitura { p.suave } else { p.texto };
+                    ui.add(
+                        egui::TextEdit::multiline(texto)
+                            .id(id)
+                            .frame(egui::Frame::NONE)
+                            .desired_rows(linhas)
+                            .desired_width(largura - 22.0)
+                            .font(FontId::proportional(13.5))
+                            .text_color(cor)
+                            .interactive(!so_leitura),
+                    )
+                })
+                .inner
+        })
+        .inner
+}
+
+/// Caixa de marcar da Colmeia: um quadrado de verdade (o checkbox do egui,
+/// com o raio dos controles, vira um círculo e lembra uma escolha exclusiva).
+pub fn caixa_marcar(ui: &mut egui::Ui, texto: &str, marcada: &mut bool) -> Response {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), p.texto);
+    let (rect, mut resposta) = ui.allocate_exact_size(vec2(16.0 + 8.0 + galeria.size().x, 24.0_f32.max(galeria.size().y)), Sense::click());
+    if resposta.clicked() {
+        *marcada = !*marcada;
+        resposta.mark_changed();
+    }
+    let caixa = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(16.0, 16.0));
+    let raio = CornerRadius::same(4);
+    if *marcada {
+        ui.painter().rect_filled(caixa, raio, p.destaque);
+        let cor = if claro() { Color32::WHITE } else { p.fundo };
+        let visto = vec![caixa.left_center() + vec2(3.5, 0.5), caixa.center() + vec2(-1.0, 3.5), caixa.right_center() + vec2(-3.5, -3.5)];
+        ui.painter().add(Shape::line(visto, Stroke::new(2.0, cor)));
+    } else {
+        let borda = if resposta.hovered() { p.texto } else { p.suave };
+        ui.painter().rect(caixa, raio, p.superficie, Stroke::new(1.5, borda), egui::StrokeKind::Inside);
+    }
+    ui.painter().galley(pos2(caixa.right() + 8.0, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Uma linha em duas partes: o começo pode ser cortado com "…", o fim fica
+/// inteiro (a hora, o projeto). `pos` é o canto de cima à esquerda. Diz se cortou.
+#[allow(clippy::too_many_arguments)]
+pub fn texto_com_fim(pintor: &egui::Painter, pos: Pos2, corta: &str, fim: &str, fonte: FontId, cor: Color32, cor_fim: Color32, largura: f32) -> bool {
+    let galeria_fim = pintor.layout_no_wrap(fim.to_owned(), fonte.clone(), cor_fim);
+    let mut trabalho = egui::text::LayoutJob::simple_singleline(corta.to_owned(), fonte, cor);
+    trabalho.wrap =
+        egui::text::TextWrapping { max_width: (largura - galeria_fim.size().x).max(24.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galeria = pintor.layout_job(trabalho);
+    let cortou = galeria.elided;
+    let x_fim = pos.x + galeria.size().x;
+    pintor.galley(pos, galeria, cor);
+    pintor.galley(pos2(x_fim, pos.y), galeria_fim, cor_fim);
+    cortou
+}
+
+/// Uma linha cortada pelo começo, com "…" na frente: para o fim de um caminho
+/// ou do prompt, onde o que importa está à direita.
+pub fn texto_sem_inicio(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, cor: Color32, largura: f32) {
+    let caber = |t: &str| pintor.layout_no_wrap(t.to_owned(), fonte.clone(), cor).size().x <= largura;
+    if caber(texto) {
+        pintor.text(pos, egui::Align2::LEFT_TOP, texto, fonte, cor);
+        return;
+    }
+    // Busca binária pelo menor corte do começo que faz "…" + resto caber.
+    let inicios: Vec<usize> = texto.char_indices().map(|(i, _)| i).collect();
+    let (mut baixo, mut alto) = (0, inicios.len());
+    while baixo < alto {
+        let meio = (baixo + alto) / 2;
+        if caber(&format!("…{}", &texto[inicios[meio]..])) {
+            alto = meio;
+        } else {
+            baixo = meio + 1;
+        }
+    }
+    let resto = inicios.get(baixo).map_or("", |&i| &texto[i..]);
+    pintor.text(pos, egui::Align2::LEFT_TOP, format!("…{resto}"), fonte, cor);
+}
+
+/// Item de menu com o atalho alinhado à direita e a opção de ficar inativo
+/// (sem fundo ao passar o mouse e sem clique).
+pub fn opcao_menu_com(ui: &mut egui::Ui, texto: &str, atalho: Option<&str>, ativa: bool) -> bool {
+    let p = cores();
+    let cor = if ativa { p.texto } else { p.suave };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), cor);
+    let atalho = atalho.map(|a| ui.painter().layout_no_wrap(a.to_owned(), FontId::proportional(12.0), p.suave));
+    let largura = (galeria.size().x + atalho.as_ref().map_or(0.0, |a| a.size().x + 24.0) + 40.0).max(ui.min_rect().width());
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), if ativa { Sense::click() } else { Sense::hover() });
+    if ativa && resposta.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_ETIQUETA), p.realce);
+    }
+    ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galeria.size().y / 2.0), galeria, cor);
+    if let Some(a) = atalho {
+        ui.painter().galley(pos2(rect.right() - 14.0 - a.size().x, rect.center().y - a.size().y / 2.0), a, p.suave);
+    }
+    ativa && resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Tipo do aviso do rodapé: muda a borda e o ponto.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TipoAviso {
+    Neutro,
+    Alerta,
+    Erro,
+}
+
+/// Desenha o aviso do rodapé ancorado em `ancora` (centro de baixo) e diz se a
+/// ação dele foi clicada.
+pub fn aviso(ctx: &egui::Context, ancora: Pos2, tipo: TipoAviso, texto: &str, acao: Option<&str>) -> bool {
+    let p = cores();
+    let (borda, ponto) = match tipo {
+        TipoAviso::Neutro => (Stroke::new(1.0, p.borda), None),
+        TipoAviso::Alerta => (Stroke::new(1.0, p.alerta.gamma_multiply(0.6)), Some(p.alerta)),
+        TipoAviso::Erro => (Stroke::new(1.0, p.erro), Some(p.erro)),
+    };
+    let mut clicou = false;
+    egui::Area::new(egui::Id::new("aviso-rodape")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
+        egui::Frame::new()
+            .fill(p.superficie_alta)
+            .stroke(borda)
+            .corner_radius(CornerRadius::same(RAIO_SUPERFICIE))
+            .inner_margin(egui::Margin::symmetric(16, 10))
+            .shadow(sombra(6, 18))
+            .show(ui, |ui| {
+                ui.set_max_width(560.0);
+                ui.horizontal(|ui| {
+                    // A altura do botão reservada antes do texto: tudo no mesmo eixo.
+                    if acao.is_some() {
+                        ui.set_min_height(32.0);
+                    }
+                    if let Some(cor) = ponto {
+                        let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 3.5, cor);
+                    }
+                    ui.label(RichText::new(texto).color(p.texto).size(13.5));
+                    if let Some(a) = acao {
+                        ui.add_space(12.0);
+                        clicou = botao_secundario(ui, a).clicked();
+                    }
+                });
+            });
+    });
+    clicou
+}
+
+/// Sombra das peças que flutuam (avisos, cartão de fim, pílula).
+pub fn sombra(deslocamento: i8, borrao: u8) -> egui::Shadow {
+    egui::Shadow { offset: [0, deslocamento], blur: borrao, spread: 0, color: Color32::from_black_alpha(if claro() { 40 } else { 90 }) }
 }
 
 /// Fundo em favo de mel, calculado uma vez por tamanho e tema e reaproveitado
@@ -528,6 +890,52 @@ mod testes {
             assert_eq!(Escolha::da_chave(e.chave()), e);
         }
         assert_eq!(Escolha::da_chave("sistema"), Escolha::Escuro);
+    }
+
+    /// Contraste WCAG entre duas cores (1 a 21).
+    fn contraste(a: Color32, b: Color32) -> f32 {
+        let canal = |v: u8| {
+            let c = v as f32 / 255.0;
+            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let luz = |c: Color32| 0.2126 * canal(c.r()) + 0.7152 * canal(c.g()) + 0.0722 * canal(c.b());
+        let (x, y) = (luz(a), luz(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn textos_de_estado_sao_legiveis_nos_cartoes() {
+        // Os estados aparecem em texto de 12 px sobre os cartões: pelo menos 4,5:1.
+        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+            for (cor, c) in [("ok", p.ok), ("alerta", p.alerta), ("erro", p.erro), ("suave", p.suave)] {
+                let r = contraste(c, p.superficie_alta);
+                assert!(r >= 4.5, "{cor} no tema {nome}: {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn faixas_tingidas_sao_opacas_e_legiveis() {
+        // A faixa "Núcleo desconectado" (alerta) e a de núcleo antigo (erro):
+        // texto do tema sobre o fundo tingido, pelo menos 4,5:1.
+        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+            for (cor, c) in [("alerta", p.alerta), ("erro", p.erro)] {
+                let fundo = fundo_tingido(p, c, eh_claro);
+                assert_eq!(fundo.a(), 255, "faixa de {cor} no tema {nome} não é opaca");
+                let r = contraste(p.texto, fundo);
+                assert!(r >= 4.5, "texto na faixa de {cor} no tema {nome}: {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn temas_claros_tem_os_mesmos_tamanhos_do_escuro() {
+        let ctx = egui::Context::default();
+        instalar(&ctx);
+        let (escuro, claro) = (ctx.style_of(Theme::Dark), ctx.style_of(Theme::Light));
+        assert_eq!(escuro.text_styles, claro.text_styles);
+        assert_eq!(escuro.spacing.item_spacing, claro.spacing.item_spacing);
+        assert_eq!(escuro.spacing.interact_size, claro.spacing.interact_size);
     }
 
     #[test]

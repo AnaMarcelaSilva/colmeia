@@ -16,10 +16,17 @@ A Colmeia controla terminais onde agentes de IA rodam comandos. Quem conseguir f
 | Um pedido para abrir agente | Rodar outro programa ou passar opções à ferramenta | A ferramenta é uma de uma lista fixa (ou o shell do usuário), achada no PATH; o id de conversa só passa se tiver a forma de um UUID; nada vai por shell |
 | Um agente que não termina | Deixar processos rodando depois de removido | Cada agente tem sessão e grupo de processos próprios; ao remover, o grupo recebe SIGHUP e, depois de 3 segundos, SIGKILL |
 | Remover uma tarefa com cópia isolada | Perder trabalho que ainda não está num commit | A remoção é recusada se a cópia tiver mudanças fora de um commit, e os agentes continuam rodando |
+| Uma página ou processo querendo ouvir o que acontece | Ler os eventos dos perfis | O WebSocket de eventos exige o mesmo token e recusa `Origin` de outro site; é só de leitura (o que a tela manda por ele é descartado), aceita mensagens de até 4 KB, no máximo 16 telas ao mesmo tempo, e cada tela só recebe o próprio perfil |
+| Uma imagem maliciosa | Esgotar memória (bomba de descompressão) ou esconder dados no arquivo | Anexos só como PNG, até 8 MB e 8192×8192 (40 milhões de pixels), conferidos pelo cabeçalho antes de decodificar; a imagem é decodificada e codificada de novo (sai sem metadados), o nome do arquivo é o hash do conteúdo, nunca o que veio no pedido; arquivo `0600` numa pasta `0700` |
+| Datas e filtros da linha do tempo | Pedir períodos enormes ou parâmetros estranhos | Datas no formato `AAAA-MM-DD` e até 92 dias, `limite` entre 1 e 500, projeto conferido como do perfil |
 
 Para avisar que o Claude Code está aberto na pasta fora da Colmeia, o núcleo lê em `/proc` a pasta e o nome dos processos do próprio usuário (os de outros usuários não são acessíveis); os agentes da Colmeia são reconhecidos pela variável `COLMEIA_AGENTE`. As conversas do Claude Code são só lidas, nunca alteradas.
 
-O histórico de mudanças é encadeado por hash: o núcleo refaz a corrente ao iniciar e avisa se algum evento foi alterado por fora.
+O histórico de mudanças é encadeado por hash: o núcleo refaz a corrente ao iniciar e avisa (no log e na tela) se algum evento foi alterado por fora. O perfil, o projeto, a tarefa e o agente de cada evento ficam dentro dos dados cobertos pelo hash (`_escopo`) e também em colunas indexadas; a verificação confere que as colunas batem com o `_escopo`, então mudar um evento de perfil por fora também é detectado. Os eventos gravados antes dessas colunas foram ligados aos perfis uma única vez, ao atualizar o banco; essa ligação mexe só nas colunas, nunca nos dados nem no hash, e esses eventos antigos não têm `_escopo` para conferir.
+
+**O conteúdo dos terminais nunca vai para os eventos.** O estado de um agente ("pede aprovação", "esperando resposta") é lido da saída do terminal dentro do núcleo, mas o que sai de lá é sempre um texto de uma lista fixa. Nada do que o agente escreveu entra no banco, no log ou nas mensagens para a tela.
+
+**Capturas podem conter segredos.** Uma captura de terminal guarda tudo o que estava visível, inclusive senhas ou chaves. A Colmeia avisa na primeira captura de cada perfil; a imagem fica só no computador, em `~/.local/share/colmeia/anexos/` (`0600`), e sai de lá só quando você salva a sprint numa pasta escolhida. "Desfazer" (logo depois) e "Remover" (na linha do tempo) apagam o arquivo.
 
 O token é gerado a cada início (32 bytes aleatórios), gravado de forma atômica e lido do arquivo pela tela. Ele nunca passa por variável de ambiente ou argumento de linha de comando, que outros processos conseguem ver. O conteúdo dos terminais nunca vai para o log.
 
@@ -28,6 +35,10 @@ O token é gerado a cada início (32 bytes aleatórios), gravado de forma atômi
 - **Aprovações.** As ações arriscadas (push, merge, deploy, escrita em banco) ainda não passam por aprovação; isso chega com o núcleo como servidor MCP para os agentes.
 - **Isolamento dos agentes.** Os agentes rodam com as permissões do usuário, como num terminal comum.
 - **Windows.** O canal por named pipe (com ACL só do usuário) ainda não existe; até lá, o núcleo recusa iniciar no Windows em vez de abrir uma porta de rede.
+
+## Versões com suporte
+
+Só a versão mais recente recebe correções de segurança.
 
 ## Relatar uma vulnerabilidade
 

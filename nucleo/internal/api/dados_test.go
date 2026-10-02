@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
 func servidorComDados(t *testing.T) *httptest.Server {
@@ -29,10 +30,15 @@ func servidorComDados(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { banco.Fechar() })
-	srv := httptest.NewServer((&Servidor{Bytes: new(atomic.Int64), Banco: banco, DirDados: dir}).Rotas())
+	servidor := &Servidor{Bytes: new(atomic.Int64), Banco: banco, DirDados: dir, Versao: "teste", Tempos: temposDeTeste}
+	srv := httptest.NewServer(servidor.Rotas())
+	// Na ordem inversa: fecha o servidor, para os agentes e grava o fim deles, fecha o banco.
+	t.Cleanup(func() { servidor.Agentes.FecharTodos(); servidor.Encerrar() })
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+var temposDeTeste = terminal.Tempos{Silencio: 150 * time.Millisecond, Ocioso: 2 * time.Second, Eco: 50 * time.Millisecond}
 
 func pedir(t *testing.T, metodo, url string, corpo any) (int, map[string]any) {
 	t.Helper()

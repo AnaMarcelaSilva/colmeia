@@ -86,9 +86,49 @@ CREATE TABLE IF NOT EXISTS eventos (
 	hash_anterior TEXT NOT NULL,
 	hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS anexos (
+	id INTEGER PRIMARY KEY,
+	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
+	tarefa_id INTEGER,
+	sha256 TEXT NOT NULL,
+	largura INTEGER NOT NULL,
+	altura INTEGER NOT NULL,
+	bytes INTEGER NOT NULL,
+	origem TEXT NOT NULL CHECK (origem IN ('captura', 'colagem', 'mensagem')),
+	legenda TEXT NOT NULL DEFAULT '',
+	criado_em TEXT NOT NULL,
+	removido INTEGER NOT NULL DEFAULT 0
+);
 `
 
-type Banco struct{ db *sql.DB }
+type Banco struct {
+	db *sql.DB
+	// aoGravar recebe os eventos de cada transação, só depois do commit.
+	aoGravar func([]Evento)
+}
+
+// Escopo diz a quem um evento pertence. Vai dentro dos dados (coberto pelo
+// hash) e também em colunas indexadas, para a linha do tempo de um perfil ou
+// projeto não precisar ler o histórico inteiro.
+type Escopo struct {
+	Perfil  int64 `json:"perfil,omitempty"`
+	Projeto int64 `json:"projeto,omitempty"`
+	Tarefa  int64 `json:"tarefa,omitempty"`
+	Agente  int64 `json:"agente,omitempty"`
+}
+
+// Evento é uma linha do histórico.
+type Evento struct {
+	ID      int64           `json:"id"`
+	Momento string          `json:"momento"`
+	Tipo    string          `json:"tipo"`
+	Dados   json.RawMessage `json:"dados"`
+	Escopo  Escopo          `json:"escopo"`
+}
+
+// AoGravar liga um ouvinte aos eventos gravados. Ele é chamado depois do
+// commit, na goroutine de quem gravou: uma transação desfeita não avisa nada.
+func (b *Banco) AoGravar(f func([]Evento)) { b.aoGravar = f }
 
 // Diretorio é onde ficam os dados: COLMEIA_DADOS, ou $XDG_DATA_HOME/colmeia,
 // ou ~/.local/share/colmeia.
@@ -147,6 +187,16 @@ func migrar(db *sql.DB) error {
 		// Onde os agentes da tarefa trabalham: "pasta" (a do projeto) ou "copia" (worktree).
 		{"tarefas", "local", "TEXT NOT NULL DEFAULT 'pasta'"},
 		{"tarefas", "copia", "TEXT NOT NULL DEFAULT ''"},
+		// 1 quando a última mudança de coluna foi do núcleo (agente esperando
+		// ou voltando a trabalhar); uma mudança sua zera e nunca é desfeita.
+		{"tarefas", "coluna_auto", "INTEGER NOT NULL DEFAULT 0"},
+		// Mostrar o aviso de segredos antes de capturar um terminal.
+		{"perfis", "aviso_captura", "INTEGER NOT NULL DEFAULT 1"},
+		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
+		{"eventos", "perfil_id", "INTEGER"},
+		{"eventos", "projeto_id", "INTEGER"},
+		{"eventos", "tarefa_id", "INTEGER"},
+		{"eventos", "agente_id", "INTEGER"},
 	}
 	for _, c := range colunas {
 		existe := false
@@ -170,26 +220,188 @@ func migrar(db *sql.DB) error {
 			}
 		}
 	}
+	for _, indice := range []string{
+		`CREATE INDEX IF NOT EXISTS eventos_por_perfil ON eventos (perfil_id, id)`,
+		`CREATE INDEX IF NOT EXISTS eventos_por_tarefa ON eventos (tarefa_id)`,
+		`CREATE INDEX IF NOT EXISTS anexos_por_tarefa ON anexos (tarefa_id)`,
+	} {
+		if _, err := db.Exec(indice); err != nil {
+			return err
+		}
+	}
+	var versao int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&versao); err != nil {
+		return err
+	}
+	if versao < 2 {
+		if err := preencherEscopo(db); err != nil {
+			return fmt.Errorf("ligando eventos antigos aos perfis: %w", err)
+		}
+	}
 	return nil
+}
+
+// preencherEscopo liga os eventos gravados antes das colunas de escopo ao
+// perfil, projeto, tarefa e agente deles, seguindo o próprio histórico (assim
+// até o que já foi removido é ligado). É o único UPDATE feito em eventos: mexe
+// só nas colunas derivadas, nunca em dados nem no hash. O que não dá para
+// ligar fica sem perfil e não aparece em nenhuma linha do tempo.
+func preencherEscopo(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	linhas, err := tx.Query(`SELECT id, tipo, dados FROM eventos WHERE perfil_id IS NULL ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	type ligacao struct {
+		id int64
+		e  Escopo
+	}
+	var ligacoes []ligacao
+	perfilDoWorkspace := map[int64]int64{}
+	workspaceDoProjeto := map[int64]int64{}
+	projetoDaTarefa := map[int64]int64{}
+	tarefaDoAgente := map[int64]int64{}
+	for linhas.Next() {
+		var id int64
+		var tipo, conteudo string
+		if err := linhas.Scan(&id, &tipo, &conteudo); err != nil {
+			linhas.Close()
+			return err
+		}
+		var d struct {
+			ID          int64 `json:"id"`
+			Perfil      int64 `json:"perfil"`
+			PerfilID    int64 `json:"perfil_id"`
+			WorkspaceID int64 `json:"workspace_id"`
+			ProjetoID   int64 `json:"projeto_id"`
+			TarefaID    int64 `json:"tarefa_id"`
+			Projeto     any   `json:"projeto"`
+			Tarefa      any   `json:"tarefa"`
+			Agente      int64 `json:"agente"`
+		}
+		json.Unmarshal([]byte(conteudo), &d)
+		numero := func(v any) int64 {
+			if f, ok := v.(float64); ok {
+				return int64(f)
+			}
+			return 0
+		}
+		var e Escopo
+		switch tipo {
+		case "perfil.criado":
+			e.Perfil = d.ID
+		case "perfil.tema", "perfil.contas":
+			e.Perfil = d.Perfil
+		case "workspace.criado":
+			perfilDoWorkspace[d.ID] = d.PerfilID
+			e.Perfil = d.PerfilID
+		case "projeto.criado":
+			workspaceDoProjeto[d.ID] = d.WorkspaceID
+			e.Projeto = d.ID
+		case "projeto.removido":
+			e.Projeto = numero(d.Projeto)
+		case "tarefa.criada":
+			projetoDaTarefa[d.ID] = d.ProjetoID
+			e.Tarefa = d.ID
+		case "tarefa.atualizada", "tarefa.copia", "tarefa.removida":
+			e.Tarefa = numero(d.Tarefa)
+		case "agente.criado":
+			tarefaDoAgente[d.ID] = d.TarefaID
+			e.Agente, e.Tarefa = d.ID, d.TarefaID
+		case "agente.removido":
+			e.Agente = d.Agente
+			e.Tarefa = tarefaDoAgente[d.Agente]
+		}
+		if e.Tarefa != 0 {
+			e.Projeto = projetoDaTarefa[e.Tarefa]
+		}
+		if e.Projeto != 0 {
+			e.Perfil = perfilDoWorkspace[workspaceDoProjeto[e.Projeto]]
+		}
+		ligacoes = append(ligacoes, ligacao{id, e})
+	}
+	linhas.Close()
+	if err := linhas.Err(); err != nil {
+		return err
+	}
+	for _, l := range ligacoes {
+		if _, err := tx.Exec(`UPDATE eventos SET perfil_id = ?, projeto_id = ?, tarefa_id = ?, agente_id = ? WHERE id = ?`,
+			nulo(l.e.Perfil), nulo(l.e.Projeto), nulo(l.e.Tarefa), nulo(l.e.Agente), l.id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version = 2`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// nulo grava 0 como NULL: "sem perfil" não é o perfil 0.
+func nulo(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func agora() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
-// registrar acrescenta um evento ao histórico, encadeado ao anterior.
-func registrar(ctx context.Context, tx *sql.Tx, tipo string, conteudo any) error {
+// transacao junta os eventos gravados nela, para avisar só depois do commit.
+type transacao struct {
+	*sql.Tx
+	eventos []Evento
+}
+
+// registrar acrescenta um evento ao histórico, encadeado ao anterior. O
+// escopo entra nos dados (dentro do hash, na chave "_escopo") e nas colunas
+// indexadas.
+func registrar(ctx context.Context, tx *transacao, tipo string, escopo Escopo, conteudo any) error {
 	var anterior string
 	err := tx.QueryRowContext(ctx, `SELECT hash FROM eventos ORDER BY id DESC LIMIT 1`).Scan(&anterior)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	bruto, err := json.Marshal(conteudo)
+	bruto, err := comEscopo(conteudo, escopo)
 	if err != nil {
 		return err
 	}
 	momento := agora()
-	_, err = tx.ExecContext(ctx, `INSERT INTO eventos (momento, tipo, dados, hash_anterior, hash) VALUES (?, ?, ?, ?, ?)`,
-		momento, tipo, string(bruto), anterior, hashEvento(anterior, momento, tipo, string(bruto)))
-	return err
+	r, err := tx.ExecContext(ctx, `INSERT INTO eventos (momento, tipo, dados, hash_anterior, hash, perfil_id, projeto_id, tarefa_id, agente_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		momento, tipo, string(bruto), anterior, hashEvento(anterior, momento, tipo, string(bruto)),
+		nulo(escopo.Perfil), nulo(escopo.Projeto), nulo(escopo.Tarefa), nulo(escopo.Agente))
+	if err != nil {
+		return err
+	}
+	id, _ := r.LastInsertId()
+	tx.eventos = append(tx.eventos, Evento{ID: id, Momento: momento, Tipo: tipo, Dados: bruto, Escopo: escopo})
+	return nil
+}
+
+// comEscopo serializa o conteudo (sempre um objeto) com "_escopo" na frente.
+func comEscopo(conteudo any, escopo Escopo) ([]byte, error) {
+	bruto, err := json.Marshal(conteudo)
+	if err != nil {
+		return nil, err
+	}
+	if len(bruto) < 2 || bruto[0] != '{' {
+		return nil, fmt.Errorf("evento sem objeto: %s", bruto)
+	}
+	e, _ := json.Marshal(escopo)
+	resto := bruto[1:]
+	if string(resto) != "}" {
+		resto = append([]byte{','}, resto...)
+	}
+	return append(append([]byte(`{"_escopo":`), e...), resto...), nil
+}
+
+// Registrar grava um evento avulso (agente iniciou ou terminou, núcleo
+// iniciou, anexo), fora de uma mudança das tabelas.
+func (b *Banco) Registrar(ctx context.Context, tipo string, escopo Escopo, conteudo any) error {
+	return b.emTransacao(ctx, func(tx *transacao) error { return registrar(ctx, tx, tipo, escopo, conteudo) })
 }
 
 func hashEvento(anterior, momento, tipo, dados string) string {
@@ -201,9 +413,12 @@ func hashEvento(anterior, momento, tipo, dados string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// VerificarHistorico refaz a corrente de hashes e aponta o primeiro evento alterado.
+// VerificarHistorico refaz a corrente de hashes e aponta o primeiro evento
+// alterado. Nos eventos com "_escopo" confere também as colunas derivadas:
+// mudar um evento de perfil por fora é detectado como qualquer outra mudança.
 func (b *Banco) VerificarHistorico(ctx context.Context) error {
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, momento, tipo, dados, hash_anterior, hash FROM eventos ORDER BY id`)
+	linhas, err := b.db.QueryContext(ctx, `SELECT id, momento, tipo, dados, hash_anterior, hash,
+		COALESCE(perfil_id, 0), COALESCE(projeto_id, 0), COALESCE(tarefa_id, 0), COALESCE(agente_id, 0) FROM eventos ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -212,28 +427,43 @@ func (b *Banco) VerificarHistorico(ctx context.Context) error {
 	for linhas.Next() {
 		var id int64
 		var momento, tipo, conteudo, hashAnterior, hash string
-		if err := linhas.Scan(&id, &momento, &tipo, &conteudo, &hashAnterior, &hash); err != nil {
+		var colunas Escopo
+		if err := linhas.Scan(&id, &momento, &tipo, &conteudo, &hashAnterior, &hash, &colunas.Perfil, &colunas.Projeto, &colunas.Tarefa, &colunas.Agente); err != nil {
 			return err
 		}
 		if hashAnterior != anterior || hash != hashEvento(anterior, momento, tipo, conteudo) {
 			return fmt.Errorf("histórico alterado a partir do evento %d", id)
+		}
+		var d struct {
+			Escopo *Escopo `json:"_escopo"`
+		}
+		if json.Unmarshal([]byte(conteudo), &d) == nil && d.Escopo != nil && *d.Escopo != colunas {
+			return fmt.Errorf("histórico alterado a partir do evento %d (escopo)", id)
 		}
 		anterior = hash
 	}
 	return linhas.Err()
 }
 
-// emTransacao roda `f` e registra o evento na mesma transação.
-func (b *Banco) emTransacao(ctx context.Context, f func(tx *sql.Tx) error) error {
-	tx, err := b.db.BeginTx(ctx, nil)
+// emTransacao roda `f` numa transação; os eventos registrados nela são
+// avisados depois do commit.
+func (b *Banco) emTransacao(ctx context.Context, f func(tx *transacao) error) error {
+	sqltx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	tx := &transacao{Tx: sqltx}
 	if err := f(tx); err != nil {
-		tx.Rollback()
+		sqltx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := sqltx.Commit(); err != nil {
+		return err
+	}
+	if b.aoGravar != nil && len(tx.eventos) > 0 {
+		b.aoGravar(tx.eventos)
+	}
+	return nil
 }
 
 func traduzir(err error) error {
@@ -289,5 +519,6 @@ func umDe(campo, valor string, opcoes []string) error {
 			return nil
 		}
 	}
-	return ErrInvalido{fmt.Sprintf("%s inválido: %q", campo, valor)}
+	// "valor inválido para" evita errar a concordância ("coluna inválido").
+	return ErrInvalido{fmt.Sprintf("valor inválido para %s: %q", campo, valor)}
 }

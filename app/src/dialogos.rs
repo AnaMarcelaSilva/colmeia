@@ -55,6 +55,17 @@ pub enum Dialogo {
         nome: String,
         erro: Option<String>,
     },
+    /// Primeira captura do perfil: avisa que a imagem guarda o que está visível.
+    Captura {
+        agente: i64,
+        tarefa: i64,
+        nao_mostrar: bool,
+    },
+    /// Fechar a janela com agentes rodando no núcleo.
+    Fechar {
+        rodando: usize,
+        erro: Option<String>,
+    },
 }
 
 pub enum Resultado {
@@ -64,7 +75,17 @@ pub enum Resultado {
     Mudou,
     ProjetoCriado(i64),
     /// O agente foi criado e o terminal dele já está rodando no núcleo.
-    AgenteCriado(api::Agente),
+    AgenteCriado(Box<api::Agente>),
+    /// Pode capturar (e, se pediu, não mostrar o aviso de novo).
+    Capturar {
+        agente: i64,
+        tarefa: i64,
+        nao_mostrar: bool,
+    },
+    /// Fechar só a janela: os agentes seguem no núcleo.
+    FecharJanela,
+    /// O núcleo já foi encerrado (e os agentes com ele): fechar a janela.
+    PararEFechar,
 }
 
 pub struct NovoProjeto {
@@ -94,6 +115,8 @@ impl NovoProjeto {
 
 pub struct NovaTarefa {
     projeto: Projeto,
+    /// Em "Todos os projetos": os projetos para escolher (vazio quando já há um em foco).
+    projetos: Vec<Projeto>,
     branches: Vec<String>,
     /// Branch existente escolhida (ou a da pasta, sem cópia).
     branch: String,
@@ -109,9 +132,10 @@ pub struct NovaTarefa {
 }
 
 impl NovaTarefa {
-    pub fn new(projeto: Projeto) -> Self {
+    pub fn new(projeto: Projeto, projetos: Vec<Projeto>) -> Self {
         let branches = if projeto.sem_git { Vec::new() } else { api::branches(projeto.id).unwrap_or_else(|_| vec![projeto.branch_padrao.clone()]) };
         NovaTarefa {
+            projetos,
             branch: projeto.branch_padrao.clone(),
             base: projeto.branch_padrao.clone(),
             copia: !projeto.sem_git,
@@ -182,6 +206,21 @@ impl Dialogo {
                         erro,
                         || api::remover_projeto(*id),
                     ),
+                    Dialogo::Captura { agente, tarefa, nao_mostrar } => {
+                        tema::cabecalho(
+                            ui,
+                            "Capturar terminal",
+                            "A imagem guarda tudo o que está visível, inclusive senhas ou chaves que estiverem na tela. Ela fica só neste computador, anexada à tarefa.",
+                        );
+                        ui.add_space(14.0);
+                        tema::caixa_marcar(ui, "Não mostrar de novo", nao_mostrar);
+                        match rodape(ui, "Capturar", true) {
+                            (true, _) => Resultado::Fechar,
+                            (_, true) => Resultado::Capturar { agente: *agente, tarefa: *tarefa, nao_mostrar: *nao_mostrar },
+                            _ => Resultado::Continua,
+                        }
+                    }
+                    Dialogo::Fechar { rodando, erro } => fechar(ui, *rodando, erro),
                 }
             });
         match modal.inner {
@@ -194,11 +233,12 @@ impl Dialogo {
 fn mostrar_erro(ui: &mut egui::Ui, erro: &Option<String>) {
     if let Some(e) = erro {
         ui.add_space(10.0);
-        ui.label(RichText::new(e).color(cores().erro).size(13.0));
+        ui.label(RichText::new(e).color(cores().erro).size(12.5));
     }
 }
 
-/// Linha de botões do rodapé: Cancelar à esquerda, a ação à direita.
+/// Linha de botões do rodapé: Cancelar à esquerda, a ação à direita. Em todos
+/// os diálogos Enter confirma (se a ação estiver habilitada) e Esc cancela.
 fn rodape(ui: &mut egui::Ui, acao: &str, habilitado: bool) -> (bool, bool) {
     let (mut cancelar, mut confirmar) = (false, false);
     ui.add_space(20.0);
@@ -208,7 +248,46 @@ fn rodape(ui: &mut egui::Ui, acao: &str, habilitado: bool) -> (bool, bool) {
             confirmar = tema::botao_principal(ui, acao, habilitado).clicked();
         });
     });
+    confirmar |= habilitado && ui.input(|i| i.key_pressed(egui::Key::Enter));
     (cancelar, confirmar)
+}
+
+/// Fechar a janela com agentes rodando: eles continuam no núcleo e gastam a conta de IA.
+fn fechar(ui: &mut egui::Ui, rodando: usize, erro: &mut Option<String>) -> Resultado {
+    let titulo = if rodando == 1 { "1 agente continua rodando".to_string() } else { format!("{rodando} agentes continuam rodando") };
+    tema::cabecalho(
+        ui,
+        &titulo,
+        "Fechar a janela não para os agentes: eles seguem no núcleo e usam a conta de IA. Para parar todos, o núcleo é encerrado e cada agente tem uns segundos para salvar a conversa.",
+    );
+    mostrar_erro(ui, erro);
+    let (mut cancelar, mut parar, mut fechar) = (false, false, false);
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        cancelar = tema::botao_secundario(ui, "Cancelar").on_hover_text("Esc").clicked();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            fechar = tema::botao_principal(ui, "Fechar a janela", true).clicked();
+            ui.add_space(8.0);
+            // A ação que encerra os agentes, no estilo de alerta.
+            parar = tema::botao_alerta(ui, "Parar todos e fechar").clicked();
+        });
+    });
+    if cancelar {
+        return Resultado::Fechar;
+    }
+    if fechar || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        return Resultado::FecharJanela;
+    }
+    if parar {
+        return match api::encerrar_nucleo() {
+            Ok(()) => Resultado::PararEFechar,
+            Err(e) => {
+                *erro = Some(format!("Não consegui encerrar o núcleo: {e}"));
+                Resultado::Continua
+            }
+        };
+    }
+    Resultado::Continua
 }
 
 fn novo_projeto(ui: &mut egui::Ui, d: &mut NovoProjeto, perfil: i64) -> Resultado {
@@ -297,6 +376,25 @@ fn novo_projeto(ui: &mut egui::Ui, d: &mut NovoProjeto, perfil: i64) -> Resultad
 fn nova_tarefa(ui: &mut egui::Ui, d: &mut NovaTarefa) -> Resultado {
     tema::cabecalho(ui, "Nova tarefa", &format!("Em {}. Ela entra no Backlog.", d.projeto.nome));
     ui.add_space(16.0);
+    if !d.projetos.is_empty() {
+        let resposta = tema::chip(ui, "Projeto", &d.projeto.nome, false);
+        let mut escolhido = None;
+        egui::Popup::menu(&resposta).show(|ui| {
+            ui.set_min_width(240.0);
+            for p in &d.projetos {
+                if tema::opcao_menu(ui, &p.nome, p.id == d.projeto.id) {
+                    escolhido = Some(p.clone());
+                    ui.close();
+                }
+            }
+        });
+        if let Some(p) = escolhido {
+            let titulo = std::mem::take(&mut d.titulo);
+            *d = NovaTarefa::new(p, std::mem::take(&mut d.projetos));
+            d.titulo = titulo;
+        }
+        ui.add_space(12.0);
+    }
     let resposta = tema::campo(ui, "Título", &mut d.titulo, "Ex.: Nova tela de pedidos");
     if std::mem::take(&mut d.focar) {
         resposta.request_focus();
@@ -343,12 +441,11 @@ fn nova_tarefa(ui: &mut egui::Ui, d: &mut NovaTarefa) -> Resultado {
     mostrar_erro(ui, &d.erro);
 
     let pronto = !d.titulo.trim().is_empty();
-    let enter = pronto && ui.input(|i| i.key_pressed(egui::Key::Enter));
     let (cancelar, criar) = rodape(ui, "Criar tarefa", pronto);
     if cancelar {
         return Resultado::Fechar;
     }
-    if !(criar || enter) {
+    if !criar {
         return Resultado::Continua;
     }
     let nova_branch = if d.nova_branch.trim().is_empty() { sugerir_branch(&d.titulo) } else { d.nova_branch.trim().to_string() };
@@ -435,7 +532,7 @@ fn novo_agente(ui: &mut egui::Ui, d: &mut NovoAgente) -> Resultado {
         _ => "",
     };
     match api::criar_agente(d.tarefa, ferramenta, PAPEIS[d.papel], sessao) {
-        Ok(agente) => Resultado::AgenteCriado(agente),
+        Ok(agente) => Resultado::AgenteCriado(Box::new(agente)),
         Err(e) => {
             d.erro = Some(e);
             Resultado::Continua

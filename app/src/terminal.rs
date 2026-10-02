@@ -2,12 +2,10 @@
 //! o alacritty_terminal interpreta a saída e o egui desenha a grade.
 
 use std::cell::Cell;
-use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -35,12 +33,15 @@ enum ParaNucleo {
 pub struct TerminalAgente {
     term: Arc<Mutex<Term<Ouvinte>>>,
     envio: Sender<ParaNucleo>,
+    /// Acorda a thread de rede, que dorme no poll, quando há algo para enviar.
+    despertador: Despertador,
     tamanho: (usize, usize),
     intervalo: Cell<u32>,
     /// O programa do terminal terminou (ou a conexão caiu).
     encerrado: Arc<AtomicBool>,
     /// Quando houve a última colagem de texto, para não tratar o mesmo Ctrl+V como imagem.
     colou_texto_em: Cell<f64>,
+    area: Cell<Option<egui::Rect>>,
 }
 
 /// Ritmos de atualização pedidos ao núcleo, em milissegundos.
@@ -58,12 +59,24 @@ impl TerminalAgente {
         let term_rede = term.clone();
         let encerrado = Arc::new(AtomicBool::new(false));
         let encerrado_rede = encerrado.clone();
+        let (despertador, alarme) = Despertador::novo();
         thread::spawn(move || {
-            conexao(&caminho, intervalo, term_rede, recebimento, &ctx, bytes);
+            conexao(&caminho, intervalo, term_rede, recebimento, alarme, &ctx, bytes);
             encerrado_rede.store(true, Ordering::Relaxed);
             ctx.request_repaint();
         });
-        Self { term, envio, tamanho, intervalo: Cell::new(intervalo), encerrado, colou_texto_em: Cell::new(0.0) }
+        Self { term, envio, despertador, tamanho, intervalo: Cell::new(intervalo), encerrado, colou_texto_em: Cell::new(0.0), area: Cell::new(None) }
+    }
+
+    fn mandar(&self, msg: ParaNucleo) {
+        if self.envio.send(msg).is_ok() {
+            self.despertador.acordar();
+        }
+    }
+
+    /// O retângulo onde o terminal foi desenhado no último quadro (para a captura).
+    pub fn area(&self) -> Option<egui::Rect> {
+        self.area.get()
     }
 
     pub fn encerrado(&self) -> bool {
@@ -75,13 +88,13 @@ impl TerminalAgente {
         let mut bytes = colagem(texto);
         bytes.push(b'\r');
         self.term.lock().unwrap().scroll_display(Scroll::Bottom);
-        let _ = self.envio.send(ParaNucleo::Digitacao(bytes));
+        self.mandar(ParaNucleo::Digitacao(bytes));
     }
 
     /// Muda o ritmo em que o núcleo envia a saída deste terminal.
     pub fn definir_intervalo(&self, ms: u32) {
         if self.intervalo.replace(ms) != ms {
-            let _ = self.envio.send(ParaNucleo::Texto(format!(r#"{{"intervalo":{ms}}}"#)));
+            self.mandar(ParaNucleo::Texto(format!(r#"{{"intervalo":{ms}}}"#)));
         }
     }
 
@@ -105,6 +118,7 @@ impl TerminalAgente {
 
     pub fn mostrar(&mut self, ui: &mut egui::Ui, tamanho_fonte: f32) -> egui::Response {
         let (rect, resposta) = ui.allocate_exact_size(ui.available_size(), Sense::click());
+        self.area.set(Some(rect));
         let pintor = ui.painter_at(rect);
         pintor.rect_filled(rect, 0.0, cores().terminal_fundo);
 
@@ -118,7 +132,7 @@ impl TerminalAgente {
         if (colunas, linhas) != self.tamanho {
             self.tamanho = (colunas, linhas);
             term.resize(TermSize::new(colunas, linhas));
-            let _ = self.envio.send(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+            self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
         }
 
         if resposta.hovered() {
@@ -239,7 +253,7 @@ impl TerminalAgente {
         }
         if !saida.is_empty() {
             term.scroll_display(Scroll::Bottom);
-            let _ = self.envio.send(ParaNucleo::Digitacao(saida));
+            self.mandar(ParaNucleo::Digitacao(saida));
         }
     }
 }
@@ -366,8 +380,63 @@ fn cor_indexada(i: u8) -> Color32 {
     }
 }
 
-/// Roda até o programa do terminal terminar ou a conexão cair.
-fn conexao(caminho: &str, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, ctx: &egui::Context, bytes: Arc<AtomicU64>) {
+/// Acorda a thread de rede. No Unix é um par de sockets: escrever um byte
+/// faz o poll da thread voltar.
+struct Despertador {
+    #[cfg(unix)]
+    escrita: Option<std::os::unix::net::UnixStream>,
+}
+
+/// O lado que a thread de rede espera.
+#[cfg(unix)]
+type Alarme = Option<std::os::unix::net::UnixStream>;
+#[cfg(not(unix))]
+type Alarme = ();
+
+impl Despertador {
+    #[cfg(unix)]
+    fn novo() -> (Despertador, Alarme) {
+        match std::os::unix::net::UnixStream::pair() {
+            Ok((escrita, leitura)) => {
+                let _ = escrita.set_nonblocking(true);
+                let _ = leitura.set_nonblocking(true);
+                (Despertador { escrita: Some(escrita) }, Some(leitura))
+            }
+            Err(_) => (Despertador { escrita: None }, None),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn novo() -> (Despertador, Alarme) {
+        (Despertador {}, ())
+    }
+
+    fn acordar(&self) {
+        #[cfg(unix)]
+        if let Some(mut e) = self.escrita.as_ref() {
+            use std::io::Write;
+            // Cheio quer dizer que já há um aviso pendente: tanto faz.
+            let _ = e.write(&[1]);
+        }
+    }
+}
+
+/// Roda até o programa do terminal terminar ou a conexão cair. A thread dorme
+/// no poll(2) do socket e do despertador: sem saída e sem digitação, não
+/// acorda nenhuma vez (antes ela acordava 200 vezes por segundo por terminal).
+#[cfg(unix)]
+fn conexao(
+    caminho: &str,
+    intervalo: u32,
+    term: Arc<Mutex<Term<Ouvinte>>>,
+    recebimento: Receiver<ParaNucleo>,
+    alarme: Alarme,
+    ctx: &egui::Context,
+    bytes: Arc<AtomicU64>,
+) {
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
     let mut socket = match canal::websocket(&format!("{caminho}?intervalo={intervalo}")) {
         Ok(s) => s,
         Err(e) => {
@@ -375,40 +444,104 @@ fn conexao(caminho: &str, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, receb
             return;
         }
     };
-    // Espera curta na leitura para também atender a digitação e o tamanho.
-    let _ = socket.get_mut().set_read_timeout(Some(Duration::from_millis(5)));
+    let Some(mut alarme) = alarme else { return };
+    if socket.get_mut().set_nonblocking(true).is_err() {
+        return;
+    }
+    let fd_socket = socket.get_ref().as_raw_fd();
+    let fd_alarme = alarme.as_raw_fd();
     let mut interpretador: Processor = Processor::new();
     let mut desenhados = 0;
+    // Há mensagem na fila do tungstenite esperando o socket aceitar mais.
+    let mut falta_enviar = false;
+    let bloqueou = |e: &tungstenite::Error| matches!(e, tungstenite::Error::Io(e) if e.kind() == ErrorKind::WouldBlock);
     loop {
-        while let Ok(msg) = recebimento.try_recv() {
-            let msg = match msg {
-                ParaNucleo::Digitacao(b) => Message::binary(b),
-                ParaNucleo::Texto(t) => Message::text(t),
-            };
-            if socket.send(msg).is_err() {
-                return;
+        let mut fds = [
+            libc::pollfd { fd: fd_socket, events: libc::POLLIN | if falta_enviar { libc::POLLOUT } else { 0 }, revents: 0 },
+            libc::pollfd { fd: fd_alarme, events: libc::POLLIN, revents: 0 },
+        ];
+        // SAFETY: `fds` é um vetor válido de dois pollfd durante a chamada.
+        let pronto = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if pronto < 0 {
+            if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                continue;
             }
+            return;
         }
-        match socket.read() {
-            Ok(Message::Binary(dados)) => {
-                bytes.fetch_add(dados.len() as u64, Ordering::Relaxed);
-                interpretador.advance(&mut *term.lock().unwrap(), &dados);
-                // Controle de fluxo: confirma ao núcleo o que já foi processado.
-                desenhados += dados.len();
-                if desenhados >= CONFIRMAR_A_CADA {
-                    if socket.send(Message::text(format!(r#"{{"ack":{desenhados}}}"#))).is_err() {
-                        return;
-                    }
-                    desenhados = 0;
+        if fds[1].revents != 0 {
+            let mut lixo = [0u8; 64];
+            while matches!(alarme.read(&mut lixo), Ok(n) if n > 0) {}
+            while let Ok(msg) = recebimento.try_recv() {
+                let msg = match msg {
+                    ParaNucleo::Digitacao(b) => Message::binary(b),
+                    ParaNucleo::Texto(t) => Message::text(t),
+                };
+                match socket.write(msg) {
+                    Ok(()) => {}
+                    Err(e) if bloqueou(&e) => {}
+                    Err(_) => return,
                 }
-                ctx.request_repaint();
             }
-            // O núcleo avisa quando o programa do terminal termina.
-            Ok(Message::Text(t)) if t.contains(r#""fim":true"#) => return,
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(_) => return,
+            falta_enviar = true;
         }
+        if falta_enviar {
+            match socket.flush() {
+                Ok(()) => falta_enviar = false,
+                Err(e) if bloqueou(&e) => {}
+                Err(_) => return,
+            }
+        }
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+            continue;
+        }
+        // Lê tudo o que já chegou e desenha uma vez só.
+        let mut chegou = false;
+        loop {
+            match socket.read() {
+                Ok(Message::Binary(dados)) => {
+                    bytes.fetch_add(dados.len() as u64, Ordering::Relaxed);
+                    interpretador.advance(&mut *term.lock().unwrap(), &dados);
+                    chegou = true;
+                    // Controle de fluxo: confirma ao núcleo o que já foi processado.
+                    desenhados += dados.len();
+                    if desenhados >= CONFIRMAR_A_CADA {
+                        match socket.write(Message::text(format!(r#"{{"ack":{desenhados}}}"#))) {
+                            Ok(()) => {}
+                            Err(e) if bloqueou(&e) => {}
+                            Err(_) => return,
+                        }
+                        falta_enviar = true;
+                        desenhados = 0;
+                    }
+                }
+                // O núcleo avisa quando o programa do terminal termina.
+                Ok(Message::Text(t)) if t.contains(r#""fim":true"#) => {
+                    ctx.request_repaint();
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) if bloqueou(&e) => break,
+                Err(_) => {
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+        }
+        if chegou {
+            ctx.request_repaint();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn conexao(caminho: &str, _: u32, _: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, _: Alarme, _: &egui::Context, _: Arc<AtomicU64>) {
+    // No Windows o canal ainda não existe (veja canal.rs): o que a tela mandar é descartado.
+    eprintln!("terminal {caminho}: canal local ainda não implementado nesta plataforma");
+    for m in recebimento.try_iter() {
+        let _ = match m {
+            ParaNucleo::Digitacao(b) => b.len(),
+            ParaNucleo::Texto(t) => t.len(),
+        };
     }
 }
 

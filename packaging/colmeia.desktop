@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Colmeia
+GenericName=Agentes de IA de código
+Comment=Coordene agentes de IA de código por tarefa, com quadro, terminais e linha do tempo
+Exec=colmeia
+Icon=colmeia
+Terminal=false
+Categories=Development;
+Keywords=agentes;ia;claude;codex;kanban;terminal;
+StartupWMClass=colmeia

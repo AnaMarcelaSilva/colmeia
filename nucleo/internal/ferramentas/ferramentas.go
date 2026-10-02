@@ -77,3 +77,16 @@ func Variavel(ferramenta string) string {
 	}
 	return ""
 }
+
+// Nome da ferramenta para mostrar; "shell" é o terminal comum.
+func Nome(id string) string {
+	for _, c := range conhecidas {
+		if c.id == id {
+			return c.nome
+		}
+	}
+	if id == "shell" {
+		return "Terminal"
+	}
+	return id
+}

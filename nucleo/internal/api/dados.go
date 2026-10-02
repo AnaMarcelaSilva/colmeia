@@ -23,6 +23,8 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/perfis", s.listarPerfis)
 	mux.HandleFunc("POST /v1/perfis", s.criarPerfil)
 	mux.HandleFunc("PATCH /v1/perfis/{id}", s.atualizarPerfil)
+	mux.HandleFunc("GET /v1/perfis/{id}/quadro", s.quadro)
+	mux.HandleFunc("GET /v1/perfis/{id}/eventos", s.eventos)
 	mux.HandleFunc("GET /v1/perfis/{id}/contas", s.listarContas)
 	mux.HandleFunc("PUT /v1/perfis/{id}/contas", s.definirContas)
 	mux.HandleFunc("GET /v1/perfis/{id}/workspaces", s.listarWorkspaces)
@@ -36,6 +38,8 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/tarefas/{id}", s.atualizarTarefa)
 	mux.HandleFunc("DELETE /v1/tarefas/{id}", s.removerTarefa)
 	s.rotasAgentes(mux)
+	s.rotasAnexos(mux)
+	s.rotasLinha(mux)
 }
 
 // responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.
@@ -115,14 +119,26 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	var pedido struct{ Tema string }
+	// Só os campos enviados mudam.
+	var pedido struct {
+		Tema         *string `json:"tema"`
+		AvisoCaptura *bool   `json:"aviso_captura"`
+	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
 		return
 	}
-	if err := s.Banco.DefinirTema(r.Context(), id, pedido.Tema); err != nil {
-		responderErro(w, err)
-		return
+	if pedido.Tema != nil {
+		if err := s.Banco.DefinirTema(r.Context(), id, *pedido.Tema); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if pedido.AvisoCaptura != nil {
+		if err := s.Banco.DefinirAvisoCaptura(r.Context(), id, *pedido.AvisoCaptura); err != nil {
+			responderErro(w, err)
+			return
+		}
 	}
 	responderJSON(w, map[string]any{"ok": true})
 }
@@ -375,7 +391,7 @@ func (s *Servidor) atualizarTarefa(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	tarefa, err := s.Banco.AtualizarTarefa(r.Context(), id, mudanca)
+	tarefa, err := s.Banco.AtualizarTarefa(r.Context(), id, mudanca, dados.OrigemVoce)
 	if err != nil {
 		responderErro(w, err)
 		return

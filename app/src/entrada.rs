@@ -38,6 +38,9 @@ pub struct Entrada {
     workspace_criado: Option<i64>,
     /// Pede o foco do campo de nome uma vez só: pedir em todo quadro trava os eventos.
     focar_nome: bool,
+    /// Enter neste quadro, lido antes de desenhar: em todos os passos ele
+    /// confirma a ação principal, como nos diálogos.
+    enter: bool,
 }
 
 impl Entrada {
@@ -62,6 +65,7 @@ impl Entrada {
             criado: None,
             workspace_criado: None,
             focar_nome: true,
+            enter: false,
         }
     }
 
@@ -69,6 +73,9 @@ impl Entrada {
     pub fn mostrar(&mut self, ui: &mut egui::Ui) -> Option<api::Perfil> {
         let largura = 560.0_f32.min(ui.available_width() - 40.0);
         let mut entrar = None;
+        let passo_antes = self.passo;
+        // Com o seletor de pasta aberto, o Enter é dele.
+        self.enter = !self.seletor.aberto() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.12).min(90.0));
             ui.horizontal(|ui| {
@@ -102,6 +109,11 @@ impl Entrada {
                 });
             });
         });
+        // Trocou de passo por uma tecla (o Enter aperta e solta no mesmo quadro):
+        // sem pedir, o passo novo só apareceria no próximo evento.
+        if self.passo != passo_antes {
+            ui.ctx().request_repaint();
+        }
         entrar
     }
 
@@ -167,8 +179,7 @@ impl Entrada {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let nome = self.nome.trim().to_string();
-                let continuar =
-                    tema::botao_principal(ui, "Continuar", !nome.is_empty()).clicked() || (!nome.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                let continuar = tema::botao_principal(ui, "Continuar", !nome.is_empty()).clicked() || (!nome.is_empty() && self.enter);
                 if continuar {
                     // O núcleo também recusa nome repetido; conferir aqui evita perder os outros passos.
                     if self.perfis.iter().any(|p| p.nome.eq_ignore_ascii_case(&nome)) && self.criado.is_none() {
@@ -243,7 +254,7 @@ impl Entrada {
                 self.passo = Passo::Nome;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if tema::botao_principal(ui, "Continuar", true).clicked() {
+                if tema::botao_principal(ui, "Continuar", true).clicked() || self.enter {
                     if self.workspace.is_empty() {
                         self.workspace = "Meus projetos".into();
                     }
@@ -290,7 +301,7 @@ impl Entrada {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let tem_pasta = !self.pasta.trim().is_empty();
-                if tema::botao_principal(ui, "Criar perfil", true).clicked() {
+                if tema::botao_principal(ui, "Criar perfil", true).clicked() || self.enter {
                     resultado = self.concluir(tem_pasta, &sugestao);
                 }
                 if tema::botao_secundario(ui, "Pular projeto").clicked() {

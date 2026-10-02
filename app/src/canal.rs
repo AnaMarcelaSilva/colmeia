@@ -22,18 +22,6 @@ pub fn diretorio() -> PathBuf {
     base.join("colmeia")
 }
 
-/// O mesmo diretório de dados do núcleo: COLMEIA_DADOS, ou $XDG_DATA_HOME/colmeia,
-/// ou ~/.local/share/colmeia.
-pub fn diretorio_dados() -> PathBuf {
-    if let Some(d) = std::env::var_os("COLMEIA_DADOS") {
-        return PathBuf::from(d);
-    }
-    if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(d).join("colmeia");
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/colmeia")).unwrap_or_else(|| std::env::temp_dir().join("colmeia"))
-}
-
 fn ler_token() -> io::Result<String> {
     Ok(std::fs::read_to_string(diretorio().join(NOME_TOKEN))?.trim().to_string())
 }
@@ -79,22 +67,28 @@ mod unix {
 
     /// Pedido HTTP com corpo JSON opcional; devolve o status e o corpo.
     pub fn pedir_com_corpo(metodo: &str, caminho: &str, corpo: Option<&str>) -> Result<(u16, String), String> {
+        let (status, corpo) = pedir_bytes(metodo, caminho, "application/json", corpo.unwrap_or("").as_bytes())?;
+        Ok((status, String::from_utf8_lossy(&corpo).into_owned()))
+    }
+
+    /// Pedido HTTP com corpo em bytes (uma imagem, por exemplo); devolve o
+    /// status e o corpo da resposta, também em bytes.
+    pub fn pedir_bytes(metodo: &str, caminho: &str, tipo: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), String> {
         let mut fluxo = conectar().map_err(|e| format!("núcleo indisponível: {e}"))?;
         let token = ler_token().map_err(|e| format!("sem token do núcleo: {e}"))?;
         fluxo.set_read_timeout(Some(Duration::from_secs(10))).ok();
-        let corpo = corpo.unwrap_or("");
-        write!(
-            fluxo,
-            "{metodo} {caminho} HTTP/1.0\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corpo}",
+        let cabecalho = format!(
+            "{metodo} {caminho} HTTP/1.0\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Type: {tipo}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             corpo.len()
-        )
-        .map_err(|e| e.to_string())?;
-        let mut resposta = String::new();
-        fluxo.read_to_string(&mut resposta).map_err(|e| e.to_string())?;
-        let (cabecalho, corpo) = resposta.split_once("\r\n\r\n").unwrap_or((&resposta, ""));
+        );
+        fluxo.write_all(cabecalho.as_bytes()).and_then(|_| fluxo.write_all(corpo)).map_err(|e| e.to_string())?;
+        let mut resposta = Vec::new();
+        fluxo.read_to_end(&mut resposta).map_err(|e| e.to_string())?;
+        let fim = resposta.windows(4).position(|j| j == b"\r\n\r\n").ok_or("resposta inválida do núcleo")?;
+        let cabecalho = String::from_utf8_lossy(&resposta[..fim]);
         let status = cabecalho.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("resposta inválida do núcleo")?;
         // Em HTTP/1.0 o servidor não divide a resposta em blocos: o corpo é o resto.
-        Ok((status, corpo.to_string()))
+        Ok((status, resposta[fim + 4..].to_vec()))
     }
 
     /// Procura o executável do núcleo: COLMEIA_NUCLEO, ao lado do app ou no PATH.
@@ -109,9 +103,19 @@ mod unix {
         std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("colmeia-nucleo")).find(|c| c.is_file()))
     }
 
+    /// Os casos comuns em português; o resto como o sistema descreve.
+    fn erro_ao_iniciar(e: &std::io::Error) -> String {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => "arquivo não encontrado".into(),
+            std::io::ErrorKind::PermissionDenied => "sem permissão para executar".into(),
+            _ => e.to_string(),
+        }
+    }
+
     /// Se o núcleo não estiver rodando, inicia um em segundo plano e espera o
-    /// canal ficar pronto. Ele continua rodando depois que a tela fecha: é dono
-    /// dos terminais. COLMEIA_DEMO=1 inicia com as cargas de teste ligadas.
+    /// canal ficar pronto (até 5 s; chame fora da thread da tela). Ele
+    /// continua rodando depois que a tela fecha: é dono dos terminais.
+    /// COLMEIA_DEMO=1 inicia com as cargas de teste ligadas.
     pub fn garantir_nucleo() -> Result<(), String> {
         if pedir("GET", "/v1/versao").is_ok() {
             return Ok(());
@@ -123,7 +127,12 @@ mod unix {
         }
         use std::os::unix::process::CommandExt;
         comando.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
-        comando.spawn().map_err(|e| format!("iniciando {}: {e}", caminho.display()))?;
+        let mut filho = comando.spawn().map_err(|e| format!("iniciando {}: {}", caminho.display(), erro_ao_iniciar(&e)))?;
+        // Recolhe o filho quando ele sair; sem isso, um núcleo que caiu fica
+        // como zumbi até a tela fechar. A thread só espera e não segura a saída.
+        let _ = std::thread::Builder::new().name("nucleo-filho".into()).spawn(move || {
+            let _ = filho.wait();
+        });
         let limite = Instant::now() + Duration::from_secs(5);
         while Instant::now() < limite {
             if pedir("GET", "/v1/versao").is_ok() {
@@ -151,6 +160,9 @@ mod outros {
         Err(AVISO.into())
     }
     pub fn pedir_com_corpo(_: &str, _: &str, _: Option<&str>) -> Result<(u16, String), String> {
+        Err(AVISO.into())
+    }
+    pub fn pedir_bytes(_: &str, _: &str, _: &str, _: &[u8]) -> Result<(u16, Vec<u8>), String> {
         Err(AVISO.into())
     }
     pub fn garantir_nucleo() -> Result<(), String> {

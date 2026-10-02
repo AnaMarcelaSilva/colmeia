@@ -12,6 +12,8 @@ type Perfil struct {
 	Nome     string `json:"nome"`
 	Tema     string `json:"tema"`
 	CriadoEm string `json:"criado_em"`
+	// AvisoCaptura: mostrar o aviso de segredos antes de capturar um terminal.
+	AvisoCaptura bool `json:"aviso_captura"`
 }
 
 type Conta struct {
@@ -49,12 +51,40 @@ type Tarefa struct {
 	Ordem        float64 `json:"ordem"`
 	CriadoEm     string  `json:"criado_em"`
 	AtualizadoEm string  `json:"atualizado_em"`
+	// ColunaAuto: a última mudança de coluna foi do núcleo, não sua.
+	ColunaAuto bool `json:"coluna_auto"`
+}
+
+// Colunas lidas de uma tarefa, na ordem de escanearTarefa.
+const colunasTarefa = `id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em, coluna_auto`
+
+type escaneavel interface{ Scan(...any) error }
+
+func escanearTarefa(l escaneavel, t *Tarefa) error {
+	return l.Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm, &t.ColunaAuto)
+}
+
+// Origens de uma mudança: sua (pela tela) ou automática (regra do núcleo).
+const (
+	OrigemVoce       = "voce"
+	OrigemAutomatica = "automatico"
+)
+
+// donoDoProjeto devolve o perfil e o nome do projeto, para o escopo e o texto dos eventos.
+func donoDoProjeto(ctx context.Context, tx *transacao, projeto int64) (int64, string, error) {
+	var perfil int64
+	var nome string
+	err := tx.QueryRowContext(ctx, `SELECT w.perfil_id, p.nome FROM projetos p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = ?`, projeto).Scan(&perfil, &nome)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", ErrNaoEncontrado
+	}
+	return perfil, nome, err
 }
 
 // Perfis
 
 func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em FROM perfis ORDER BY nome`)
+	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura FROM perfis ORDER BY nome`)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +92,7 @@ func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
 	perfis := []Perfil{}
 	for linhas.Next() {
 		var p Perfil
-		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm); err != nil {
+		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura); err != nil {
 			return nil, err
 		}
 		perfis = append(perfis, p)
@@ -81,14 +111,14 @@ func (b *Banco) CriarPerfil(ctx context.Context, nome, tema string) (Perfil, err
 	if err := umDe("tema", tema, Temas); err != nil {
 		return Perfil{}, err
 	}
-	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora()}
-	err = b.emTransacao(ctx, func(tx *sql.Tx) error {
+	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true}
+	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO perfis (nome, tema, criado_em) VALUES (?, ?, ?)`, p.Nome, p.Tema, p.CriadoEm)
 		if err != nil {
 			return traduzir(err)
 		}
 		p.ID, _ = r.LastInsertId()
-		return registrar(ctx, tx, "perfil.criado", p)
+		return registrar(ctx, tx, "perfil.criado", Escopo{Perfil: p.ID}, p)
 	})
 	return p, err
 }
@@ -97,7 +127,7 @@ func (b *Banco) DefinirTema(ctx context.Context, perfil int64, tema string) erro
 	if err := umDe("tema", tema, Temas); err != nil {
 		return err
 	}
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `UPDATE perfis SET tema = ? WHERE id = ?`, tema, perfil)
 		if err != nil {
 			return err
@@ -105,7 +135,31 @@ func (b *Banco) DefinirTema(ctx context.Context, perfil int64, tema string) erro
 		if n, _ := r.RowsAffected(); n == 0 {
 			return ErrNaoEncontrado
 		}
-		return registrar(ctx, tx, "perfil.tema", map[string]any{"perfil": perfil, "tema": tema})
+		return registrar(ctx, tx, "perfil.tema", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "tema": tema})
+	})
+}
+
+// Perfil devolve um perfil pelo id.
+func (b *Banco) Perfil(ctx context.Context, id int64) (Perfil, error) {
+	var p Perfil
+	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura FROM perfis WHERE id = ?`, id).Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura)
+	if errors.Is(err, sql.ErrNoRows) {
+		return p, ErrNaoEncontrado
+	}
+	return p, err
+}
+
+// DefinirAvisoCaptura liga ou desliga o aviso de segredos antes de capturar.
+func (b *Banco) DefinirAvisoCaptura(ctx context.Context, perfil int64, mostrar bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET aviso_captura = ? WHERE id = ?`, mostrar, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.aviso_captura", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "mostrar": mostrar})
 	})
 }
 
@@ -158,7 +212,7 @@ func (b *Banco) DefinirContas(ctx context.Context, perfil int64, contas []Conta)
 		}
 		vistas[c.Ferramenta] = true
 	}
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM contas_ia WHERE perfil_id = ?`, perfil); err != nil {
 			return err
 		}
@@ -167,7 +221,7 @@ func (b *Banco) DefinirContas(ctx context.Context, perfil int64, contas []Conta)
 				return err
 			}
 		}
-		return registrar(ctx, tx, "perfil.contas", map[string]any{"perfil": perfil, "contas": contas})
+		return registrar(ctx, tx, "perfil.contas", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "contas": contas})
 	})
 }
 
@@ -202,13 +256,13 @@ func (b *Banco) CriarWorkspace(ctx context.Context, perfil int64, nome string) (
 		return Workspace{}, err
 	}
 	w := Workspace{PerfilID: perfil, Nome: nome}
-	err = b.emTransacao(ctx, func(tx *sql.Tx) error {
+	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO workspaces (perfil_id, nome) VALUES (?, ?)`, perfil, nome)
 		if err != nil {
 			return traduzir(err)
 		}
 		w.ID, _ = r.LastInsertId()
-		return registrar(ctx, tx, "workspace.criado", w)
+		return registrar(ctx, tx, "workspace.criado", Escopo{Perfil: perfil}, w)
 	})
 	return w, err
 }
@@ -268,8 +322,9 @@ func (b *Banco) CriarProjeto(ctx context.Context, workspace int64, nome, caminho
 		branchPadrao = ""
 	}
 	p := Projeto{WorkspaceID: workspace, Nome: nome, Caminho: caminho, Tipo: tipo, BranchPadrao: branchPadrao}
-	err = b.emTransacao(ctx, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, `SELECT nome FROM workspaces WHERE id = ?`, workspace).Scan(&p.Workspace); err != nil {
+	err = b.emTransacao(ctx, func(tx *transacao) error {
+		var perfil int64
+		if err := tx.QueryRowContext(ctx, `SELECT nome, perfil_id FROM workspaces WHERE id = ?`, workspace).Scan(&p.Workspace, &perfil); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNaoEncontrado
 			}
@@ -280,22 +335,22 @@ func (b *Banco) CriarProjeto(ctx context.Context, workspace int64, nome, caminho
 			return traduzir(err)
 		}
 		p.ID, _ = r.LastInsertId()
-		return registrar(ctx, tx, "projeto.criado", p)
+		return registrar(ctx, tx, "projeto.criado", Escopo{Perfil: perfil, Projeto: p.ID}, p)
 	})
 	return p, err
 }
 
 // RemoverProjeto tira o projeto (e suas tarefas) da Colmeia. A pasta não é tocada.
 func (b *Banco) RemoverProjeto(ctx context.Context, id int64) error {
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
-		r, err := tx.ExecContext(ctx, `DELETE FROM projetos WHERE id = ?`, id)
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		perfil, nome, err := donoDoProjeto(ctx, tx, id)
 		if err != nil {
 			return err
 		}
-		if n, _ := r.RowsAffected(); n == 0 {
-			return ErrNaoEncontrado
+		if _, err := tx.ExecContext(ctx, `DELETE FROM projetos WHERE id = ?`, id); err != nil {
+			return err
 		}
-		return registrar(ctx, tx, "projeto.removido", map[string]any{"projeto": id})
+		return registrar(ctx, tx, "projeto.removido", Escopo{Perfil: perfil, Projeto: id}, map[string]any{"projeto": id, "projeto_nome": nome})
 	})
 }
 
@@ -305,9 +360,18 @@ func (b *Banco) ListarTarefas(ctx context.Context, projeto int64) ([]Tarefa, err
 	if _, err := b.Projeto(ctx, projeto); err != nil {
 		return nil, err
 	}
-	linhas, err := b.db.QueryContext(ctx, `
-		SELECT id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em
-		FROM tarefas WHERE projeto_id = ? ORDER BY coluna, ordem`, projeto)
+	return b.listarTarefas(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE projeto_id = ? ORDER BY coluna, ordem`, projeto)
+}
+
+// ListarTarefasDoPerfil traz as tarefas de todos os projetos do perfil de uma vez.
+func (b *Banco) ListarTarefasDoPerfil(ctx context.Context, perfil int64) ([]Tarefa, error) {
+	return b.listarTarefas(ctx, `SELECT `+prefixar("t.", colunasTarefa)+` FROM tarefas t
+		JOIN projetos p ON p.id = t.projeto_id JOIN workspaces w ON w.id = p.workspace_id
+		WHERE w.perfil_id = ? ORDER BY t.coluna, t.ordem`, perfil)
+}
+
+func (b *Banco) listarTarefas(ctx context.Context, consulta string, arg any) ([]Tarefa, error) {
+	linhas, err := b.db.QueryContext(ctx, consulta, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -315,12 +379,21 @@ func (b *Banco) ListarTarefas(ctx context.Context, projeto int64) ([]Tarefa, err
 	lista := []Tarefa{}
 	for linhas.Next() {
 		var t Tarefa
-		if err := linhas.Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm); err != nil {
+		if err := escanearTarefa(linhas, &t); err != nil {
 			return nil, err
 		}
 		lista = append(lista, t)
 	}
 	return lista, linhas.Err()
+}
+
+// prefixar põe o apelido da tabela em cada coluna de uma lista fixa daqui.
+func prefixar(apelido, colunas string) string {
+	partes := strings.Split(colunas, ", ")
+	for i := range partes {
+		partes[i] = apelido + partes[i]
+	}
+	return strings.Join(partes, ", ")
 }
 
 // CriarTarefa grava a tarefa. Numa pasta sem git ela não tem branch e os
@@ -350,7 +423,11 @@ func (b *Banco) CriarTarefa(ctx context.Context, projeto int64, titulo, branch, 
 	}
 	momento := agora()
 	t := Tarefa{ProjetoID: projeto, Titulo: titulo, Coluna: "backlog", Branch: branch, Local: local, CriadoEm: momento, AtualizadoEm: momento}
-	err = b.emTransacao(ctx, func(tx *sql.Tx) error {
+	err = b.emTransacao(ctx, func(tx *transacao) error {
+		dono, _, err := donoDoProjeto(ctx, tx, projeto)
+		if err != nil {
+			return err
+		}
 		// A tarefa nova vai para o fim do Backlog.
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordem), 0) + 1 FROM tarefas WHERE projeto_id = ? AND coluna = 'backlog'`, projeto).Scan(&t.Ordem); err != nil {
 			return err
@@ -361,7 +438,10 @@ func (b *Banco) CriarTarefa(ctx context.Context, projeto int64, titulo, branch, 
 			return err
 		}
 		t.ID, _ = r.LastInsertId()
-		return registrar(ctx, tx, "tarefa.criada", t)
+		return registrar(ctx, tx, "tarefa.criada", Escopo{Perfil: dono, Projeto: projeto, Tarefa: t.ID}, struct {
+			Tarefa
+			ProjetoNome string `json:"projeto_nome"`
+		}{t, p.Nome})
 	})
 	return t, err
 }
@@ -373,7 +453,10 @@ type Mudanca struct {
 	Branch *string `json:"branch"`
 }
 
-func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca) (Tarefa, error) {
+// AtualizarTarefa aplica a mudança. `origem` diz se veio de você (pela tela)
+// ou de uma regra do núcleo; só a mudança automática de coluna pode ser
+// desfeita sozinha depois (veja ColunaAuto).
+func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca, origem string) (Tarefa, error) {
 	if m.Titulo != nil {
 		titulo, err := nomeValido("O título da tarefa", *m.Titulo, 200)
 		if err != nil {
@@ -391,16 +474,23 @@ func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca) (Taref
 			return Tarefa{}, err
 		}
 	}
+	if err := umDe("origem", origem, []string{OrigemVoce, OrigemAutomatica}); err != nil {
+		return Tarefa{}, err
+	}
 	var t Tarefa
-	err := b.emTransacao(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `SELECT id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em FROM tarefas WHERE id = ?`, id).
-			Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm)
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		err := escanearTarefa(tx.QueryRowContext(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE id = ?`, id), &t)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNaoEncontrado
 		}
 		if err != nil {
 			return err
 		}
+		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, t.ProjetoID)
+		if err != nil {
+			return err
+		}
+		antes := t.Coluna
 		if m.Titulo != nil {
 			t.Titulo = *m.Titulo
 		}
@@ -418,16 +508,21 @@ func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca) (Taref
 		if m.Coluna != nil && *m.Coluna != t.Coluna {
 			// Mudou de coluna: vai para o fim da coluna de destino.
 			t.Coluna = *m.Coluna
+			t.ColunaAuto = origem == OrigemAutomatica
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordem), 0) + 1 FROM tarefas WHERE projeto_id = ? AND coluna = ?`, t.ProjetoID, t.Coluna).Scan(&t.Ordem); err != nil {
 				return err
 			}
 		}
 		t.AtualizadoEm = agora()
-		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET titulo = ?, coluna = ?, branch = ?, ordem = ?, atualizado_em = ? WHERE id = ?`,
-			t.Titulo, t.Coluna, t.Branch, t.Ordem, t.AtualizadoEm, t.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET titulo = ?, coluna = ?, branch = ?, ordem = ?, atualizado_em = ?, coluna_auto = ? WHERE id = ?`,
+			t.Titulo, t.Coluna, t.Branch, t.Ordem, t.AtualizadoEm, t.ColunaAuto, t.ID); err != nil {
 			return err
 		}
-		return registrar(ctx, tx, "tarefa.atualizada", map[string]any{"tarefa": t.ID, "mudanca": m})
+		// A tarefa inteira vai no evento: a linha do tempo não depende de ela
+		// ainda existir, e a tela atualiza o cartão sem pedir de novo.
+		return registrar(ctx, tx, "tarefa.atualizada", Escopo{Perfil: perfil, Projeto: t.ProjetoID, Tarefa: t.ID}, map[string]any{
+			"tarefa": t, "mudanca": m, "coluna_antes": antes, "origem": origem, "projeto_nome": nomeProjeto,
+		})
 	})
 	return t, err
 }
@@ -435,8 +530,7 @@ func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca) (Taref
 // Tarefa devolve a tarefa com o projeto dela e o perfil a que pertence.
 func (b *Banco) Tarefa(ctx context.Context, id int64) (Tarefa, Projeto, int64, error) {
 	var t Tarefa
-	err := b.db.QueryRowContext(ctx, `SELECT id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em FROM tarefas WHERE id = ?`, id).
-		Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm)
+	err := escanearTarefa(b.db.QueryRowContext(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE id = ?`, id), &t)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, Projeto{}, 0, ErrNaoEncontrado
 	}
@@ -454,11 +548,19 @@ func (b *Banco) Tarefa(ctx context.Context, id int64) (Tarefa, Projeto, int64, e
 
 // DefinirCopia grava onde ficou a cópia isolada da tarefa.
 func (b *Banco) DefinirCopia(ctx context.Context, id int64, caminho string) error {
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET copia = ? WHERE id = ?`, caminho, id); err != nil {
 			return err
 		}
-		return registrar(ctx, tx, "tarefa.copia", map[string]any{"tarefa": id, "copia": caminho})
+		var t Tarefa
+		if err := escanearTarefa(tx.QueryRowContext(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE id = ?`, id), &t); err != nil {
+			return err
+		}
+		perfil, _, err := donoDoProjeto(ctx, tx, t.ProjetoID)
+		if err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "tarefa.copia", Escopo{Perfil: perfil, Projeto: t.ProjetoID, Tarefa: id}, map[string]any{"tarefa": t, "copia": caminho})
 	})
 }
 
@@ -471,15 +573,25 @@ func (t Tarefa) Pasta(p Projeto) string {
 }
 
 func (b *Banco) RemoverTarefa(ctx context.Context, id int64) error {
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
-		r, err := tx.ExecContext(ctx, `DELETE FROM tarefas WHERE id = ?`, id)
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		var t Tarefa
+		err := escanearTarefa(tx.QueryRowContext(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE id = ?`, id), &t)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
 		if err != nil {
 			return err
 		}
-		if n, _ := r.RowsAffected(); n == 0 {
-			return ErrNaoEncontrado
+		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, t.ProjetoID)
+		if err != nil {
+			return err
 		}
-		return registrar(ctx, tx, "tarefa.removida", map[string]any{"tarefa": id})
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tarefas WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "tarefa.removida", Escopo{Perfil: perfil, Projeto: t.ProjetoID, Tarefa: id}, map[string]any{
+			"tarefa": id, "titulo": t.Titulo, "coluna": t.Coluna, "projeto_id": t.ProjetoID, "projeto_nome": nomeProjeto,
+		})
 	})
 }
 
@@ -497,6 +609,27 @@ type Agente struct {
 
 func (b *Banco) ListarAgentes(ctx context.Context, tarefa int64) ([]Agente, error) {
 	linhas, err := b.db.QueryContext(ctx, `SELECT id, tarefa_id, ferramenta, papel, sessao, criado_em FROM agentes WHERE tarefa_id = ? ORDER BY id`, tarefa)
+	if err != nil {
+		return nil, err
+	}
+	defer linhas.Close()
+	lista := []Agente{}
+	for linhas.Next() {
+		var a Agente
+		if err := linhas.Scan(&a.ID, &a.TarefaID, &a.Ferramenta, &a.Papel, &a.Sessao, &a.CriadoEm); err != nil {
+			return nil, err
+		}
+		lista = append(lista, a)
+	}
+	return lista, linhas.Err()
+}
+
+// ListarAgentesDoPerfil traz os agentes de todas as tarefas do perfil de uma vez.
+func (b *Banco) ListarAgentesDoPerfil(ctx context.Context, perfil int64) ([]Agente, error) {
+	linhas, err := b.db.QueryContext(ctx, `
+		SELECT a.id, a.tarefa_id, a.ferramenta, a.papel, a.sessao, a.criado_em
+		FROM agentes a JOIN tarefas t ON t.id = a.tarefa_id JOIN projetos p ON p.id = t.projeto_id
+		JOIN workspaces w ON w.id = p.workspace_id WHERE w.perfil_id = ? ORDER BY a.id`, perfil)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +690,20 @@ func (b *Banco) CriarAgente(ctx context.Context, tarefa int64, ferramenta, papel
 		return Agente{}, ErrInvalido{"só o Claude Code retoma uma conversa"}
 	}
 	a := Agente{TarefaID: tarefa, Ferramenta: ferramenta, Papel: papel, Sessao: sessao, CriadoEm: agora()}
-	err := b.emTransacao(ctx, func(tx *sql.Tx) error {
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		var projeto int64
+		var titulo string
+		err := tx.QueryRowContext(ctx, `SELECT projeto_id, titulo FROM tarefas WHERE id = ?`, tarefa).Scan(&projeto, &titulo)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, projeto)
+		if err != nil {
+			return err
+		}
 		r, err := tx.ExecContext(ctx, `INSERT INTO agentes (tarefa_id, ferramenta, papel, sessao, criado_em) VALUES (?, ?, ?, ?, ?)`,
 			a.TarefaID, a.Ferramenta, a.Papel, a.Sessao, a.CriadoEm)
 		if err != nil {
@@ -567,20 +713,61 @@ func (b *Banco) CriarAgente(ctx context.Context, tarefa int64, ferramenta, papel
 			return err
 		}
 		a.ID, _ = r.LastInsertId()
-		return registrar(ctx, tx, "agente.criado", a)
+		return registrar(ctx, tx, "agente.criado", Escopo{Perfil: perfil, Projeto: projeto, Tarefa: tarefa, Agente: a.ID}, struct {
+			Agente
+			Titulo      string `json:"titulo"`
+			ProjetoNome string `json:"projeto_nome"`
+		}{a, titulo, nomeProjeto})
 	})
 	return a, err
 }
 
 func (b *Banco) RemoverAgente(ctx context.Context, id int64) error {
-	return b.emTransacao(ctx, func(tx *sql.Tx) error {
-		r, err := tx.ExecContext(ctx, `DELETE FROM agentes WHERE id = ?`, id)
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		var tarefa, projeto int64
+		err := tx.QueryRowContext(ctx, `SELECT a.tarefa_id, t.projeto_id FROM agentes a JOIN tarefas t ON t.id = a.tarefa_id WHERE a.id = ?`, id).Scan(&tarefa, &projeto)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
 		if err != nil {
 			return err
 		}
-		if n, _ := r.RowsAffected(); n == 0 {
-			return ErrNaoEncontrado
+		perfil, _, err := donoDoProjeto(ctx, tx, projeto)
+		if err != nil {
+			return err
 		}
-		return registrar(ctx, tx, "agente.removido", map[string]any{"agente": id})
+		if _, err := tx.ExecContext(ctx, `DELETE FROM agentes WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "agente.removido", Escopo{Perfil: perfil, Projeto: projeto, Tarefa: tarefa, Agente: id}, map[string]any{"agente": id, "tarefa": tarefa})
 	})
+}
+
+// ContextoAgente é o que os eventos de um agente precisam saber dele.
+type ContextoAgente struct {
+	Agente
+	Titulo      string `json:"titulo"`
+	ProjetoID   int64  `json:"projeto_id"`
+	ProjetoNome string `json:"projeto_nome"`
+	Perfil      int64  `json:"-"`
+	Coluna      string `json:"-"`
+}
+
+// Escopo do agente para os eventos.
+func (c ContextoAgente) Escopo() Escopo {
+	return Escopo{Perfil: c.Perfil, Projeto: c.ProjetoID, Tarefa: c.TarefaID, Agente: c.ID}
+}
+
+// ContextoDoAgente lê o agente com a tarefa, o projeto e o perfil dele.
+func (b *Banco) ContextoDoAgente(ctx context.Context, id int64) (ContextoAgente, error) {
+	var c ContextoAgente
+	err := b.db.QueryRowContext(ctx, `
+		SELECT a.id, a.tarefa_id, a.ferramenta, a.papel, a.sessao, a.criado_em, t.titulo, t.coluna, p.id, p.nome, w.perfil_id
+		FROM agentes a JOIN tarefas t ON t.id = a.tarefa_id JOIN projetos p ON p.id = t.projeto_id
+		JOIN workspaces w ON w.id = p.workspace_id WHERE a.id = ?`, id).
+		Scan(&c.ID, &c.TarefaID, &c.Ferramenta, &c.Papel, &c.Sessao, &c.CriadoEm, &c.Titulo, &c.Coluna, &c.ProjetoID, &c.ProjetoNome, &c.Perfil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return c, ErrNaoEncontrado
+	}
+	return c, err
 }

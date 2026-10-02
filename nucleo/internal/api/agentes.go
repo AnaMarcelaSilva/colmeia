@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,11 +32,17 @@ func (s *Servidor) rotasAgentes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agentes/{id}/terminal", s.terminalDoAgente)
 }
 
-// agenteComEstado diz à tela se o terminal do agente está rodando.
+// agenteComEstado diz à tela se o terminal do agente está rodando, em que
+// estado ele está e, se parou, como terminou.
 type agenteComEstado struct {
 	dados.Agente
-	Ativo bool   `json:"ativo"`
-	Pasta string `json:"pasta"`
+	Ativo     bool       `json:"ativo"`
+	Pasta     string     `json:"pasta,omitempty"`
+	Estado    string     `json:"estado,omitempty"`
+	Motivo    string     `json:"motivo,omitempty"`
+	Desde     string     `json:"desde,omitempty"`
+	DesdeHora string     `json:"desde_hora,omitempty"`
+	UltimoFim *fimAgente `json:"ultimo_fim,omitempty"`
 }
 
 func (s *Servidor) listarAgentesDoProjeto(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +58,7 @@ func (s *Servidor) listarAgentesDoProjeto(w http.ResponseWriter, r *http.Request
 	}
 	lista := make([]agenteComEstado, 0, len(agentes))
 	for _, a := range agentes {
-		lista = append(lista, agenteComEstado{Agente: a, Ativo: s.Agentes.Ativa(a.ID)})
+		lista = append(lista, s.comEstado(a, "", nil))
 	}
 	responderJSON(w, lista)
 }
@@ -74,7 +81,7 @@ func (s *Servidor) listarAgentes(w http.ResponseWriter, r *http.Request) {
 	}
 	lista := make([]agenteComEstado, 0, len(agentes))
 	for _, a := range agentes {
-		lista = append(lista, agenteComEstado{Agente: a, Ativo: s.Agentes.Ativa(a.ID), Pasta: tarefa.Pasta(projeto)})
+		lista = append(lista, s.comEstado(a, tarefa.Pasta(projeto), nil))
 	}
 	responderJSON(w, lista)
 }
@@ -110,7 +117,7 @@ func (s *Servidor) criarAgente(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	responderJSON(w, agenteComEstado{Agente: agente, Ativo: true})
+	responderJSON(w, s.comEstado(agente, "", nil))
 }
 
 func (s *Servidor) iniciarAgente(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +137,7 @@ func (s *Servidor) iniciarAgente(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	responderJSON(w, agenteComEstado{Agente: agente, Ativo: true})
+	responderJSON(w, s.comEstado(agente, "", nil))
 }
 
 func (s *Servidor) removerAgente(w http.ResponseWriter, r *http.Request) {
@@ -263,11 +270,30 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente) error {
 			}
 		}
 	}
+	contexto, err := s.Banco.ContextoDoAgente(ctx, a.ID)
+	if err != nil {
+		return err
+	}
 	pty, err := terminal.Iniciar(comando, env, pasta)
 	if err != nil {
 		return fmt.Errorf("abrindo o terminal: %w", err)
 	}
-	s.Agentes.Adicionar(terminal.NovaSessao(a.ID, pty, s.Bytes))
+	sessao := terminal.NovaSessao(a.ID, pty, s.Bytes)
+	sessao.Acompanhar(a.Ferramenta, s.Tempos)
+	s.guardarContexto(contexto)
+	s.Agentes.Adicionar(sessao)
+	ctx = context.WithoutCancel(ctx)
+	if err := s.Banco.Registrar(ctx, "agente.iniciou", contexto.Escopo(), contexto); err != nil {
+		log.Printf("agente %d: gravando o início: %v", a.ID, err)
+	}
+	// Um agente que começa numa tarefa do Backlog põe a tarefa em andamento.
+	// Um terminal comum não: aberto e parado, ele não é trabalho acontecendo.
+	if contexto.Coluna == "backlog" && a.Ferramenta != "shell" {
+		trabalhando := "trabalhando"
+		if _, err := s.Banco.AtualizarTarefa(ctx, contexto.TarefaID, dados.Mudanca{Coluna: &trabalhando}, dados.OrigemAutomatica); err != nil {
+			log.Printf("tarefa %d: mudança automática de coluna: %v", contexto.TarefaID, err)
+		}
+	}
 	return nil
 }
 

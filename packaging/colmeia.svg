@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- O favo da Colmeia: a célula de fora em contorno e a do meio preenchida. -->
+  <rect width="64" height="64" rx="14" fill="#151a22"/>
+  <polygon points="32,8 52.8,20 52.8,44 32,56 11.2,44 11.2,20" fill="#b794f6" fill-opacity="0.18" stroke="#b794f6" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="32,21.2 41.35,26.6 41.35,37.4 32,42.8 22.65,37.4 22.65,26.6" fill="#b794f6"/>
+</svg>

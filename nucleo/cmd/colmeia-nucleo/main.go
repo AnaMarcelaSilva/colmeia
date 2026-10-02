@@ -8,9 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,12 +24,25 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
-const versao = "0.1.0"
+const versao = "0.2.0"
 
 func main() {
 	quantidade := flag.Int("terminais", 10, "quantidade de terminais de teste no modo demonstração")
 	modoDemo := flag.Bool("demo", false, "modo demonstração: terminais de teste e cargas que escrevem comandos neles")
+	encerrar := flag.Bool("encerrar", false, "encerra o núcleo que está rodando (e os agentes dele) e sai")
+	mostrarVersao := flag.Bool("versao", false, "mostra a versão e sai")
 	flag.Parse()
+	if *mostrarVersao {
+		fmt.Println("colmeia-nucleo", versao)
+		return
+	}
+	if *encerrar {
+		if err := pedirEncerramento(); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("núcleo encerrado")
+		return
+	}
 	if *quantidade < 1 || *quantidade > 64 {
 		log.Fatal("--terminais precisa estar entre 1 e 64")
 	}
@@ -54,10 +70,13 @@ func main() {
 		log.Fatalf("abrindo os dados: %v", err)
 	}
 	defer banco.Fechar()
+	avisoHistorico := ""
 	if err := banco.VerificarHistorico(context.Background()); err != nil {
-		// Não impede o uso, mas avisa: alguém mexeu no histórico por fora.
+		// Não impede o uso, mas avisa (aqui e na tela): alguém mexeu no histórico por fora.
 		log.Printf("atenção: %v", err)
+		avisoHistorico = "O " + err.Error() + "."
 	}
+	banco.Registrar(context.Background(), "nucleo.iniciou", dados.Escopo{}, map[string]any{"versao": versao, "historico_ok": avisoHistorico == ""})
 
 	var bytes atomic.Int64
 	pasta, _ := os.UserHomeDir()
@@ -74,14 +93,15 @@ func main() {
 	}
 
 	agentes := terminal.NovoGerente()
-	servidor := &api.Servidor{Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados}
+	parar := make(chan os.Signal, 1)
+	servidor := &api.Servidor{Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados,
+		AvisoHistorico: avisoHistorico, AoEncerrar: func() { parar <- syscall.SIGTERM }}
 	servidorHTTP := &http.Server{
 		Handler:           canal.ExigirToken(token, servidor.Rotas()),
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	parar := make(chan os.Signal, 1)
 	signal.Notify(parar, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-parar
@@ -94,9 +114,49 @@ func main() {
 	if err := servidorHTTP.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("servidor: %v", err)
 	}
-	// Fechar o terminal avisa cada agente, que tem uns segundos para salvar a conversa.
+	// Fechar o terminal avisa cada agente, que tem uns segundos para salvar a
+	// conversa; o fim de cada um é gravado antes de o banco fechar.
 	agentes.FecharTodos()
+	servidor.Encerrar()
 	for _, s := range sessoes {
 		s.Fechar()
 	}
+}
+
+// pedirEncerramento fala com o núcleo que está rodando pelo canal local (o
+// mesmo socket e token da tela) e pede para ele desligar.
+func pedirEncerramento() error {
+	dir, err := canal.Diretorio()
+	if err != nil {
+		return err
+	}
+	token, err := os.ReadFile(filepath.Join(dir, canal.NomeToken))
+	if err != nil {
+		return fmt.Errorf("nenhum núcleo rodando (sem token em %s)", dir)
+	}
+	cliente := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", filepath.Join(dir, canal.NomeSocket))
+		}},
+	}
+	pedido, _ := http.NewRequest("POST", "http://colmeia/v1/encerrar", nil)
+	pedido.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	resposta, err := cliente.Do(pedido)
+	if err != nil {
+		return fmt.Errorf("nenhum núcleo respondeu: %w", err)
+	}
+	resposta.Body.Close()
+	if resposta.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("o núcleo recusou: %s", resposta.Status)
+	}
+	// Espera o socket sumir: o núcleo encerrou os agentes e fechou o banco.
+	for range 100 {
+		if _, err := os.Stat(filepath.Join(dir, canal.NomeSocket)); os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
 }

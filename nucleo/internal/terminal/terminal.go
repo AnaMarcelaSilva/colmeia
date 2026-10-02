@@ -29,6 +29,38 @@ const (
 type Pty interface {
 	io.ReadWriteCloser
 	Redimensionar(colunas, linhas uint16) error
+	// Esperar bloqueia até o programa terminar e diz como ele saiu.
+	Esperar() Saida
+}
+
+// Saida é como o programa do terminal terminou. Morto por um sinal, o código
+// segue a convenção do shell: 128 + o número do sinal.
+type Saida struct {
+	Codigo   int  `json:"codigo"`
+	PorSinal bool `json:"por_sinal"`
+}
+
+// Quem encerrou o terminal, quando foi a Colmeia (e não o próprio programa).
+const (
+	PelaRemocao   = "removido"
+	PeloDesligar  = "nucleo_encerrado"
+	esperaLeitura = 5 * time.Second
+)
+
+// Mudanca é o que o núcleo precisa saber de um agente: que iniciou, que mudou
+// de estado (trabalhando, ocioso, aguardando) ou que terminou.
+type Mudanca struct {
+	Tipo   string // "iniciou", "estado" ou "terminou"
+	Estado string
+	// Motivo vem sempre de uma lista fixa (veja detector.go), nunca do terminal.
+	Motivo string
+	Desde  time.Time
+	// Só em "terminou".
+	Saida       Saida
+	PelaColmeia string
+	Duracao     time.Duration
+	Trabalhando time.Duration
+	Aguardando  time.Duration
 }
 
 // Cliente é uma tela conectada a um terminal.
@@ -58,17 +90,60 @@ type Sessao struct {
 	ID        int64
 	pty       Pty
 	fim       chan struct{} // fechado quando o programa do terminal termina
+	lido      chan struct{} // fechado quando Ler termina, depois de avisar o fim
+	lendo     atomic.Bool
 	mu        sync.Mutex
 	liberado  *sync.Cond
 	historico []byte
-	clientes  map[*Cliente]struct{}
-	bytes     *atomic.Int64
+	// escritos conta os bytes que já passaram pelo histórico; corte é a
+	// contagem na última escrita da tela (ou no eco dela). O detector olha só
+	// o que veio depois do corte: um pedido já respondido e o eco do que você
+	// digitou ficam para trás.
+	escritos int64
+	corte    int64
+	clientes map[*Cliente]struct{}
+	bytes    *atomic.Int64
+
+	// Acompanhamento do agente (nil nos terminais de teste).
+	atividade    *atividade
+	aoMudar      func(Mudanca)
+	encerradaPor atomic.Value // string: quem da Colmeia fechou
 }
 
 func NovaSessao(id int64, pty Pty, bytes *atomic.Int64) *Sessao {
-	s := &Sessao{ID: id, pty: pty, fim: make(chan struct{}), clientes: map[*Cliente]struct{}{}, bytes: bytes}
+	s := &Sessao{ID: id, pty: pty, fim: make(chan struct{}), lido: make(chan struct{}), clientes: map[*Cliente]struct{}{}, bytes: bytes}
 	s.liberado = sync.NewCond(&s.mu)
 	return s
+}
+
+// Acompanhar liga o acompanhamento de atividade: a sessão passa a avisar
+// quando o agente trabalha, para ou parece esperar você. Chamar antes de Ler.
+func (s *Sessao) Acompanhar(ferramenta string, tempos Tempos) {
+	s.atividade = novaAtividade(ferramenta, tempos, s.ultimos, s.avisar)
+}
+
+func (s *Sessao) avisar(m Mudanca) {
+	if s.aoMudar != nil {
+		s.aoMudar(m)
+	}
+}
+
+// Estado diz o que o agente está fazendo agora e desde quando.
+func (s *Sessao) Estado() (estado, motivo string, desde time.Time) {
+	if s.atividade == nil {
+		return "", "", time.Time{}
+	}
+	return s.atividade.atual()
+}
+
+// ultimos devolve o fim do histórico depois do corte, para o detector olhar
+// só o que o programa escreveu desde a sua última escrita.
+func (s *Sessao) ultimos(n int) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	depois := int(min(s.escritos-s.corte, int64(len(s.historico))))
+	inicio := len(s.historico) - min(n, depois)
+	return append([]byte(nil), s.historico[inicio:]...)
 }
 
 // congestionado diz se alguma tela está atrasada demais. Chamar com mu travado.
@@ -83,6 +158,8 @@ func (s *Sessao) congestionado() bool {
 
 // Ler repassa a saída do terminal para as telas até o terminal fechar.
 func (s *Sessao) Ler() {
+	s.lendo.Store(true)
+	defer close(s.lido)
 	buf := make([]byte, 32*1024)
 	for {
 		s.mu.Lock()
@@ -94,25 +171,66 @@ func (s *Sessao) Ler() {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
 			s.bytes.Add(int64(n))
-			s.mu.Lock()
-			for c := range s.clientes {
-				c.pendente = append(c.pendente, buf[:n]...)
-				c.acordar()
+			s.guardar(buf[:n])
+			if s.atividade != nil {
+				s.atividade.saida(buf[:n])
 			}
-			s.historico = append(s.historico, buf[:n]...)
-			// Corta só ao passar do dobro, para não copiar o histórico a cada leitura.
-			if len(s.historico) > 2*tamanhoHistorico {
-				s.historico = append(make([]byte, 0, 2*tamanhoHistorico), s.historico[len(s.historico)-tamanhoHistorico:]...)
-			}
-			s.mu.Unlock()
 		}
 		if err != nil {
 			// O conteúdo do terminal nunca vai para o log.
 			log.Printf("terminal %d encerrado", s.ID)
 			close(s.fim)
+			s.terminou()
 			return
 		}
 	}
+}
+
+// guardar leva a saída às telas e ao histórico.
+func (s *Sessao) guardar(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for c := range s.clientes {
+		c.pendente = append(c.pendente, b...)
+		c.acordar()
+	}
+	s.historico = append(s.historico, b...)
+	s.escritos += int64(len(b))
+	// O eco da digitação e o redesenho logo depois de uma escrita também
+	// ficam antes do corte (a tela das ferramentas redesenha a caixa de texto
+	// inteira a cada tecla).
+	if s.atividade != nil && s.atividade.emEco() {
+		s.corte = s.escritos
+	}
+	// Corta só ao passar do dobro, para não copiar o histórico a cada leitura.
+	if len(s.historico) > 2*tamanhoHistorico {
+		s.historico = append(make([]byte, 0, 2*tamanhoHistorico), s.historico[len(s.historico)-tamanhoHistorico:]...)
+	}
+}
+
+// marcarEntrada registra uma escrita da tela: o eco que volta não é trabalho
+// e o que estava antes não conta mais para o detector.
+func (s *Sessao) marcarEntrada() {
+	if s.atividade == nil {
+		return
+	}
+	s.atividade.entrada()
+	s.mu.Lock()
+	s.corte = s.escritos
+	s.mu.Unlock()
+}
+
+// terminou espera o processo sair e avisa como foi.
+func (s *Sessao) terminou() {
+	if s.atividade == nil {
+		return
+	}
+	saida := s.pty.Esperar()
+	m := s.atividade.parar()
+	m.Tipo = "terminou"
+	m.Saida = saida
+	m.PelaColmeia, _ = s.encerradaPor.Load().(string)
+	s.avisar(m)
 }
 
 // Conectar registra uma tela e devolve o fim do histórico para ela desenhar.
@@ -157,17 +275,43 @@ func (s *Sessao) Desconectar(c *Cliente) {
 	s.liberado.Broadcast()
 }
 
-func (s *Sessao) Escrever(dados []byte) (int, error) { return s.pty.Write(dados) }
+// Escrever manda a digitação ao programa. O eco que volta logo depois não
+// conta como trabalho do agente.
+func (s *Sessao) Escrever(dados []byte) (int, error) {
+	s.marcarEntrada()
+	return s.pty.Write(dados)
+}
 
-// Redimensionar aceita só tamanhos plausíveis.
+// Redimensionar aceita só tamanhos plausíveis. O programa redesenha a tela
+// depois, e isso também não conta como trabalho.
 func (s *Sessao) Redimensionar(colunas, linhas uint16) {
 	if colunas == 0 || linhas == 0 || colunas > MaxColunas || linhas > MaxLinhas {
 		return
 	}
+	s.marcarEntrada()
 	s.pty.Redimensionar(colunas, linhas)
 }
 
-func (s *Sessao) Fechar() error { return s.pty.Close() }
+// Fechar encerra o programa e espera a leitura avisar o fim.
+func (s *Sessao) Fechar() error {
+	err := s.pty.Close()
+	if s.lendo.Load() {
+		select {
+		case <-s.lido:
+		case <-time.After(esperaLeitura):
+		}
+	}
+	return err
+}
+
+// fecharPor marca quem da Colmeia encerrou, para o fim não parecer erro.
+func (s *Sessao) fecharPor(motivo string) error {
+	s.encerradaPor.CompareAndSwap(nil, motivo)
+	if s.atividade != nil {
+		s.atividade.congelar()
+	}
+	return s.Fechar()
+}
 
 // Fim avisa quando o programa do terminal termina.
 func (s *Sessao) Fim() <-chan struct{} { return s.fim }
@@ -187,6 +331,9 @@ func (s *Sessao) Encerrada() bool {
 type Gerente struct {
 	mu      sync.Mutex
 	sessoes map[int64]*Sessao
+	// AoMudar recebe o início, as mudanças de estado e o fim de cada agente.
+	// Não pode bloquear: é chamado de dentro da leitura dos terminais.
+	AoMudar func(id int64, m Mudanca)
 }
 
 func NovoGerente() *Gerente { return &Gerente{sessoes: map[int64]*Sessao{}} }
@@ -197,11 +344,31 @@ func (g *Gerente) Adicionar(s *Sessao) {
 	g.mu.Lock()
 	antiga := g.sessoes[s.ID]
 	g.sessoes[s.ID] = s
+	ao := g.AoMudar
 	g.mu.Unlock()
 	if antiga != nil {
-		antiga.Fechar()
+		antiga.fecharPor(PelaRemocao)
 	}
+	if ao != nil {
+		s.aoMudar = func(m Mudanca) { ao(s.ID, m) }
+	}
+	if s.atividade != nil {
+		s.avisar(Mudanca{Tipo: "iniciou", Estado: "trabalhando", Desde: time.Now()})
+	}
+	// Marcado antes de a goroutine começar: um Fechar logo em seguida espera o fim.
+	s.lendo.Store(true)
 	go s.Ler()
+}
+
+// Sessoes devolve as sessões abertas agora.
+func (g *Gerente) Sessoes() []*Sessao {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	lista := make([]*Sessao, 0, len(g.sessoes))
+	for _, s := range g.sessoes {
+		lista = append(lista, s)
+	}
+	return lista
 }
 
 func (g *Gerente) Pegar(id int64) (*Sessao, bool) {
@@ -224,7 +391,7 @@ func (g *Gerente) Fechar(id int64) {
 	delete(g.sessoes, id)
 	g.mu.Unlock()
 	if s != nil {
-		s.Fechar()
+		s.fecharPor(PelaRemocao)
 	}
 }
 
@@ -242,7 +409,7 @@ func (g *Gerente) FecharTodos() {
 	g.mu.Unlock()
 	var espera sync.WaitGroup
 	for _, s := range sessoes {
-		espera.Go(func() { s.Fechar() })
+		espera.Go(func() { s.fecharPor(PeloDesligar) })
 	}
 	espera.Wait()
 }
