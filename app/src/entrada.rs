@@ -167,8 +167,8 @@ impl Entrada {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let nome = self.nome.trim().to_string();
-                let continuar = tema::botao_principal(ui, "Continuar", !nome.is_empty()).clicked()
-                    || (!nome.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                let continuar =
+                    tema::botao_principal(ui, "Continuar", !nome.is_empty()).clicked() || (!nome.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if continuar {
                     // O núcleo também recusa nome repetido; conferir aqui evita perder os outros passos.
                     if self.perfis.iter().any(|p| p.nome.eq_ignore_ascii_case(&nome)) && self.criado.is_none() {

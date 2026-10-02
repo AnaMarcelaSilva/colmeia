@@ -119,13 +119,7 @@ impl Abelha {
         }
         let tempo = Tempo { total: t_visual as f32, no_estado: (t_visual - self.mudou_em) as f32 };
         mascote::desenhar(&pintor, rect.center() - vec2(0.0, 16.0), 78.0, self.estado, tempo);
-        pintor.text(
-            rect.center_bottom() - vec2(0.0, 26.0),
-            egui::Align2::CENTER_CENTER,
-            self.estado.nome(),
-            egui::FontId::proportional(13.0),
-            cores().texto,
-        );
+        pintor.text(rect.center_bottom() - vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, self.estado.nome(), egui::FontId::proportional(13.0), cores().texto);
         pintor.text(rect.center_bottom() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, linha, egui::FontId::proportional(11.0), cores().suave);
         resposta
     }

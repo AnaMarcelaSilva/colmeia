@@ -297,9 +297,8 @@ impl Colmeia {
     }
 
     fn simular_conclusao(&mut self, agora: f64) {
-        let candidata = [Coluna::Revisao, Coluna::Backlog]
-            .into_iter()
-            .find_map(|c| self.tarefas.iter().find(|t| t.projeto_id == 1 && t.coluna == c).map(|t| t.id));
+        let candidata =
+            [Coluna::Revisao, Coluna::Backlog].into_iter().find_map(|c| self.tarefas.iter().find(|t| t.projeto_id == 1 && t.coluna == c).map(|t| t.id));
         if let Some(id) = candidata {
             self.concluir_demo(id, agora);
         }
@@ -676,9 +675,12 @@ impl Colmeia {
         }
         let p = cores();
         egui::Area::new(egui::Id::new("recado")).order(egui::Order::Foreground).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0]).show(ctx, |ui| {
-            egui::Frame::new().fill(p.superficie_alta).stroke(Stroke::new(1.0, p.erro)).corner_radius(12).inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
-                ui.label(RichText::new(texto).color(p.texto));
-            });
+            egui::Frame::new().fill(p.superficie_alta).stroke(Stroke::new(1.0, p.erro)).corner_radius(12).inner_margin(egui::Margin::symmetric(16, 10)).show(
+                ui,
+                |ui| {
+                    ui.label(RichText::new(texto).color(p.texto));
+                },
+            );
         });
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
@@ -746,11 +748,9 @@ impl eframe::App for Colmeia {
             Estado::Bugado => plural(no_escopo().filter(|t| t.erro.is_some() && !t.erro_visto).count(), "erro", "erros"),
             Estado::Aguardando => plural(no_escopo().filter(|t| t.coluna == Coluna::AguardandoVoce).count(), "tarefa esperando", "tarefas esperando"),
             Estado::Comemorando => "tarefa concluída".to_string(),
-            Estado::Trabalhando => plural(
-                no_escopo().filter(|t| t.coluna == Coluna::Trabalhando && !t.agentes.is_empty()).count(),
-                "tarefa em andamento",
-                "tarefas em andamento",
-            ),
+            Estado::Trabalhando => {
+                plural(no_escopo().filter(|t| t.coluna == Coluna::Trabalhando && !t.agentes.is_empty()).count(), "tarefa em andamento", "tarefas em andamento")
+            }
             Estado::Dormindo => "tudo quieto".to_string(),
         };
 
@@ -772,9 +772,9 @@ impl eframe::App for Colmeia {
             .show(ui, |ui| self.topo(ui, agora));
 
         let mut acoes = Vec::new();
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 16 }))
-            .show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 16 })).show(
+            ui,
+            |ui| {
                 let area = ui.max_rect().expand2(egui::vec2(20.0, 16.0));
                 self.favo.desenhar(ui.painter(), area);
                 match self.tela {
@@ -790,7 +790,8 @@ impl eframe::App for Colmeia {
                     Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco),
                     Tela::Entrada(_) => {}
                 }
-            });
+            },
+        );
         for acao in acoes {
             match acao {
                 quadro::Acao::AbrirTarefa(id) => self.abrir_tarefa(id),
@@ -843,9 +844,7 @@ fn main() -> eframe::Result {
     if let Some(a) = &aviso {
         eprintln!("{a}");
     }
-    let opcoes = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size([1600.0, 900.0]),
-        ..Default::default()
-    };
+    let opcoes =
+        eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size([1600.0, 900.0]), ..Default::default() };
     eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, aviso)))))
 }

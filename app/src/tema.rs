@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Mesh, Pos2, Rect, Response, RichText,
-    Sense, Shape, Stroke, TextStyle, Theme, ThemePreference, Visuals, pos2, vec2,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Mesh, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, TextStyle, Theme,
+    ThemePreference, Visuals, pos2, vec2,
 };
 
 /// Cantos: controles, superfícies (colunas, cartões, janelas) e chips.
@@ -42,6 +42,7 @@ const fn rgb(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
+#[rustfmt::skip]
 pub const ESCURO: Paleta = Paleta {
     fundo: rgb(0x0e1117),
     lateral: rgb(0x11151c),
@@ -64,6 +65,7 @@ pub const ESCURO: Paleta = Paleta {
     ],
 };
 
+#[rustfmt::skip]
 pub const CLARO: Paleta = Paleta {
     fundo: rgb(0xf4f5f8),
     lateral: rgb(0xeceef3),
@@ -87,6 +89,7 @@ pub const CLARO: Paleta = Paleta {
 };
 
 /// Tema leitura: tons quentes de papel, contraste suave para ler por muito tempo.
+#[rustfmt::skip]
 pub const LEITURA: Paleta = Paleta {
     fundo: rgb(0xf3ecdc),
     lateral: rgb(0xebe2cd),
@@ -260,10 +263,12 @@ fn visuais(p: &Paleta, mut v: Visuals) -> Visuals {
 pub fn logo(pintor: &egui::Painter, centro: Pos2, raio: f32) {
     let p = cores();
     let hexagono = |c: Pos2, r: f32| -> Vec<Pos2> {
-        (0..6).map(|i| {
-            let a = std::f32::consts::PI / 180.0 * (60.0 * i as f32 - 90.0);
-            c + vec2(a.cos() * r, a.sin() * r)
-        }).collect()
+        (0..6)
+            .map(|i| {
+                let a = std::f32::consts::PI / 180.0 * (60.0 * i as f32 - 90.0);
+                c + vec2(a.cos() * r, a.sin() * r)
+            })
+            .collect()
     };
     pintor.add(Shape::convex_polygon(hexagono(centro, raio), p.destaque.gamma_multiply(0.18), Stroke::new(1.5, p.destaque)));
     pintor.add(Shape::convex_polygon(hexagono(centro, raio * 0.45), p.destaque, Stroke::NONE));
@@ -419,7 +424,13 @@ pub fn botao_principal(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response 
     } else {
         p.destaque
     };
-    let cor = if !ativo { p.suave } else if claro() { Color32::WHITE } else { p.fundo };
+    let cor = if !ativo {
+        p.suave
+    } else if claro() {
+        Color32::WHITE
+    } else {
+        p.fundo
+    };
     ui.painter().rect_filled(rect, CornerRadius::same(17), fundo);
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, texto, forte(13.5), cor);
     if ativo { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta }

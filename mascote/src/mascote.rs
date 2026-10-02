@@ -16,13 +16,7 @@ pub enum Estado {
 }
 
 impl Estado {
-    pub const TODOS: [Estado; 5] = [
-        Estado::Dormindo,
-        Estado::Trabalhando,
-        Estado::Aguardando,
-        Estado::Bugado,
-        Estado::Comemorando,
-    ];
+    pub const TODOS: [Estado; 5] = [Estado::Dormindo, Estado::Trabalhando, Estado::Aguardando, Estado::Bugado, Estado::Comemorando];
 
     pub fn nome(self) -> &'static str {
         match self {

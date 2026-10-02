@@ -1,8 +1,8 @@
 //! Um terminal de agente: a conexão com o núcleo roda numa thread própria,
 //! o alacritty_terminal interpreta a saída e o egui desenha a grade.
 
-use std::io::ErrorKind;
 use std::cell::Cell;
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -47,11 +47,7 @@ pub const SO_CARTAO: u32 = 1000;
 impl TerminalAgente {
     pub fn conectar(id: usize, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32) -> Self {
         let tamanho = (80, 24);
-        let term = Arc::new(Mutex::new(Term::new(
-            Config { scrolling_history: 1000, ..Config::default() },
-            &TermSize::new(tamanho.0, tamanho.1),
-            Ouvinte,
-        )));
+        let term = Arc::new(Mutex::new(Term::new(Config { scrolling_history: 1000, ..Config::default() }, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
         let (envio, recebimento) = mpsc::channel();
         let term_rede = term.clone();
         thread::spawn(move || conexao(id, intervalo, term_rede, recebimento, ctx, bytes));
@@ -214,11 +210,7 @@ impl TerminalAgente {
 /// Texto colado ou enviado com várias linhas vai como "colagem" (bracketed paste):
 /// o shell e o Claude Code recebem o bloco inteiro, sem executar linha a linha.
 fn colagem(texto: &str) -> Vec<u8> {
-    if texto.contains('\n') {
-        [b"\x1b[200~".as_slice(), texto.as_bytes(), b"\x1b[201~"].concat()
-    } else {
-        texto.as_bytes().to_vec()
-    }
+    if texto.contains('\n') { [b"\x1b[200~".as_slice(), texto.as_bytes(), b"\x1b[201~"].concat() } else { texto.as_bytes().to_vec() }
 }
 
 fn fechar_trecho(trabalho: &mut LayoutJob, trecho: &mut String, cor: Color32, fonte: &FontId) {
@@ -256,14 +248,7 @@ fn cor_indexada(i: u8) -> Color32 {
     }
 }
 
-fn conexao(
-    id: usize,
-    intervalo: u32,
-    term: Arc<Mutex<Term<Ouvinte>>>,
-    recebimento: Receiver<ParaNucleo>,
-    ctx: egui::Context,
-    bytes: Arc<AtomicU64>,
-) {
+fn conexao(id: usize, intervalo: u32, term: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, ctx: egui::Context, bytes: Arc<AtomicU64>) {
     let mut socket = match canal::websocket(&format!("/v1/terminais/{id}?intervalo={intervalo}")) {
         Ok(s) => s,
         Err(e) => {

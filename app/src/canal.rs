@@ -49,9 +49,9 @@ mod unix {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use tungstenite::WebSocket;
     use tungstenite::client::IntoClientRequest;
     use tungstenite::http::HeaderValue;
-    use tungstenite::WebSocket;
 
     use super::{NOME_SOCKET, diretorio, ler_token};
 

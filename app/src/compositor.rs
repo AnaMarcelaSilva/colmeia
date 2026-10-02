@@ -117,7 +117,13 @@ impl Compositor {
             Some(aviso) => (aviso.as_str(), p.erro),
             None => ("Ctrl+Enter envia · Enter quebra a linha · Ctrl+V cola imagens · clique no terminal para digitar direto nele", p.suave),
         };
-        ui.painter().text(egui::pos2(caixa.left() + 14.0, caixa.bottom() + 12.0), egui::Align2::LEFT_CENTER, texto_dica, egui::FontId::proportional(11.5), cor_dica);
+        ui.painter().text(
+            egui::pos2(caixa.left() + 14.0, caixa.bottom() + 12.0),
+            egui::Align2::LEFT_CENTER,
+            texto_dica,
+            egui::FontId::proportional(11.5),
+            cor_dica,
+        );
 
         if !(enviar && tem_conteudo) {
             return None;

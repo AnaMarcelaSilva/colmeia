@@ -35,8 +35,20 @@ impl eframe::App for Vitrine {
             pintor.rect_filled(cartao, 12.0, PAINEL);
             let tamanho = (cartao.height() * 0.6).min(cartao.width() * 0.5);
             mascote::desenhar(&pintor, cartao.center() - egui::vec2(0.0, 26.0), tamanho, self.estado, tempo);
-            pintor.text(cartao.center_bottom() - egui::vec2(0.0, 52.0), egui::Align2::CENTER_CENTER, self.estado.nome(), egui::FontId::proportional(18.0), TEXTO);
-            pintor.text(cartao.center_bottom() - egui::vec2(0.0, 28.0), egui::Align2::CENTER_CENTER, self.estado.quando(), egui::FontId::proportional(13.5), SUAVE);
+            pintor.text(
+                cartao.center_bottom() - egui::vec2(0.0, 52.0),
+                egui::Align2::CENTER_CENTER,
+                self.estado.nome(),
+                egui::FontId::proportional(18.0),
+                TEXTO,
+            );
+            pintor.text(
+                cartao.center_bottom() - egui::vec2(0.0, 28.0),
+                egui::Align2::CENTER_CENTER,
+                self.estado.quando(),
+                egui::FontId::proportional(13.5),
+                SUAVE,
+            );
 
             ui.allocate_space(egui::vec2(area.width(), cartao.height() + 12.0));
             ui.horizontal(|ui| {

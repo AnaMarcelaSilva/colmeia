@@ -4,10 +4,10 @@
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{self, Color32, DragAndDrop, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 
-use crate::dados::{Coluna, Tarefa};
-use crate::terminal::TerminalAgente;
 use crate::PAPEIS;
+use crate::dados::{Coluna, Tarefa};
 use crate::tema::{RAIO_SUPERFICIE, cores, forte};
+use crate::terminal::TerminalAgente;
 
 const RAIO_CARTAO: u8 = 10;
 
@@ -33,13 +33,7 @@ fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
 }
 
 /// `projeto` = None mostra o perfil inteiro, com o nome do projeto em cada cartão.
-pub fn mostrar(
-    ui: &mut egui::Ui,
-    tarefas: &mut Vec<Tarefa>,
-    projeto: Option<i64>,
-    filtro: Option<&str>,
-    terminais: &[TerminalAgente],
-) -> Vec<Acao> {
+pub fn mostrar(ui: &mut egui::Ui, tarefas: &mut Vec<Tarefa>, projeto: Option<i64>, filtro: Option<&str>, terminais: &[TerminalAgente]) -> Vec<Acao> {
     let mut acoes = Vec::new();
     let com_projeto = projeto.is_none();
     let mut mover: Option<(i64, Coluna)> = None;
@@ -87,25 +81,22 @@ pub fn mostrar(
         let mut filho = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(caixa.left() + 8.0, caixa.top() + 44.0), caixa.max - vec2(8.0, 8.0))));
         let alturas: Vec<f32> = visiveis.iter().map(|&i| altura_cartao(&tarefas[i], com_projeto)).collect();
         let total: f32 = alturas.iter().map(|h| h + ESPACO).sum();
-        egui::ScrollArea::vertical()
-            .id_salt(("rolagem", i))
-            .auto_shrink(false)
-            .show_viewport(&mut filho, |ui, janela| {
-                ui.set_height(total);
-                let origem = ui.max_rect().min;
-                let largura = ui.available_width();
-                let mut y = 0.0;
-                for (&indice, &h) in visiveis.iter().zip(&alturas) {
-                    // Virtualização: pula o que está fora da parte visível.
-                    if y + h >= janela.min.y && y <= janela.max.y {
-                        let rect = Rect::from_min_size(origem + vec2(0.0, y), vec2(largura, h));
-                        if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, com_projeto) {
-                            acoes.push(a);
-                        }
+        egui::ScrollArea::vertical().id_salt(("rolagem", i)).auto_shrink(false).show_viewport(&mut filho, |ui, janela| {
+            ui.set_height(total);
+            let origem = ui.max_rect().min;
+            let largura = ui.available_width();
+            let mut y = 0.0;
+            for (&indice, &h) in visiveis.iter().zip(&alturas) {
+                // Virtualização: pula o que está fora da parte visível.
+                if y + h >= janela.min.y && y <= janela.max.y {
+                    let rect = Rect::from_min_size(origem + vec2(0.0, y), vec2(largura, h));
+                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, com_projeto) {
+                        acoes.push(a);
                     }
-                    y += h + ESPACO;
                 }
-            });
+                y += h + ESPACO;
+            }
+        });
     }
 
     // O cartão solto vai para o fim da coluna de destino.

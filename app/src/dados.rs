@@ -13,13 +13,7 @@ pub enum Coluna {
 }
 
 impl Coluna {
-    pub const TODAS: [Coluna; 5] = [
-        Coluna::Backlog,
-        Coluna::Trabalhando,
-        Coluna::AguardandoVoce,
-        Coluna::Revisao,
-        Coluna::Concluido,
-    ];
+    pub const TODAS: [Coluna; 5] = [Coluna::Backlog, Coluna::Trabalhando, Coluna::AguardandoVoce, Coluna::Revisao, Coluna::Concluido];
 
     pub fn nome(self) -> &'static str {
         match self {
@@ -105,13 +99,7 @@ pub fn projetos_demo() -> Vec<Projeto> {
     ["loja-web", "api-pedidos", "estudos-rust"]
         .into_iter()
         .enumerate()
-        .map(|(i, nome)| Projeto {
-            id: i as i64 + 1,
-            nome: nome.into(),
-            workspace: "Empresa X".into(),
-            caminho: String::new(),
-            branch_padrao: "main".into(),
-        })
+        .map(|(i, nome)| Projeto { id: i as i64 + 1, nome: nome.into(), workspace: "Empresa X".into(), caminho: String::new(), branch_padrao: "main".into() })
         .collect()
 }
 

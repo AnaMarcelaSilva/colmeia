@@ -106,13 +106,11 @@ impl Dialogo {
                 match self {
                     Dialogo::NovoProjeto(d) => novo_projeto(ui, d, perfil),
                     Dialogo::NovaTarefa(d) => nova_tarefa(ui, d),
-                    Dialogo::RemoverTarefa { id, titulo, erro } => confirmar(
-                        ui,
-                        "Remover tarefa",
-                        &format!("\"{titulo}\" sai do quadro. Isso não mexe em nenhuma branch nem arquivo."),
-                        erro,
-                        || api::remover_tarefa(*id),
-                    ),
+                    Dialogo::RemoverTarefa { id, titulo, erro } => {
+                        confirmar(ui, "Remover tarefa", &format!("\"{titulo}\" sai do quadro. Isso não mexe em nenhuma branch nem arquivo."), erro, || {
+                            api::remover_tarefa(*id)
+                        })
+                    }
                     Dialogo::RemoverProjeto { id, nome, erro } => confirmar(
                         ui,
                         "Remover projeto da Colmeia",
