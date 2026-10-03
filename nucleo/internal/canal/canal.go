@@ -8,15 +8,19 @@
 package canal
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -84,18 +88,115 @@ func gravarToken(dir, token string) error {
 	return os.Rename(temporario.Name(), filepath.Join(dir, NomeToken))
 }
 
-// ExigirToken só deixa passar pedidos com "Authorization: Bearer <token>".
-// A comparação é em tempo constante.
-func ExigirToken(token string, proximo http.Handler) http.Handler {
+// Quem diz de onde veio um pedido: da tela (Agente 0) ou de um agente que a
+// Colmeia abriu, pelo token próprio dele.
+type Quem struct{ Agente int64 }
+
+type chaveQuem struct{}
+
+// QuemPediu devolve quem fez o pedido. Fora de Autenticar não há ninguém.
+func QuemPediu(ctx context.Context) (Quem, bool) {
+	q, ok := ctx.Value(chaveQuem{}).(Quem)
+	return q, ok
+}
+
+// ComQuem põe quem pediu no contexto (Autenticar e os testes).
+func ComQuem(ctx context.Context, q Quem) context.Context {
+	return context.WithValue(ctx, chaveQuem{}, q)
+}
+
+// Fichas guarda, só em memória, os tokens dos agentes: o sha256 do token
+// aponta para o id do agente. O token em si não fica guardado em lugar
+// nenhum do núcleo e nunca sai numa resposta.
+type Fichas struct {
+	mu        sync.Mutex
+	porHash   map[[32]byte]int64
+	porAgente map[int64][32]byte
+}
+
+func NovasFichas() *Fichas {
+	return &Fichas{porHash: map[[32]byte]int64{}, porAgente: map[int64][32]byte{}}
+}
+
+// Emitir gera um token novo para o agente; o anterior, se houver, deixa de valer.
+func (f *Fichas) Emitir(agente int64) (string, error) {
+	token, err := NovoToken()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256([]byte(token))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if antigo, ok := f.porAgente[agente]; ok {
+		delete(f.porHash, antigo)
+	}
+	f.porHash[h] = agente
+	f.porAgente[agente] = h
+	return token, nil
+}
+
+// Revogar tira o token do agente (ele terminou ou foi removido).
+func (f *Fichas) Revogar(agente int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if h, ok := f.porAgente[agente]; ok {
+		delete(f.porHash, h)
+		delete(f.porAgente, agente)
+	}
+}
+
+// Agente diz de qual agente é o token. A busca é pelo hash: o tempo não
+// depende de quanto do token confere.
+func (f *Fichas) Agente(token string) (int64, bool) {
+	if f == nil || token == "" {
+		return 0, false
+	}
+	h := sha256.Sum256([]byte(token))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.porHash[h]
+	return id, ok
+}
+
+// PrefixoAgente é onde ficam as rotas dos agentes. O token da tela não entra
+// nelas, e o token de um agente só entra nelas.
+const PrefixoAgente = "/v1/agente/"
+
+// RotaDeAgente diz se o caminho é de uma rota dos agentes. Um caminho que o
+// roteador ainda limparia (com "..", "//") não conta como de agente.
+func RotaDeAgente(caminho string) bool {
+	return strings.HasPrefix(caminho, PrefixoAgente) && path.Clean(caminho) == caminho
+}
+
+// Autenticar só deixa passar pedidos com "Authorization: Bearer <token>": o
+// token principal (o da tela) vale para tudo menos as rotas dos agentes; o
+// token de um agente vale só para elas. Quem pediu vai no contexto. A
+// comparação do token principal é em tempo constante.
+func Autenticar(token string, agentes *Fichas, proximo http.Handler) http.Handler {
 	esperado := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		recebido := []byte(strings.TrimSpace(r.Header.Get("Authorization")))
-		if subtle.ConstantTimeCompare(recebido, esperado) != 1 {
-			http.Error(w, "não autorizado", http.StatusUnauthorized)
+		recebido := strings.TrimSpace(r.Header.Get("Authorization"))
+		deAgente := strings.HasPrefix(path.Clean(r.URL.Path)+"/", PrefixoAgente)
+		if subtle.ConstantTimeCompare([]byte(recebido), esperado) == 1 {
+			if deAgente {
+				http.Error(w, "não autorizado", http.StatusUnauthorized)
+				return
+			}
+			proximo.ServeHTTP(w, r.WithContext(ComQuem(r.Context(), Quem{})))
 			return
 		}
-		proximo.ServeHTTP(w, r)
+		valor, ok := strings.CutPrefix(recebido, "Bearer ")
+		if id, achou := agentes.Agente(valor); ok && achou && RotaDeAgente(r.URL.Path) {
+			proximo.ServeHTTP(w, r.WithContext(ComQuem(r.Context(), Quem{Agente: id})))
+			return
+		}
+		http.Error(w, "não autorizado", http.StatusUnauthorized)
 	})
+}
+
+// ExigirToken é Autenticar sem tokens de agentes.
+func ExigirToken(token string, proximo http.Handler) http.Handler {
+	return Autenticar(token, nil, proximo)
 }
 
 var ErrEmUso = errors.New("já existe um núcleo rodando neste canal")

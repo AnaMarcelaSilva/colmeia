@@ -113,8 +113,10 @@ impl Registro {
                     });
                     ui.add_space(8.0);
                 }
-                if let Some(tarefa) = comum::grade(ui, &slides, false, &mut self.miniaturas, &mut self.rolar_ate) {
-                    acoes.push(Acao::Apresentar { deck: Box::new(deck.clone()), periodo: self.periodo_atual(), tarefa: Some(tarefa) });
+                let clique = comum::grade(ui, &slides, false, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
+                if let Some(c) = clique {
+                    let periodo = self.periodo_atual();
+                    acoes.push(super::acao_do_clique(c, &deck, periodo));
                 }
                 ui.add_space(32.0 - 12.0);
             }

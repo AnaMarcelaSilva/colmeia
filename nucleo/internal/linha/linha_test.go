@@ -252,3 +252,41 @@ func TestTerminalParadoNaoEhTrabalho(t *testing.T) {
 		t.Errorf("sessão parada: %+v", item)
 	}
 }
+
+func TestPedidosENavegadorNaLinha(t *testing.T) {
+	h := &historico{t: t}
+	t1 := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1}
+	a1 := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1, Agente: 7}
+	h.add("2026-10-02 09:05", "tarefa.criada", t1, map[string]any{"id": 1, "titulo": "Nova tela de pedidos", "projeto_id": 1, "projeto_nome": "loja-web"})
+	h.add("2026-10-02 21:40", "pedido.criado", a1, map[string]any{"pedido": 3, "tamanho": 23})
+	h.add("2026-10-02 21:41", "pedido.entregue", a1, map[string]any{"pedido": 3, "tamanho": 23})
+	h.add("2026-10-02 21:42", "navegador.aberto", a1, map[string]any{"descricao": "localhost:5173/pedidos"})
+	h.add("2026-10-02 21:43", "nota.atualizada", a1, map[string]any{"tipo": "daily", "periodo": "2026-10-02", "tamanho": 40, "agente": 7, "modo": "complementar"})
+	h.add("2026-10-02 21:44", "pedido.respondido", a1, map[string]any{"pedido": 3, "tamanho": 23})
+	h.add("2026-10-02 21:49", "navegador.recusado", a1, map[string]any{})
+	h.add("2026-10-02 21:50", "navegador.fechado", t1, map[string]any{})
+	h.add("2026-10-02 22:00", "pedido.falhou", a1, map[string]any{"pedido": 4, "tamanho": 5, "motivo": "o agente foi parado pela Colmeia"})
+	c := Contexto{Agora: em("2026-10-02 23:00"), Fuso: fuso, Projetos: map[int64]string{1: "loja-web"}, Tarefas: map[int64]TarefaAtual{1: {ID: 1, Titulo: "Nova tela de pedidos", Coluna: "trabalhando", ProjetoID: 1}},
+		Pedidos: map[int64]string{3: "Traga o total de testes", 4: "Outro\npedido"}}
+	var textos []string
+	for _, d := range Montar(h.eventos, c) {
+		for _, i := range d.Itens {
+			textos = append(textos, i.Tipo+": "+i.Texto)
+		}
+	}
+	tudo := strings.Join(textos, "\n")
+	for _, esperado := range []string{
+		"pedido: Pediu ao agente: «Traga o total de testes» em “Nova tela de pedidos”.",
+		"pedido_entregue: O agente de “Nova tela de pedidos” recebeu o pedido «Traga o total de testes».",
+		"navegador: O agente abriu o navegador em localhost:5173/pedidos (“Nova tela de pedidos”).",
+		"navegador: A captura do navegador de “Nova tela de pedidos” foi recusada: a página saiu da pasta da tarefa.",
+		"nota_agente: O agente complementou a nota da daily de “Nova tela de pedidos”.",
+		"pedido_respondido: O agente respondeu o pedido «Traga o total de testes» em “Nova tela de pedidos”.",
+		"navegador_fechado: O navegador de “Nova tela de pedidos” fechou.",
+		"pedido_falhou: O pedido «Outro pedido» em “Nova tela de pedidos” ficou sem resposta: o agente foi parado pela Colmeia.",
+	} {
+		if !strings.Contains(tudo, esperado) {
+			t.Errorf("faltou %q em:\n%s", esperado, tudo)
+		}
+	}
+}

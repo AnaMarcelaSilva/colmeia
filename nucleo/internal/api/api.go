@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -15,8 +16,10 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/avisos"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/demo"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/navegador"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
@@ -47,6 +50,15 @@ type Servidor struct {
 	AvisoHistorico string
 	// AoEncerrar desliga o núcleo (POST /v1/encerrar).
 	AoEncerrar func()
+	// Fichas são os tokens dos agentes (só em memória). DirCanal é a pasta
+	// do canal (socket e token), onde ficam também o token e a configuração
+	// MCP de cada agente; vazia, os agentes não ganham o MCP. Executavel é o
+	// próprio colmeia-nucleo, que o Claude Code roda como servidor MCP.
+	Fichas     *canal.Fichas
+	DirCanal   string
+	Executavel string
+	// Navegadores: um Chrome controlado por perfil, aberto sob pedido.
+	Navegadores *navegador.Gerente
 
 	mu sync.Mutex // um agente abre por vez
 
@@ -56,6 +68,13 @@ type Servidor struct {
 	trabalhou   chan struct{}
 	muContextos sync.Mutex
 	contextos   map[int64]dados.ContextoAgente
+
+	// Entrega dos pedidos aos agentes (veja pedidos.go).
+	muEntrega sync.Mutex
+	adiadas   map[int64]*time.Timer
+	// respondendo: pedidos entregues que o agente já começou a responder pela
+	// nota. Se ele terminar a vez sem concluir_pedido, o pedido fecha sozinho.
+	respondendo map[int64]bool
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -72,8 +91,17 @@ func (s *Servidor) Rotas() http.Handler {
 	if s.Tempos == (terminal.Tempos{}) {
 		s.Tempos = terminal.TemposPadrao
 	}
+	if s.Fichas == nil {
+		s.Fichas = canal.NovasFichas()
+	}
+	s.adiadas = map[int64]*time.Timer{}
+	s.respondendo = map[int64]bool{}
 	mux.HandleFunc("POST /v1/encerrar", s.encerrar)
 	if s.Banco != nil {
+		if s.Navegadores == nil {
+			s.Navegadores = navegador.NovoGerente(filepath.Join(s.DirDados, "navegador"))
+		}
+		s.Navegadores.AoMudar = s.aoMudarNavegador
 		s.Banco.AoGravar(s.publicarEventos)
 		s.iniciarTrabalhador()
 		s.rotasDados(mux)

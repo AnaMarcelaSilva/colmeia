@@ -6,6 +6,12 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Novo
 
+- **Pedir ao agente** pela Daily, pela Sprint e pela apresentação (botão no cartão, menu do botão direito, P no slide): o pedido vai para o Claude Code da tarefa (o ativo, um parado que volta com a conversa ou um novo retomando a última conversa da pasta) e a resposta volta para a nota e para os anexos, sem sair dali. A caixa diz antes para quem vai; a pílula do cartão e a faixa do slide mostram o estado (na fila, aprovar no terminal, com o agente, parou sem responder, respondido, não deu certo). O pedido entra no terminal numa linha só e fica "Respondido" quando o agente chama `concluir_pedido` ou termina a vez; o aviso "O agente respondeu · Ver" fica até ser visto ou fechado.
+- **Ferramentas da Colmeia para o agente (MCP):** o próprio núcleo vira servidor MCP do Claude Code que a Colmeia abre, com um token só dele, restrito à tarefa: ler a tarefa e a nota, complementar ou reescrever a nota, anexar uma imagem da pasta, abrir e capturar o navegador e concluir o pedido.
+- **Navegador da tarefa:** "Navegador" no painel abre um Chrome ou Chromium controlado pela Colmeia ao lado da janela (perfil próprio, controle só pelo pipe, sem porta), com "Capturar navegador" (Ctrl+Shift+B) anexando a captura à tarefa. Só abre `http`, `https` e `file://` de dentro da pasta, sem `.env` nem chaves (também em redirecionamento, iframe ou imagem); um endereço que não abre mostra o erro no campo. Na Daily, na Sprint e na apresentação, a janela aberta pelo agente fica fora da tela.
+- **Arquivos da tarefa** (Ctrl+Shift+E): gaveta por cima do terminal (o tamanho dele não muda) com a árvore da pasta, um nível por vez, e pré-visualização de texto e imagem; abrir no editor, no sistema (só documentos e imagens) e citar na mensagem. `.env`, chaves e certificados pedem confirmação antes de aparecer.
+- **Nota editada enquanto o agente complementa:** a tela junta sozinha o que o agente acrescentou; se ele reescreveu, uma janela mostra as duas versões.
+- API: `/v1/tarefas/{id}/pedidos` (e `/destino`), `/v1/pedidos/{id}`, `/v1/navegador`, `/v1/tarefas/{id}/navegador` (e `/captura`), `/v1/perfis/{id}/apresentando`, `/v1/tarefas/{id}/arquivos` e `/arquivo`, as rotas `/v1/agente/*` (só com o token de um agente) e `versao` em `PUT /v1/tarefas/{id}/notas`; eventos `pedido.*` e `navegador.*`. Subcomando `colmeia-nucleo mcp`.
 - **Histórico de mensagens:** na caixa de mensagem, ↑ traz o que você já mandou ao agente em foco e ↓ volta (o rascunho não se perde; Esc volta a ele). Fica no núcleo, até 200 por agente; o que parece senha ou chave não é guardado, e "Limpar histórico de mensagens" no menu do agente apaga tudo.
 - **Linha do tempo nova:** cabeçalho do dia preso no topo com os números do dia, um cartão por tarefa com o estado atual, repetições juntadas ("Anotou na daily (2 vezes)"), miniaturas no cartão (o visor mostra a legenda e a hora da imagem clicada) e filtros (Só conclusões, Só erros, Com capturas).
 - **Páginas Daily e Sprint** no lugar do painel lateral: números do período, cartões por tarefa na ordem dos slides, texto para copiar recolhido, tempo por ferramenta e galeria na sprint.
@@ -24,12 +30,15 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 - O cabeçalho da tarefa corta o título, nunca a etiqueta de estado nem os botões.
 - Todo texto cortado termina em "…", sem espaço nem vírgula antes.
 - A cor de alerta do tema Leitura ficou mais amarela, para se separar do destaque e do erro.
+- O slide usa o espaço livre para a nota (até 14 linhas) e, depois de um pedido respondido, o cartão e o slide mostram o fim da nota, onde está a resposta.
 
 ### Corrigido
 
 - O menu "Branch" em "Todos os projetos" não mostra mais um item vazio vindo de uma pasta sem git.
 - Uma nota mudada por fora (outra tela, a API) durante a apresentação acende "Novidades"; as notas e os anexos da própria apresentação, não.
 - A barra de rolagem não cobre mais o texto nem a borda dos cartões.
+- Reticências duplicadas ("texto.……") no corte de uma linha que termina em ponto.
+- O cursor de texto não pisca mais: a tela parada com a caixa de mensagem em foco não redesenha.
 
 ## [0.2.0] · 02/10/2026
 

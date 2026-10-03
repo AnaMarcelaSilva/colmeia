@@ -206,7 +206,7 @@ func TestBancoAntigoGanhaAsColunasNovas(t *testing.T) {
 	ws, _ := b.CriarWorkspace(ctx, perfil.ID, "W")
 	// Volta o banco para como era na primeira versão, com um projeto gravado.
 	for _, c := range []string{
-		`DROP TABLE agentes`, `DROP TABLE tarefas`, `ALTER TABLE projetos DROP COLUMN tipo`,
+		`DROP TABLE pedidos`, `DROP TABLE agentes`, `DROP TABLE tarefas`, `ALTER TABLE projetos DROP COLUMN tipo`,
 		`INSERT INTO projetos (workspace_id, nome, caminho, branch_padrao) VALUES (1, 'velho', '/tmp/velho', 'main')`,
 	} {
 		if _, err := b.db.Exec(c); err != nil {

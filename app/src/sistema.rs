@@ -6,6 +6,19 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// Um comando sem as variáveis da Colmeia (COLMEIA_DIR, COLMEIA_DADOS,
+/// COLMEIA_NUCLEO…): o programa aberto não precisa saber onde ficam o
+/// núcleo e os dados.
+fn comando_limpo(programa: &str) -> Command {
+    let mut comando = Command::new(programa);
+    for (nome, _) in std::env::vars_os() {
+        if nome.to_str().is_some_and(|n| n.starts_with("COLMEIA_")) {
+            comando.env_remove(&nome);
+        }
+    }
+    comando
+}
+
 /// Editores procurados no PATH, na ordem: nome para mostrar e comando.
 const EDITORES: [(&str, &str); 2] = [("IntelliJ", "idea"), ("VS Code", "code")];
 
@@ -34,7 +47,7 @@ pub fn abrir_com(programa: &str, pasta: &str) -> Result<(), String> {
     if !Path::new(pasta).is_dir() {
         return Err(format!("a pasta {pasta} não existe"));
     }
-    let mut comando = Command::new(programa);
+    let mut comando = comando_limpo(programa);
     comando.arg(pasta).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // Em grupo próprio: fechar a Colmeia não fecha o editor.
     #[cfg(unix)]
@@ -43,6 +56,43 @@ pub fn abrir_com(programa: &str, pasta: &str) -> Result<(), String> {
     // Recolhe o processo quando ele terminar, para não sobrar processo zumbi.
     std::thread::spawn(move || filho.wait());
     Ok(())
+}
+
+/// Abre um arquivo da pasta da tarefa no editor, sem esperar.
+pub fn abrir_arquivo_com(programa: &str, arquivo: &str) -> Result<(), String> {
+    if !Path::new(arquivo).is_file() {
+        return Err("o arquivo não está mais lá".into());
+    }
+    let mut comando = comando_limpo(programa);
+    comando.arg(arquivo).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut comando, 0);
+    let mut filho = comando.spawn().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || filho.wait());
+    Ok(())
+}
+
+/// Extensões que o "Abrir no sistema" aceita: documentos, imagens e mídia.
+/// Fora da lista (scripts, .desktop, executáveis, arquivos sem extensão)
+/// só abre no editor: o abridor do sistema poderia executar.
+const EXTENSOES_DO_SISTEMA: [&str; 24] = [
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "txt", "md", "csv", "json", "xml", "log", "odt", "ods", "odp", "docx", "xlsx", "pptx", "mp4",
+    "webm", "mkv", "mov",
+];
+
+/// Diz se o arquivo pode ir para o abridor do sistema (pela extensão, de uma lista fixa).
+pub fn abre_no_sistema(nome: &str) -> bool {
+    let Some((base, extensao)) = nome.rsplit_once('.') else { return false };
+    !base.is_empty() && EXTENSOES_DO_SISTEMA.contains(&extensao.to_ascii_lowercase().as_str())
+}
+
+/// Abre um arquivo da pasta da tarefa com o aplicativo padrão (só os da lista).
+pub fn abrir_no_sistema(arquivo: &str) -> Result<(), String> {
+    let nome = Path::new(arquivo).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if !abre_no_sistema(nome) {
+        return Err("este tipo de arquivo só abre no editor".into());
+    }
+    abrir_arquivo_com(abridor(), arquivo)
 }
 
 pub fn abrir_pasta(pasta: &str) -> Result<(), String> {
@@ -68,7 +118,7 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
     if !Path::new(arquivo).is_file() {
         return Err("o arquivo não está mais lá".into());
     }
-    let mut comando = Command::new(abridor());
+    let mut comando = comando_limpo(abridor());
     comando.arg(arquivo).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut comando, 0);
@@ -87,3 +137,18 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
 }
 
 pub const SEM_REPRODUTOR: &str = "Não achei um reprodutor de vídeo. Instale um, por exemplo mpv ou VLC.";
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn so_documentos_e_imagens_vao_para_o_abridor_do_sistema() {
+        for nome in ["relatorio.PDF", "tela.png", "README.md", "dados.csv"] {
+            assert!(abre_no_sistema(nome), "{nome}");
+        }
+        for nome in ["instalar.sh", "atalho.desktop", "programa", "Makefile", ".env", "app.exe", "script.py", "pagina.html", ".png"] {
+            assert!(!abre_no_sistema(nome), "{nome}");
+        }
+    }
+}

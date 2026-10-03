@@ -179,6 +179,17 @@ impl Compositor {
     }
 
     /// O teclado está na caixa de mensagem.
+    /// Põe uma citação (como "@src/main.rs") no fim da mensagem em escrita e
+    /// leva o teclado para a caixa.
+    pub fn citar(&mut self, texto: &str) {
+        if !self.rascunho.is_empty() && !self.rascunho.ends_with([' ', '\n']) {
+            self.rascunho.push(' ');
+        }
+        self.rascunho.push_str(texto);
+        self.rascunho.push(' ');
+        self.focar = true;
+    }
+
     pub fn com_foco(ctx: &egui::Context) -> bool {
         ctx.memory(|m| m.has_focus(egui::Id::new(ID)))
     }

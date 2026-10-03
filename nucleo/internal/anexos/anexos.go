@@ -111,7 +111,7 @@ func GravarImagem(dir string, r io.Reader, tipo string) (Imagem, error) {
 		return Imagem{}, errFormato
 	}
 	if tipo == "image/jpeg" {
-		imagem = reduzir(imagem, MaxLadoFoto)
+		imagem = Reduzir(imagem, MaxLadoFoto)
 	}
 	config.Width, config.Height = imagem.Bounds().Dx(), imagem.Bounds().Dy()
 	var limpo bytes.Buffer
@@ -161,9 +161,9 @@ func pastaPrivada(dir string) error {
 	return nil
 }
 
-// reduzir divide a imagem por um fator inteiro (média de cada bloco) até o
+// Reduzir divide a imagem por um fator inteiro (média de cada bloco) até o
 // maior lado caber em maximo. Sem dependência nova: só a biblioteca padrão.
-func reduzir(img image.Image, maximo int) image.Image {
+func Reduzir(img image.Image, maximo int) image.Image {
 	b := img.Bounds()
 	lado := max(b.Dx(), b.Dy())
 	if lado <= maximo {

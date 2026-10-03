@@ -3,8 +3,10 @@
 package terminal
 
 import (
+	"bytes"
 	"io"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,6 +106,11 @@ type Sessao struct {
 	corte    int64
 	clientes map[*Cliente]struct{}
 	bytes    *atomic.Int64
+	// colagem: o programa ligou o modo de colagem (ESC[?2004h) e ainda não
+	// desligou; cauda é o fim da última leitura, para achar a sequência
+	// partida entre duas leituras.
+	colagem atomic.Bool
+	cauda   []byte
 
 	// Acompanhamento do agente (nil nos terminais de teste).
 	atividade    *atividade
@@ -197,6 +204,7 @@ func (s *Sessao) guardar(b []byte) {
 	}
 	s.historico = append(s.historico, b...)
 	s.escritos += int64(len(b))
+	s.olharColagem(b)
 	// O eco da digitação e o redesenho logo depois de uma escrita também
 	// ficam antes do corte (a tela das ferramentas redesenha a caixa de texto
 	// inteira a cada tecla).
@@ -208,6 +216,34 @@ func (s *Sessao) guardar(b []byte) {
 		s.historico = append(make([]byte, 0, 2*tamanhoHistorico), s.historico[len(s.historico)-tamanhoHistorico:]...)
 	}
 }
+
+var (
+	colagemLigada    = []byte("\x1b[?2004h")
+	colagemDesligada = []byte("\x1b[?2004l")
+)
+
+// olharColagem acompanha o modo de colagem pela saída do programa (a última
+// sequência vale). Chamada com s.mu travado.
+func (s *Sessao) olharColagem(b []byte) {
+	olhar := func(trecho []byte) {
+		liga, desliga := bytes.LastIndex(trecho, colagemLigada), bytes.LastIndex(trecho, colagemDesligada)
+		if liga > desliga {
+			s.colagem.Store(true)
+		} else if desliga > liga {
+			s.colagem.Store(false)
+		}
+	}
+	borda := len(colagemLigada) - 1
+	if len(s.cauda) > 0 {
+		olhar(append(append([]byte(nil), s.cauda...), b[:min(len(b), borda)]...))
+	}
+	olhar(b)
+	junto := append(s.cauda, b[max(0, len(b)-borda):]...)
+	s.cauda = append(s.cauda[:0], junto[max(0, len(junto)-borda):]...)
+}
+
+// ColagemLigada diz se o programa do terminal pediu o modo de colagem.
+func (s *Sessao) ColagemLigada() bool { return s.colagem.Load() }
 
 // marcarEntrada registra uma escrita da tela: o eco que volta não é trabalho
 // e o que estava antes não conta mais para o detector.
@@ -464,4 +500,35 @@ func (g *Gerente) FecharTodos() {
 		espera.Go(func() { s.fecharPor(PeloDesligar) })
 	}
 	espera.Wait()
+}
+
+// UltimaEntrada diz quando a tela escreveu (ou mudou o tamanho) pela última
+// vez; zero se nunca.
+func (s *Sessao) UltimaEntrada() time.Time {
+	if s.atividade == nil {
+		return time.Time{}
+	}
+	if n := s.atividade.ultimaEntrada.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
+// Colagem é o texto como a tela manda uma mensagem com várias linhas: entre
+// as marcas de colagem (bracketed paste), para o programa não tratar cada
+// quebra de linha como Enter. Quando o programa não ligou o modo de colagem,
+// as marcas apareceriam cruas e cada linha viraria uma mensagem: as linhas
+// vão juntas, separadas por espaço.
+func Colagem(texto string, modoColagem bool) []byte {
+	if !strings.ContainsAny(texto, "\r\n") {
+		return []byte(texto)
+	}
+	if modoColagem {
+		return []byte("\x1b[200~" + texto + "\x1b[201~")
+	}
+	linhas := strings.FieldsFunc(texto, func(r rune) bool { return r == '\n' || r == '\r' })
+	for i := range linhas {
+		linhas[i] = strings.TrimSpace(linhas[i])
+	}
+	return []byte(strings.Join(slices.DeleteFunc(linhas, func(l string) bool { return l == "" }), " "))
 }

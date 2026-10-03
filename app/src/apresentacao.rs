@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, CornerRadius, Event, FontId, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 use crate::api;
+use crate::pedido;
 use crate::registro::{self, CacheImagens, Miniatura};
 use crate::sistema;
 use crate::tema::{self, Pilula, cores, forte};
@@ -60,7 +61,7 @@ pub struct Regioes {
     /// Faixa central do rodapé, entre a navegação e os botões: avisos, o
     /// envio em andamento e o "Desfazer". Nada dela cai sobre as colunas.
     pub avisos: Rect,
-    /// Espaço do "Pedir ao agente" (entrega E): nada é desenhado aqui ainda.
+    /// O botão "Pedir ao agente (P)", só nos slides de tarefa.
     pub reserva_agente: Rect,
     pub fechar: Rect,
 }
@@ -70,6 +71,8 @@ pub struct Regioes {
 /// o rodapé não escala com a tela, então as larguras são fixas.
 const LARGURA_NAVEGACAO: f32 = 400.0;
 const LARGURA_BOTOES: f32 = 330.0;
+/// O "Pedir ao agente (P)" no rodapé.
+const LARGURA_RESERVA_AGENTE: f32 = 176.0;
 
 /// Fator de escala da apresentação: 1 em 1600×900.
 pub fn escala(tamanho: Vec2) -> f32 {
@@ -102,7 +105,8 @@ pub fn regioes(tamanho: Vec2, com_anexos: bool) -> Regioes {
     let seletor_direita = Rect::from_min_size(direita.min, vec2(direita.width(), 0.0));
     let lado = px(32.0).max(28.0);
     let fechar = Rect::from_min_size(pos2(tamanho.x - margem - lado, acoes.center().y - lado / 2.0), vec2(lado, lado));
-    let reserva_agente = Rect::from_min_size(pos2(fechar.left() - px(12.0) - px(176.0), fechar.top()), vec2(px(176.0), lado));
+    // Largura fixa, como o resto do rodapé: o botão "Pedir ao agente (P)" não escala.
+    let reserva_agente = Rect::from_min_size(pos2(fechar.left() - 12.0 - LARGURA_RESERVA_AGENTE, fechar.top()), vec2(LARGURA_RESERVA_AGENTE, lado));
     let avisos = Rect::from_min_max(
         pos2(margem + LARGURA_NAVEGACAO + 16.0, acoes.top() + 4.0),
         pos2((reserva_agente.left() - 12.0 - LARGURA_BOTOES - 16.0).max(margem + LARGURA_NAVEGACAO + 96.0), acoes.bottom() - 4.0),
@@ -189,7 +193,7 @@ struct Visor {
 
 enum Mensagem {
     Deck { resultado: Result<api::Deck, String>, manter: Option<i64> },
-    NotaSalva { tarefa: i64, texto: String, resultado: Result<(), String> },
+    NotaSalva { tarefa: i64, texto: String, resultado: Result<api::NotaGravada, String> },
     Progresso(Progresso),
     Enviado { tarefa: i64, nome: String, resultado: Result<api::AnexoSlide, String> },
     FimDosEnvios,
@@ -204,6 +208,49 @@ const MAX_TOPICOS: usize = 6;
 const MAX_NOTA: usize = 4000;
 /// Abaixo da nota: 6 de vão e a linha do estado da gravação ("salvo").
 const RODAPE_NOTA: f32 = 6.0 + 16.0;
+/// O tom de um aviso da faixa: a cor do ponto e do fundo. Laranja só para o
+/// que deu errado; na tela compartilhada, boa notícia não parece problema.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tom {
+    Neutro,
+    Concluiu,
+    Alerta,
+}
+
+/// Linhas da nota no slide: pelo menos estas, e até estas quando sobra espaço.
+const LINHAS_NOTA: (usize, usize) = (4, 14);
+
+/// Altura que "O que foi feito" ocupa sem limite (as mesmas contas do slide).
+fn altura_feito(slide: &api::Slide, s: f32) -> f32 {
+    let px = |v: f32| (v * s).round();
+    if slide.feito.is_empty() {
+        return 0.0;
+    }
+    let so_periodo = slide.feito.len() == 1 && slide.feito[0].parte == "No período";
+    let linha = px(28.0);
+    let mut y = px(22.0) + px(12.0);
+    for f in &slide.feito {
+        if !so_periodo {
+            y += px(26.0);
+        }
+        let total = f.itens.len() + f.mais;
+        let mostrar = total.min(MAX_TOPICOS).min(f.itens.len());
+        y += mostrar as f32 * (linha + px(8.0));
+        if total > mostrar {
+            y += linha;
+        }
+        y += px(20.0) - px(8.0);
+    }
+    y
+}
+
+/// Quantas linhas da nota (fonte 18) cabem na altura livre, com o estado da
+/// gravação embaixo.
+fn linhas_que_cabem(pintor: &egui::Painter, livre: f32) -> usize {
+    let linha = pintor.layout_no_wrap("Ág".into(), FontId::proportional(18.0), Color32::WHITE).size().y.max(1.0);
+    let cabem = ((livre - RODAPE_NOTA - 20.0) / linha).floor().max(0.0) as usize;
+    cabem.clamp(LINHAS_NOTA.0, LINHAS_NOTA.1)
+}
 
 pub struct Apresentacao {
     perfil: i64,
@@ -219,11 +266,18 @@ pub struct Apresentacao {
     pub tela_cheia: bool,
     /// Houve evento no perfil desde que o deck foi montado.
     pub novidades: bool,
-    aviso: Option<(String, f64)>,
+    aviso: Option<(String, f64, Tom)>,
     // Notas
     nota: Option<(i64, String)>,
     /// O último texto que o núcleo não salvou (para o Esc largar a edição).
     nota_recusada: Option<(i64, String)>,
+    /// A nota como estava quando a edição começou (texto e versão): ao
+    /// salvar, o núcleo confere que ninguém mexeu nela desde então.
+    base_nota: Option<(i64, String, String)>,
+    /// O agente mexeu na nota durante a edição (o rodapé avisa).
+    nota_agente: HashSet<i64>,
+    /// A nota mudou de um jeito que não dá para juntar sozinho.
+    conflito: Option<Conflito>,
     focar_nota: bool,
     estado_nota: HashMap<i64, EstadoNota>,
     // Anexos
@@ -244,6 +298,58 @@ pub struct Apresentacao {
     tema_base: tema::Escolha,
     tema_sessao: Option<tema::Escolha>,
     canal: (Sender<Mensagem>, Receiver<Mensagem>),
+    // Pedir ao agente
+    /// O pedido de cada tarefa (a tela principal põe a cada quadro).
+    pub pedidos: pedido::Pedidos,
+    caixa: Option<pedido::Caixa>,
+    rascunhos: HashMap<i64, String>,
+    /// O agente respondeu num slide que não é o atual: a faixa oferece "Ver".
+    respondido: Option<(i64, String)>,
+    /// Um pedido do deck em andamento e outro pedido depois dele (mudanças
+    /// do agente chegam em rajada: uma busca por vez).
+    buscando: bool,
+    buscar_de_novo: bool,
+}
+
+/// A nota mudou enquanto você editava e não dá para juntar sozinho (o agente
+/// reescreveu): a janela mostra as duas versões.
+struct Conflito {
+    tarefa: i64,
+    minha: String,
+    do_agente: String,
+    versao: String,
+}
+
+/// O botão da faixa do rodapé.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum AcaoFaixa {
+    Desfazer,
+    Ver(i64),
+    AbrirTarefa(i64),
+    Cancelar(i64),
+}
+
+impl AcaoFaixa {
+    fn rotulo(self) -> &'static str {
+        match self {
+            AcaoFaixa::Desfazer => "Desfazer",
+            AcaoFaixa::Ver(_) => "Ver",
+            // "Abrir tarefa" já está no rodapé: a faixa diz para quê.
+            AcaoFaixa::AbrirTarefa(_) => "Ver no terminal",
+            AcaoFaixa::Cancelar(_) => "Cancelar",
+        }
+    }
+}
+
+/// O texto da nota depois de juntar a sua edição com o que o agente
+/// acrescentou no fim da versão que você leu. None: o agente mudou o que já
+/// estava (a janela de conflito decide).
+pub fn juntar_nota(base: &str, minha: &str, atual: &str) -> Option<String> {
+    if base.is_empty() {
+        return Some(if minha.trim().is_empty() { atual.to_string() } else { format!("{}\n\n{}", minha.trim_end(), atual.trim_start()) });
+    }
+    let acrescentado = atual.strip_prefix(base)?;
+    Some(format!("{}{}", minha.trim_end(), acrescentado))
 }
 
 impl Apresentacao {
@@ -273,6 +379,9 @@ impl Apresentacao {
             aviso: None,
             nota: None,
             nota_recusada: None,
+            base_nota: None,
+            nota_agente: HashSet::new(),
+            conflito: None,
             focar_nota: false,
             estado_nota: HashMap::new(),
             principal: HashMap::new(),
@@ -290,6 +399,12 @@ impl Apresentacao {
             tema_base,
             tema_sessao: None,
             canal: mpsc::channel(),
+            pedidos: pedido::Pedidos::new(),
+            caixa: None,
+            rascunhos: HashMap::new(),
+            respondido: None,
+            buscando: false,
+            buscar_de_novo: false,
         };
         match deck {
             Some(d) => a.trocar_deck(d, None),
@@ -331,8 +446,47 @@ impl Apresentacao {
         }
     }
 
+    /// O agente respondeu um pedido: o slide traz a nota e as capturas novas
+    /// sem você sair dali. Em outro slide, a faixa oferece "Ver".
+    pub fn pedido_respondido(&mut self, ctx: &egui::Context, tarefa: i64, titulo: &str) {
+        let atual = self.tarefa_atual();
+        if atual == Some(tarefa) {
+            self.aviso = Some(("O agente respondeu o pedido".into(), 0.0, Tom::Concluiu));
+        } else {
+            self.respondido = Some((tarefa, titulo.to_string()));
+        }
+        self.atualizar_pelo_agente(ctx);
+    }
+
+    /// Busca o deck de novo mantendo o slide atual: uma busca por vez, e
+    /// mais uma no fim se algo mudou enquanto isso.
+    pub fn atualizar_pelo_agente(&mut self, ctx: &egui::Context) {
+        if self.buscando {
+            self.buscar_de_novo = true;
+            return;
+        }
+        let atual = self.tarefa_atual();
+        self.pedir_deck(ctx, atual);
+    }
+
+    /// O agente mexeu na nota da tarefa: se você está editando, o rodapé avisa
+    /// que vai junto quando salvar.
+    pub fn nota_do_agente(&mut self, tarefa: i64) {
+        if self.nota.as_ref().is_some_and(|(t, _)| *t == tarefa) {
+            self.nota_agente.insert(tarefa);
+        }
+    }
+
+    /// Começa a editar a nota do slide, guardando o texto e a versão lidos.
+    fn comecar_nota(&mut self, slide: &api::Slide) {
+        self.nota = Some((slide.tarefa_id, slide.nota.clone()));
+        self.base_nota = Some((slide.tarefa_id, slide.nota.clone(), slide.nota_versao.clone()));
+        self.nota_agente.remove(&slide.tarefa_id);
+    }
+
     fn pedir_deck(&mut self, ctx: &egui::Context, manter: Option<i64>) {
         let (perfil, projeto, periodo) = (self.perfil, self.projeto, self.periodo.clone());
+        self.buscando = true;
         registro::em_segundo_plano(&self.canal.0, ctx, move || Mensagem::Deck { resultado: api::apresentacao(perfil, projeto, periodo.as_ref()), manter });
     }
 
@@ -353,7 +507,7 @@ impl Apresentacao {
                     let titulo = self.deck.as_ref().and_then(|d| d.slides.iter().find(|s| s.tarefa_id == t)).map(|s| s.titulo.clone()).unwrap_or_default();
                     self.atual = antes.min(self.paginas.len() - 1);
                     let quem = if self.daily() { "daily" } else { "sprint" };
-                    self.aviso = Some((format!("“{titulo}” saiu da {quem}"), 0.0));
+                    self.aviso = Some((format!("“{titulo}” saiu da {quem}"), 0.0, Tom::Neutro));
                 }
                 None => {}
             }
@@ -372,6 +526,7 @@ impl Apresentacao {
 
     fn ir(&mut self, pagina: usize, ctx: &egui::Context) {
         if pagina != self.atual {
+            self.fechar_caixa();
             self.descartar_recusada();
             self.salvar_nota(ctx);
             self.atual = pagina.min(self.paginas.len().saturating_sub(1));
@@ -397,12 +552,44 @@ impl Apresentacao {
             return;
         }
         let (tipo, periodo) = (deck.tipo.clone(), deck.chave_nota.clone());
+        // A versão lida quando a edição começou (o deck pode ter sido atualizado depois).
+        let versao = match &self.base_nota {
+            Some((t, _, v)) if *t == tarefa => v.clone(),
+            _ => slide.nota_versao.clone(),
+        };
+        self.gravar_nota(ctx, tarefa, tipo, periodo, texto, versao);
+    }
+
+    fn gravar_nota(&mut self, ctx: &egui::Context, tarefa: i64, tipo: String, periodo: String, texto: String, versao: String) {
         self.estado_nota.insert(tarefa, EstadoNota::Salvando);
         self.esperar(Proprio::Nota, tarefa);
         registro::em_segundo_plano(&self.canal.0, ctx, move || {
-            let resultado = api::definir_nota(tarefa, &tipo, &periodo, &texto);
+            let resultado = api::gravar_nota(tarefa, &tipo, &periodo, &texto, &versao);
             Mensagem::NotaSalva { tarefa, texto, resultado }
         });
+    }
+
+    /// A nota mudou desde que a edição começou (o agente complementou): junta
+    /// sozinha quando o agente só acrescentou; senão abre a janela de conflito.
+    fn nota_mudou(&mut self, ctx: &egui::Context, tarefa: i64, minha: String, atual: String, versao: String) {
+        let base = match &self.base_nota {
+            Some((t, b, _)) if *t == tarefa => b.clone(),
+            _ => String::new(),
+        };
+        self.nota_agente.remove(&tarefa);
+        let Some(deck) = &self.deck else { return };
+        let (tipo, periodo) = (deck.tipo.clone(), deck.chave_nota.clone());
+        match juntar_nota(&base, &minha, &atual) {
+            Some(junta) => {
+                self.base_nota = Some((tarefa, atual, versao.clone()));
+                self.aviso = Some(("Juntei com o que o agente acrescentou".into(), 0.0, Tom::Neutro));
+                self.gravar_nota(ctx, tarefa, tipo, periodo, junta, versao);
+            }
+            None => {
+                self.estado_nota.remove(&tarefa);
+                self.conflito = Some(Conflito { tarefa, minha, do_agente: atual, versao });
+            }
+        }
     }
 
     /// Larga a edição da nota se ela é o mesmo texto que o núcleo acabou de
@@ -413,7 +600,7 @@ impl Apresentacao {
         }
         if let Some((tarefa, _)) = self.nota.take() {
             self.estado_nota.remove(&tarefa);
-            self.aviso = Some(("A nota não foi salva; ficou a anterior".into(), 0.0));
+            self.aviso = Some(("A nota não foi salva; ficou a anterior".into(), 0.0, Tom::Alerta));
         }
         self.nota_recusada = None;
         true
@@ -449,16 +636,37 @@ impl Apresentacao {
         while let Ok(m) = self.canal.1.try_recv() {
             match m {
                 Mensagem::Deck { resultado: Ok(deck), manter } => {
+                    self.buscando = false;
                     self.erro = None;
+                    // Mais mudanças chegaram durante a busca: busca de novo, no slide de agora.
+                    let manter = if std::mem::take(&mut self.buscar_de_novo) {
+                        let atual = self.tarefa_atual();
+                        self.pedir_deck(ctx, atual);
+                        atual
+                    } else {
+                        manter
+                    };
                     self.trocar_deck(deck, manter);
                 }
-                Mensagem::Deck { resultado: Err(e), .. } => self.erro = Some(e),
+                Mensagem::Deck { resultado: Err(e), .. } => {
+                    self.buscando = false;
+                    self.erro = Some(e);
+                }
                 Mensagem::NotaSalva { tarefa, texto, resultado } => match resultado {
-                    Ok(()) => {
+                    Ok(api::NotaGravada::Ok(versao)) => {
                         if let Some(s) = self.deck.as_mut().and_then(|d| d.slides.iter_mut().find(|s| s.tarefa_id == tarefa)) {
-                            s.nota = texto;
+                            s.nota = texto.clone();
+                            s.nota_versao = versao.clone();
                         }
+                        if self.base_nota.as_ref().is_some_and(|(t, _, _)| *t == tarefa) {
+                            self.base_nota = Some((tarefa, texto, versao));
+                        }
+                        self.nota_agente.remove(&tarefa);
                         self.estado_nota.insert(tarefa, EstadoNota::Salvo);
+                    }
+                    Ok(api::NotaGravada::Mudou { texto: atual, versao }) => {
+                        self.nao_esperar(Proprio::Nota, tarefa);
+                        self.nota_mudou(ctx, tarefa, texto, atual, versao);
                     }
                     Err(e) => {
                         self.nao_esperar(Proprio::Nota, tarefa);
@@ -485,7 +693,7 @@ impl Apresentacao {
                     }
                     Err(e) => {
                         self.nao_esperar(Proprio::AnexoNovo, tarefa);
-                        self.aviso = Some((format!("Não consegui anexar {nome}: {e}"), 0.0));
+                        self.aviso = Some((format!("Não consegui anexar {nome}: {e}"), 0.0, Tom::Alerta));
                     }
                 },
                 Mensagem::FimDosEnvios => {
@@ -511,7 +719,7 @@ impl Apresentacao {
     /// Confere os arquivos antes de enviar (formato e tamanho) e põe na fila.
     fn anexar(&mut self, ctx: &egui::Context, arquivos: Vec<PathBuf>) {
         let Some(slide) = self.slide() else {
-            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0));
+            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0, Tom::Alerta));
             return;
         };
         let tarefa = slide.tarefa_id;
@@ -519,16 +727,16 @@ impl Apresentacao {
             let nome = arquivo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let Some((_, video)) = api::tipo_do_arquivo(&arquivo) else {
                 let extensao = arquivo.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_else(|| "sem extensão".into());
-                self.aviso = Some((format!("{extensao} não é aceito. Use png, jpg, mp4, webm, mkv ou mov."), 0.0));
+                self.aviso = Some((format!("{extensao} não é aceito. Use png, jpg, mp4, webm, mkv ou mov."), 0.0, Tom::Alerta));
                 continue;
             };
             let bytes = std::fs::metadata(&arquivo).map(|m| m.len()).unwrap_or(0);
             if video && bytes > api::MAIOR_VIDEO {
-                self.aviso = Some((format!("{nome} tem {}; o limite é 512 MB.", registro::tamanho(bytes)), 0.0));
+                self.aviso = Some((format!("{nome} tem {}; o limite é 512 MB.", registro::tamanho(bytes)), 0.0, Tom::Alerta));
                 continue;
             }
             if !video && bytes > 8 << 20 {
-                self.aviso = Some((format!("{nome} tem {}; o limite de uma foto é 8 MB.", registro::tamanho(bytes)), 0.0));
+                self.aviso = Some((format!("{nome} tem {}; o limite de uma foto é 8 MB.", registro::tamanho(bytes)), 0.0, Tom::Alerta));
                 continue;
             }
             self.fila.push((tarefa, Envio::Arquivo(arquivo), nome));
@@ -586,7 +794,7 @@ impl Apresentacao {
 
     fn escolher_arquivos(&mut self, ctx: &egui::Context) {
         if self.slide().is_none() {
-            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0));
+            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0, Tom::Alerta));
             return;
         }
         // O diálogo do sistema numa thread; os arquivos voltam como se tivessem sido soltos.
@@ -603,14 +811,14 @@ impl Apresentacao {
 
     fn colar_imagem(&mut self) {
         let Some(slide) = self.slide() else {
-            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0));
+            self.aviso = Some(("Abra o slide de uma tarefa para anexar".into(), 0.0, Tom::Alerta));
             return;
         };
         let tarefa = slide.tarefa_id;
         let Ok(mut area) = arboard::Clipboard::new() else { return };
         let Ok(imagem) = area.get_image() else { return };
         if imagem.width * imagem.height > 40_000_000 {
-            self.aviso = Some(("Imagem grande demais para anexar.".into(), 0.0));
+            self.aviso = Some(("Imagem grande demais para anexar.".into(), 0.0, Tom::Alerta));
             return;
         }
         let mut png = Vec::new();
@@ -691,6 +899,11 @@ impl Apresentacao {
         if self.visor.is_some() {
             return self.teclado_visor(ctx);
         }
+        // Com a caixa "Pedir ao agente" ou a janela de conflito abertas, as
+        // teclas são delas (setas, F11, letras e Esc).
+        if self.caixa.is_some() || self.conflito.is_some() {
+            return None;
+        }
         let tecla = |k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         if self.atalhos {
             if tecla(Key::Escape) || tecla(Key::Questionmark) {
@@ -735,6 +948,8 @@ impl Apresentacao {
             self.ir(total.saturating_sub(1), ctx);
         } else if tecla(Key::N) {
             self.focar_nota = self.slide().is_some();
+        } else if tecla(Key::P) {
+            self.abrir_caixa(ctx);
         } else if tecla(Key::A) {
             self.escolher_arquivos(ctx);
         } else if tecla(Key::R) {
@@ -1104,8 +1319,17 @@ impl Apresentacao {
         let n = &slide.numeros;
         let tem_numeros = n.tempo_s >= 60 || n.sessoes > 0 || n.erros > 0 || n.capturas > 0;
         let altura_numeros = if tem_numeros { px(64.0) } else { 0.0 };
-        let altura_nota = self.altura_nota(&pintor, slide, s, largura);
+        // A linha do pedido ao agente, acima da nota.
+        let resumo = self.pedidos.get(&slide.tarefa_id).cloned();
+        let altura_pedido = if resumo.is_some() { px(22.0) + px(8.0) } else { 0.0 };
         let vao_numeros = if tem_numeros { px(24.0) } else { 0.0 };
+        // A nota usa o espaço que os tópicos deixam (pelo menos 4 linhas): o
+        // agente complementa no fim, e a resposta precisa aparecer no slide.
+        // Respondido um pedido, se ainda não couber, o começo sai ("…" em cima).
+        let livre = area.height() - altura_feito(slide, s) - altura_numeros - vao_numeros - altura_pedido - px(20.0);
+        let linhas_nota = linhas_que_cabem(&pintor, livre);
+        let pelo_fim = resumo.as_ref().is_some_and(|r| r.pedido.estado == "respondido");
+        let altura_nota = self.altura_nota(&pintor, slide, s, largura, linhas_nota) + altura_pedido;
         let vao_nota = if altura_nota > 0.0 { px(20.0) } else { 0.0 };
         let limite = area.bottom() - altura_nota - vao_nota - altura_numeros - vao_numeros;
 
@@ -1167,13 +1391,26 @@ impl Apresentacao {
             }
         }
 
-        let topo_nota = numeros.bottom() + vao_nota;
-        self.notas(ui, Rect::from_min_size(pos2(area.left(), topo_nota), vec2(largura, altura_nota)), slide, s);
+        let mut topo_nota = numeros.bottom() + vao_nota;
+        if let Some(r) = resumo {
+            let meio = topo_nota + px(11.0);
+            tema::marca(&pintor, pos2(area.left() + 4.5, meio), 4.5, r.estado.cor, if r.estado.cheio { tema::Marca::Cheia } else { tema::Marca::Anel });
+            let texto = format!("Pedido: «{}» · {}", r.pedido.texto.replace('\n', " "), r.estado.longo.to_lowercase());
+            let g = registro::texto_em_linhas(&pintor, &texto, FontId::proportional(px(14.0)), p.suave, largura - 16.0, 1);
+            if g.elided {
+                let caixa = Rect::from_min_size(pos2(area.left() + 16.0, topo_nota), vec2(g.size().x, px(22.0)));
+                ui.interact(caixa, Id::new(("linha-pedido", slide.tarefa_id)), Sense::hover()).on_hover_text(&texto);
+            }
+            pintor.galley(pos2(area.left() + 16.0, meio - g.size().y / 2.0), g, p.suave);
+            topo_nota += altura_pedido;
+        }
+        let area_nota = Rect::from_min_size(pos2(area.left(), topo_nota), vec2(largura, altura_nota - altura_pedido));
+        self.notas(ui, area_nota, slide, s, linhas_nota, pelo_fim);
     }
 
-    /// Altura do bloco de notas: o campo em edição, a nota (até 4 linhas)
+    /// Altura do bloco de notas: o campo em edição, a nota (até `linhas`)
     /// com o estado da gravação logo embaixo, ou o convite para escrever.
-    fn altura_nota(&self, pintor: &egui::Painter, slide: &api::Slide, s: f32, largura: f32) -> f32 {
+    fn altura_nota(&self, pintor: &egui::Painter, slide: &api::Slide, s: f32, largura: f32, linhas: usize) -> f32 {
         let editando = self.nota.as_ref().is_some_and(|(t, _)| *t == slide.tarefa_id) || self.focar_nota;
         let tem = !slide.nota.is_empty() || slide.nota_anterior.is_some();
         if editando {
@@ -1186,15 +1423,15 @@ impl Apresentacao {
             (Some(a), true) => (a.texto.as_str(), 20.0),
             _ => (slide.nota.as_str(), 0.0),
         };
-        let g = registro::texto_em_linhas(pintor, texto, FontId::proportional(18.0), cores().texto, largura - 15.0, 4);
+        let g = registro::texto_em_linhas(pintor, &registro::sem_linhas_vazias(texto), FontId::proportional(18.0), cores().texto, largura - 15.0, linhas);
         prefixo + g.size().y + RODAPE_NOTA
     }
 
-    fn notas(&mut self, ui: &mut egui::Ui, area: Rect, slide: &api::Slide, s: f32) {
+    fn notas(&mut self, ui: &mut egui::Ui, area: Rect, slide: &api::Slide, s: f32, linhas: usize, pelo_fim: bool) {
         if area.height() <= 0.0 {
             // Em tela cheia sem nota, nada aparece; o N ainda abre o campo.
             if std::mem::take(&mut self.focar_nota) {
-                self.nota = Some((slide.tarefa_id, slide.nota.clone()));
+                self.comecar_nota(slide);
                 self.focar_nota = true;
             }
             return;
@@ -1203,7 +1440,7 @@ impl Apresentacao {
         let ctx = ui.ctx().clone();
         let tarefa = slide.tarefa_id;
         if std::mem::take(&mut self.focar_nota) && self.nota.as_ref().is_none_or(|(t, _)| *t != tarefa) {
-            self.nota = Some((tarefa, slide.nota.clone()));
+            self.comecar_nota(slide);
             let id = Id::new(("nota-slide", tarefa));
             ctx.memory_mut(|m| m.request_focus(id));
         }
@@ -1237,6 +1474,8 @@ impl Apresentacao {
             // A nota que não foi salva diz por quê, no lugar da dica.
             if let Some(EstadoNota::Erro(e)) = &estado {
                 ui.painter().text(pos2(x, y), egui::Align2::LEFT_TOP, format!("Não salvei: {e}"), fonte_estado, p.erro);
+            } else if self.nota_agente.contains(&tarefa) {
+                ui.painter().text(pos2(x, y), egui::Align2::LEFT_TOP, "O agente acrescentou à nota; vai junto quando você salvar", fonte_estado, p.destaque);
             } else if !self.tela_cheia {
                 ui.painter().text(
                     pos2(x, y),
@@ -1265,7 +1504,13 @@ impl Apresentacao {
                 pintor.text(pos2(corpo.left() + 15.0, y), egui::Align2::LEFT_TOP, prefixo, fonte_estado.clone(), p.suave);
                 y += 20.0;
             }
-            let g = registro::texto_em_linhas(pintor, texto, FontId::proportional(18.0), cor, corpo.width() - 15.0, 4);
+            let limpo = registro::sem_linhas_vazias(texto);
+            // A nota de outro período não é a que o agente complementou.
+            let g = if pelo_fim && !slide.nota.is_empty() {
+                tema::cortar_pelo_fim(pintor, &limpo, egui::TextFormat::simple(FontId::proportional(18.0), cor), corpo.width() - 15.0, linhas)
+            } else {
+                registro::texto_em_linhas(pintor, &limpo, FontId::proportional(18.0), cor, corpo.width() - 15.0, linhas)
+            };
             let altura = g.size().y;
             pintor.rect_filled(Rect::from_min_size(pos2(corpo.left(), y), vec2(3.0, altura)), CornerRadius::same(2), p.destaque);
             pintor.galley(pos2(corpo.left() + 15.0, y), g, cor);
@@ -1303,7 +1548,7 @@ impl Apresentacao {
             _ => {}
         }
         if resposta.clicked() {
-            self.nota = Some((tarefa, slide.nota.clone()));
+            self.comecar_nota(slide);
             ctx.memory_mut(|m| m.request_focus(Id::new(("nota-slide", tarefa))));
         }
     }
@@ -1468,7 +1713,16 @@ impl Apresentacao {
                 p.suave
             };
             if tarefa {
-                filho.painter().rect_filled(Rect::from_center_size(rect.center(), vec2(largura, 8.0)), CornerRadius::same(4), cor);
+                let ponto = Rect::from_center_size(rect.center(), vec2(largura, 8.0));
+                filho.painter().rect_filled(ponto, CornerRadius::same(4), cor);
+                // Slide com pedido aberto ao agente: contorno âmbar, parado.
+                let tarefa_id = match (&self.paginas[i], &self.deck) {
+                    (Pagina::Tarefa(s), Some(d)) => d.slides.get(*s).map_or(0, |s| s.tarefa_id),
+                    _ => 0,
+                };
+                if self.pedidos.get(&tarefa_id).is_some_and(|r| r.estado.aberto) {
+                    filho.painter().rect_stroke(ponto.expand(2.0), CornerRadius::same(6), Stroke::new(1.5, p.alerta), StrokeKind::Outside);
+                }
             } else {
                 filho.painter().circle_stroke(rect.center(), 3.5, Stroke::new(if atual { 2.0 } else { 1.5 }, cor));
             }
@@ -1508,57 +1762,123 @@ impl Apresentacao {
         if tema::botao_icone_em(ui, r.fechar, Id::new("fechar-apresentacao"), tema::Icone::Fechar).on_hover_text("Sair (Esc)").clicked() {
             pedido = Some(Pedido::Sair);
         }
+        // "Pedir ao agente (P)" na reserva, só nos slides de tarefa: à esquerda,
+        // com o mesmo vão de 16 dos outros botões do rodapé (a reserva começa
+        // 12 depois deles).
+        let mut chip = None;
+        if self.slide().is_some_and(|s| !s.removida) {
+            let mut reserva = ui.new_child(egui::UiBuilder::new().max_rect(r.reserva_agente).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            reserva.add_space(4.0);
+            let aberta = self.caixa.is_some();
+            let resposta = tema::chip_alternar(&mut reserva, "Pedir ao agente (P)", aberta);
+            chip = Some(resposta.rect);
+            if resposta.on_hover_text("Pedir algo a mais ao agente desta tarefa").clicked() {
+                if aberta {
+                    self.fechar_caixa();
+                } else {
+                    self.abrir_caixa(&ctx);
+                }
+            }
+        }
 
         // Centro: a faixa entre a navegação e os botões, medida agora (a de
         // `regioes` é a reserva mínima com os tamanhos de referência).
         let faixa =
             Rect::from_min_max(pos2(fim_navegacao + 16.0, r.acoes.top() + 4.0), pos2((inicio_botoes - 16.0).max(fim_navegacao + 96.0), r.acoes.bottom() - 4.0));
-        if self.faixa_de_avisos(ui, faixa, agora) {
-            self.desfazer_remocao();
+        match self.faixa_de_avisos(ui, faixa, agora) {
+            Some(AcaoFaixa::Desfazer) => self.desfazer_remocao(),
+            Some(AcaoFaixa::Ver(tarefa)) => {
+                self.respondido = None;
+                self.ir_para_tarefa(tarefa, &ctx);
+            }
+            Some(AcaoFaixa::AbrirTarefa(tarefa)) => pedido = Some(Pedido::AbrirTarefa(tarefa)),
+            Some(AcaoFaixa::Cancelar(id)) => {
+                std::thread::spawn(move || {
+                    if let Err(e) = api::cancelar_pedido(id) {
+                        eprintln!("cancelando o pedido {id}: {e}");
+                    }
+                });
+            }
+            None => {}
         }
-        if self.aviso.as_ref().is_some_and(|(_, t)| *t == 0.0) {
+        // A caixa "Pedir ao agente", presa ao botão, para cima, sobre o slide (sem véu).
+        if let Some(caixa) = &mut self.caixa {
+            let tarefa = caixa.tarefa;
+            let ancora = chip.map_or(r.reserva_agente.right_top(), |c| c.right_top()) - vec2(0.0, 8.0);
+            match caixa.mostrar(&ctx, ancora, egui::Align2::RIGHT_BOTTOM, self.pedidos.get(&tarefa)) {
+                None => {}
+                Some(pedido::Saida::Fechar) => self.fechar_caixa(),
+                Some(pedido::Saida::Enviado(_)) => {
+                    self.caixa = None;
+                    self.rascunhos.remove(&tarefa);
+                    self.aviso = Some(("Pedido enviado ao agente".into(), 0.0, Tom::Neutro));
+                }
+                Some(pedido::Saida::AbrirTarefa) => {
+                    self.fechar_caixa();
+                    pedido = Some(Pedido::AbrirTarefa(tarefa));
+                }
+            }
+        }
+        if self.aviso.as_ref().is_some_and(|(_, t, _)| *t == 0.0) {
             // O aviso some na próxima troca de slide ou em 6 s (um redesenho só).
             self.aviso.as_mut().expect("aviso").1 = agora + 6.0;
             ctx.request_repaint_after(std::time::Duration::from_secs(6));
         }
-        if self.aviso.as_ref().is_some_and(|(_, t)| agora >= *t) {
+        if self.aviso.as_ref().is_some_and(|(_, t, _)| agora >= *t) {
             self.aviso = None;
         }
         pedido
     }
 
     /// A faixa do centro do rodapé: o envio em andamento, o "Desfazer" da
-    /// remoção, um aviso ou as novidades, nessa ordem. O texto quebra em até
-    /// 2 linhas dentro da faixa. Diz se o "Desfazer" foi clicado.
-    fn faixa_de_avisos(&mut self, ui: &mut egui::Ui, faixa: Rect, agora: f64) -> bool {
+    /// remoção, o pedido ao agente (o deste slide, ou a resposta num outro),
+    /// um aviso ou as novidades, nessa ordem. O texto quebra em até 2 linhas
+    /// dentro da faixa. Devolve a ação clicada.
+    fn faixa_de_avisos(&mut self, ui: &mut egui::Ui, faixa: Rect, agora: f64) -> Option<AcaoFaixa> {
         let p = cores();
-        let (texto, cor, desfazer) = if let Some(pr) = &self.progresso {
+        let tarefa_atual = self.tarefa_atual();
+        let pedido_atual = tarefa_atual.and_then(|t| self.pedidos.get(&t)).filter(|r| r.estado.aberto || r.pedido.estado == "falhou");
+        let (texto, cor, acao) = if let Some(pr) = &self.progresso {
             let porcento = pr.enviados * 100 / pr.total.max(1);
             let texto = if pr.arquivos > 1 {
                 format!("Enviando {} de {}… {porcento}%", pr.arquivo, pr.arquivos)
             } else {
                 format!("Enviando {}… {porcento}%", pr.nome)
             };
-            (texto, p.ok, false)
+            (texto, p.ok, None)
         } else if self.enviando {
-            ("Enviando…".to_string(), p.ok, false)
+            ("Enviando…".to_string(), p.ok, None)
         } else if let Some(r) = &self.remocao {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((r.ate - agora).max(0.0)));
-            (if r.anexo.video() { "Vídeo removido do slide" } else { "Imagem removida do slide" }.to_string(), p.suave, true)
-        } else if let Some((texto, _)) = &self.aviso {
-            (texto.clone(), p.alerta, false)
+            (if r.anexo.video() { "Vídeo removido do slide" } else { "Imagem removida do slide" }.to_string(), p.suave, Some(AcaoFaixa::Desfazer))
+        } else if let Some((tarefa, titulo)) = self.respondido.clone().filter(|(t, _)| Some(*t) != tarefa_atual) {
+            (format!("O agente respondeu em «{titulo}»"), p.destaque, Some(AcaoFaixa::Ver(tarefa)))
+        } else if let Some(r) = pedido_atual {
+            let acao = match r.estado.acao {
+                Some(pedido::AcaoPedido::Cancelar) => Some(AcaoFaixa::Cancelar(r.pedido.id)),
+                Some(pedido::AcaoPedido::AbrirTarefa) => Some(AcaoFaixa::AbrirTarefa(r.pedido.tarefa_id)),
+                _ => None,
+            };
+            (r.estado.longo.clone(), r.estado.cor, acao)
+        } else if let Some((texto, _, tom)) = &self.aviso {
+            let cor = match tom {
+                Tom::Neutro => p.suave,
+                Tom::Concluiu => p.destaque,
+                Tom::Alerta => p.alerta,
+            };
+            (texto.clone(), cor, None)
         } else if self.novidades {
-            ("Novidades · R atualiza".to_string(), p.destaque, false)
+            ("Novidades · R atualiza".to_string(), p.destaque, None)
         } else {
-            return false;
+            return None;
         };
         let pintor = ui.painter().clone();
         let fonte = FontId::proportional(13.0);
-        let largura_botao = if desfazer { pintor.layout_no_wrap("Desfazer".into(), fonte.clone(), p.texto).size().x + 28.0 + 10.0 } else { 0.0 };
+        let largura_botao = acao.map_or(0.0, |a| pintor.layout_no_wrap(a.rotulo().into(), fonte.clone(), p.texto).size().x + 28.0 + 10.0);
         let largura_texto = faixa.width() - 2.0 * 14.0 - 14.0 - largura_botao;
         let g = registro::texto_em_linhas(&pintor, &texto, fonte, p.texto, largura_texto, 2);
         let largura = (14.0 + 14.0 + g.size().x + 14.0 + largura_botao).min(faixa.width());
-        let altura = (g.size().y + 12.0).max(if desfazer { 36.0 } else { 28.0 }).min(faixa.height());
+        let altura = (g.size().y + 12.0).max(if acao.is_some() { 36.0 } else { 28.0 }).min(faixa.height());
         let caixa = Rect::from_center_size(faixa.center(), vec2(largura, altura));
         pintor.rect(caixa, CornerRadius::same((altura / 2.0).min(14.0) as u8), tema::fundo_tingido(p, cor, tema::claro()), Stroke::NONE, StrokeKind::Inside);
         pintor.circle_filled(pos2(caixa.left() + 14.0 + 3.5, caixa.center().y), 3.5, cor);
@@ -1566,12 +1886,31 @@ impl Apresentacao {
             ui.interact(caixa, Id::new("faixa-aviso"), Sense::hover()).on_hover_text(&texto);
         }
         pintor.galley(pos2(caixa.left() + 28.0, caixa.center().y - g.size().y / 2.0), g, p.texto);
-        if !desfazer {
-            return false;
-        }
+        let acao = acao?;
         let botao = Rect::from_min_size(pos2(caixa.right() - largura_botao + 4.0, caixa.center().y - 14.0), vec2(largura_botao - 10.0, 28.0));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(botao).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        tema::botao_secundario(&mut filho, "Desfazer").clicked()
+        tema::botao_secundario(&mut filho, acao.rotulo()).clicked().then_some(acao)
+    }
+
+    /// Abre a caixa "Pedir ao agente" do slide atual (P ou o botão do rodapé).
+    fn abrir_caixa(&mut self, ctx: &egui::Context) {
+        let Some(slide) = self.slide().filter(|s| !s.removida) else { return };
+        let tarefa = slide.tarefa_id;
+        let Some(deck) = &self.deck else { return };
+        let (tipo, periodo) = (deck.tipo.clone(), deck.chave_nota.clone());
+        // A nota em edição é salva antes (o agente vai escrever nela).
+        self.salvar_nota(ctx);
+        let rascunho = self.rascunhos.remove(&tarefa).unwrap_or_default();
+        self.caixa = Some(pedido::Caixa::nova(ctx, tarefa, &tipo, &periodo, rascunho));
+    }
+
+    /// Fecha a caixa guardando o rascunho da tarefa.
+    fn fechar_caixa(&mut self) {
+        if let Some(c) = self.caixa.take()
+            && !c.texto.trim().is_empty()
+        {
+            self.rascunhos.insert(c.tarefa, c.texto);
+        }
     }
 
     /// O que fica por cima: arrastar arquivos, o visor, o painel de atalhos e o "Desfazer".
@@ -1625,6 +1964,62 @@ impl Apresentacao {
                 self.visor = None;
             }
         }
+        if let Some(c) = &self.conflito {
+            let mut escolha = None;
+            egui::Area::new(Id::new("veu-conflito")).order(egui::Order::Middle).fixed_pos(tela.min).show(ctx, |ui| {
+                ui.allocate_rect(tela, Sense::click());
+                ui.painter().rect_filled(tela, 0, Color32::from_black_alpha(if tema::claro() && !self.tela_cheia { 60 } else { 140 }));
+            });
+            egui::Area::new(Id::new("conflito-nota")).order(egui::Order::Foreground).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
+                tema::moldura_janela().show(ui, |ui| {
+                    ui.set_width(760.0 - 48.0);
+                    tema::cabecalho(ui, "A nota mudou enquanto você editava", "O agente reescreveu a nota. Escolha o que fica.");
+                    ui.add_space(16.0);
+                    // As duas colunas com a mesma altura (260): a curta não encolhe,
+                    // a longa rola. As linhas pedidas enchem os 260.
+                    let linha = ui.painter().layout_no_wrap("Ág".into(), FontId::proportional(13.5), p.texto).size().y.max(1.0);
+                    let linhas = (260.0 / linha).floor() as usize;
+                    ui.columns(2, |colunas| {
+                        for (n, (rotulo, texto)) in [("Sua versão", &c.minha), ("Versão do agente", &c.do_agente)].into_iter().enumerate() {
+                            let col = &mut colunas[n];
+                            col.label(egui::RichText::new(rotulo).color(p.suave).size(12.5));
+                            let mut copia = texto.clone();
+                            tema::campo_multilinha(col, &mut copia, linhas, 260.0, Id::new(("conflito", n)), true);
+                        }
+                    });
+                    ui.add_space(16.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if tema::botao_principal(ui, "Juntar as duas", true).clicked() {
+                            escolha = Some(format!("{}\n\n{}", c.minha.trim_end(), c.do_agente.trim_start()));
+                        }
+                        ui.add_space(8.0);
+                        if tema::botao_secundario(ui, "Ficar com a do agente").clicked() {
+                            escolha = Some(c.do_agente.clone());
+                        }
+                        ui.add_space(8.0);
+                        if tema::botao_secundario(ui, "Ficar com a minha").clicked() {
+                            escolha = Some(c.minha.clone());
+                        }
+                    });
+                });
+            });
+            if let Some(texto) = escolha
+                && let Some(c) = self.conflito.take()
+            {
+                self.nota = None;
+                if let Some(s) = self.deck.as_mut().and_then(|d| d.slides.iter_mut().find(|s| s.tarefa_id == c.tarefa)) {
+                    s.nota = c.do_agente.clone();
+                    s.nota_versao = c.versao.clone();
+                }
+                self.base_nota = Some((c.tarefa, c.do_agente.clone(), c.versao.clone()));
+                if texto != c.do_agente
+                    && let Some(d) = &self.deck
+                {
+                    let (tipo, periodo) = (d.tipo.clone(), d.chave_nota.clone());
+                    self.gravar_nota(ctx, c.tarefa, tipo, periodo, texto, c.versao);
+                }
+            }
+        }
         if self.atalhos {
             let mut fechar = false;
             // Véu atrás do painel, como o do visor: o slide de baixo não aparece pelos lados.
@@ -1670,6 +2065,7 @@ const ATALHOS: &[(&str, &[&str])] = &[
     ("Voltar", &["←", "PgUp", "Backspace"]),
     ("Primeiro / último", &["Home", "End"]),
     ("Ir à capa", &["C"]),
+    ("Pedir ao agente", &["P"]),
     ("Editar a nota", &["N"]),
     ("Adicionar foto ou vídeo", &["A"]),
     ("Esconder o slide (só agora)", &["H"]),
@@ -1723,6 +2119,30 @@ mod testes {
             r.avisos
         );
         assert!(r.avisos.width() >= 80.0 && r.avisos.left() >= r.esquerda.left() + LARGURA_NAVEGACAO);
+        // O botão "Pedir ao agente (P)", medido de verdade, cabe na reserva.
+        let ctx = egui::Context::default();
+        tema::instalar(&ctx);
+        let mut largura = 0.0;
+        let mut saida = ctx.run_ui(egui::RawInput::default(), |ui| {
+            largura = ui.painter().layout_no_wrap("Pedir ao agente (P)".into(), forte(13.0), Color32::WHITE).size().x + 28.0;
+        });
+        saida.textures_delta.clear();
+        assert!(largura <= r.reserva_agente.width(), "botão de {largura} numa reserva de {}", r.reserva_agente.width());
+    }
+
+    #[test]
+    fn nota_junta_o_que_o_agente_acrescentou() {
+        // O agente só acrescentou no fim: a sua edição fica e o acréscimo vai junto.
+        let base = "Tela de pedidos quase pronta.";
+        let atual = "Tela de pedidos quase pronta.\n\nTotal de testes: 42";
+        assert_eq!(
+            juntar_nota(base, "Tela de pedidos pronta, falta o filtro.", atual).as_deref(),
+            Some("Tela de pedidos pronta, falta o filtro.\n\nTotal de testes: 42")
+        );
+        // Não havia nota: a sua e a do agente, nessa ordem.
+        assert_eq!(juntar_nota("", "Minha", "Do agente").as_deref(), Some("Minha\n\nDo agente"));
+        // O agente reescreveu: não dá para juntar sozinho.
+        assert_eq!(juntar_nota(base, "Minha", "Outra coisa"), None);
     }
 
     #[test]
@@ -1808,7 +2228,7 @@ mod testes {
         sem_c.slides.pop();
         a.trocar_deck(sem_c, Some(3));
         assert!(a.atual < a.paginas.len());
-        assert!(a.aviso.as_ref().is_some_and(|(t, _)| t.contains("“C” saiu da sprint")));
+        assert!(a.aviso.as_ref().is_some_and(|(t, _, _)| t.contains("“C” saiu da sprint")));
         a.trocar_deck(deck(), Some(2));
         assert_eq!(a.tarefa_atual(), Some(2));
         let capa = Apresentacao::nova(&ctx, 1, None, None, Some(deck()), Inicio::Capa, true, tema::Escolha::Escuro);

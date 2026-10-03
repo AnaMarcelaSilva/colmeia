@@ -99,6 +99,9 @@ pub struct Agente {
     pub motivo: String,
     #[serde(default)]
     pub desde_hora: String,
+    /// O mesmo momento, em RFC 3339 (UTC).
+    #[serde(default)]
+    pub desde: String,
     #[serde(default)]
     pub ultimo_fim: Option<Fim>,
 }
@@ -111,6 +114,121 @@ pub struct Quadro {
     pub projetos: Vec<Projeto>,
     pub tarefas: Vec<Tarefa>,
     pub agentes: Vec<Agente>,
+    /// Pedidos ao agente abertos e os fechados nas últimas horas.
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub pedidos: Vec<Pedido>,
+    /// Tarefas com o navegador da Colmeia aberto.
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub navegadores: Vec<i64>,
+}
+
+/// Algo a mais pedido ao agente da tarefa pela daily, pela sprint ou pela
+/// apresentação; a resposta volta para a nota (tipo e período).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Pedido {
+    pub id: i64,
+    pub tarefa_id: i64,
+    #[serde(default)]
+    pub agente_id: i64,
+    pub tipo: String,
+    pub periodo: String,
+    pub texto: String,
+    /// "fila", "entregue", "respondido", "cancelado" ou "falhou".
+    pub estado: String,
+    #[serde(default)]
+    pub motivo: String,
+    #[serde(default)]
+    pub criado_em: String,
+    #[serde(default)]
+    pub entregue_em: String,
+    /// Quando fechou (respondido, cancelado ou falhou).
+    #[serde(default)]
+    pub respondido_em: String,
+    /// As mesmas horas, locais ("21:40").
+    #[serde(default)]
+    pub entregue_hora: String,
+    #[serde(default)]
+    pub respondido_hora: String,
+}
+
+impl Pedido {
+    pub fn aberto(&self) -> bool {
+        self.estado == "fila" || self.estado == "entregue"
+    }
+}
+
+/// Para quem o pedido vai, dito pelo núcleo antes do Enviar.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Destino {
+    /// "ativo", "reiniciar", "novo" ou "bloqueado".
+    pub acao: String,
+    #[serde(default)]
+    pub agente: Option<Agente>,
+    /// Título da conversa que um agente novo retoma ("" é uma conversa nova).
+    #[serde(default)]
+    pub conversa: String,
+    /// A tarefa tem agentes, mas nenhum é Claude Code.
+    #[serde(default)]
+    pub outros: bool,
+    #[serde(default)]
+    pub motivo: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PedidoCriado {
+    pub pedido: Pedido,
+}
+
+/// Se há um Chrome ou Chromium para a Colmeia controlar.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct InfoNavegador {
+    pub instalado: bool,
+}
+
+/// Um item da pasta da tarefa.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Entrada {
+    pub nome: String,
+    #[serde(default)]
+    pub pasta: bool,
+    #[serde(default)]
+    pub link: bool,
+    #[serde(default)]
+    pub ignorada: bool,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub sensivel: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ListaArquivos {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub entradas: Vec<Entrada>,
+    #[serde(default)]
+    pub mais: bool,
+}
+
+/// A pré-visualização de um arquivo da pasta da tarefa.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Previa {
+    /// "texto", "imagem", "binario" ou "sensivel".
+    pub tipo: String,
+    pub caminho_absoluto: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub cortado: bool,
+    #[serde(default)]
+    pub linhas: usize,
+    #[serde(default)]
+    pub largura: u32,
+    #[serde(default)]
+    pub altura: u32,
+    #[serde(default)]
+    pub formato: String,
 }
 
 // Linha do tempo, daily e sprint: os textos vêm prontos do núcleo.
@@ -343,6 +461,9 @@ pub struct Slide {
     pub anexos: Vec<AnexoSlide>,
     #[serde(default)]
     pub nota: String,
+    /// Versão da nota (quando foi gravada): vai junto ao salvar.
+    #[serde(default)]
+    pub nota_versao: String,
     #[serde(default)]
     pub nota_anterior: Option<NotaAnterior>,
 }
@@ -591,9 +712,122 @@ pub fn apresentacao(perfil: i64, projeto: Option<i64>, periodo: Option<&PeriodoS
     chamar("GET", &caminho, None)
 }
 
-/// Grava a nota da tarefa na daily ou na sprint (texto vazio apaga).
-pub fn definir_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str) -> Result<(), String> {
-    chamar::<serde_json::Value>("PUT", &format!("/v1/tarefas/{tarefa}/notas"), Some(json!({ "tipo": tipo, "periodo": periodo, "texto": texto }))).map(|_| ())
+/// Resultado de gravar a nota com a versão lida.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NotaGravada {
+    /// Gravou; a versão nova.
+    Ok(String),
+    /// A nota mudou desde a versão lida (o agente complementou): o texto e a versão de agora.
+    Mudou { texto: String, versao: String },
+}
+
+#[derive(Deserialize)]
+struct NotaLida {
+    #[serde(default)]
+    atualizada_em: String,
+}
+
+#[derive(Deserialize)]
+struct NotaMudou {
+    #[serde(default)]
+    texto: String,
+    #[serde(default)]
+    versao: String,
+}
+
+/// Grava a nota só se ela ainda está na `versao` lida ("" = não havia nota).
+pub fn gravar_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str, versao: &str) -> Result<NotaGravada, String> {
+    let corpo = json!({ "tipo": tipo, "periodo": periodo, "texto": texto, "versao": versao }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/tarefas/{tarefa}/notas"), Some(&corpo))?;
+    match status {
+        200 => Ok(NotaGravada::Ok(serde_json::from_str::<NotaLida>(&resposta).map(|n| n.atualizada_em).unwrap_or_default())),
+        409 => serde_json::from_str::<NotaMudou>(&resposta)
+            .map(|m| NotaGravada::Mudou { texto: m.texto, versao: m.versao })
+            .map_err(|e| inesperada("/v1/tarefas/notas", e)),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+    }
+}
+
+// Pedidos ao agente
+
+pub fn destino_do_pedido(tarefa: i64) -> Result<Destino, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/pedidos/destino"), None)
+}
+
+/// Põe o pedido na fila do agente da tarefa (o núcleo escolhe, inicia ou cria o agente).
+pub fn criar_pedido(tarefa: i64, texto: &str, tipo: &str, periodo: &str) -> Result<Pedido, String> {
+    let mut corpo = tamanho();
+    corpo["texto"] = json!(texto);
+    corpo["tipo"] = json!(tipo);
+    corpo["periodo"] = json!(periodo);
+    chamar::<PedidoCriado>("POST", &format!("/v1/tarefas/{tarefa}/pedidos"), Some(corpo)).map(|c| c.pedido)
+}
+
+pub fn cancelar_pedido(pedido: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/pedidos/{pedido}"), None).map(|_| ())
+}
+
+// Navegador da tarefa
+
+pub fn info_navegador() -> Result<InfoNavegador, String> {
+    chamar("GET", "/v1/navegador", None)
+}
+
+/// Abre (ou traz para frente) o navegador da tarefa na geometria dada; com
+/// `url`, vai para o endereço.
+pub fn abrir_navegador(tarefa: i64, url: &str, geometria: Option<[i32; 4]>) -> Result<(), String> {
+    let mut corpo = json!({ "url": url });
+    if let Some([x, y, largura, altura]) = geometria {
+        corpo["x"] = json!(x);
+        corpo["y"] = json!(y);
+        corpo["largura"] = json!(largura);
+        corpo["altura"] = json!(altura);
+    }
+    chamar::<serde_json::Value>("POST", &format!("/v1/tarefas/{tarefa}/navegador"), Some(corpo)).map(|_| ())
+}
+
+/// Avisa o núcleo que a tela passou (ou deixou de) mostrar algo que pode
+/// estar compartilhado (apresentação, Daily, Sprint): o navegador que o
+/// agente abrir não cobre a tela. A geometria é onde ele abre quando o usuário pede.
+pub fn apresentando(perfil: i64, ativo: bool, geometria: Option<[i32; 4]>) -> Result<(), String> {
+    let mut corpo = json!({ "ativo": ativo });
+    if let Some([x, y, largura, altura]) = geometria {
+        corpo["geometria"] = json!({ "x": x, "y": y, "largura": largura, "altura": altura });
+    }
+    chamar::<serde_json::Value>("PUT", &format!("/v1/perfis/{perfil}/apresentando"), Some(corpo)).map(|_| ())
+}
+
+pub fn fechar_navegador(tarefa: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/tarefas/{tarefa}/navegador"), None).map(|_| ())
+}
+
+#[derive(Deserialize)]
+struct Id {
+    id: i64,
+}
+
+/// Captura o navegador da tarefa e anexa; devolve o id do anexo.
+pub fn capturar_navegador(tarefa: i64) -> Result<i64, String> {
+    chamar::<Id>("POST", &format!("/v1/tarefas/{tarefa}/navegador/captura"), None).map(|i| i.id)
+}
+
+// Arquivos da tarefa (só leitura)
+
+pub fn arquivos(tarefa: i64, caminho: &str) -> Result<ListaArquivos, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/arquivos?caminho={}", codificar_url(caminho)), None)
+}
+
+pub fn ver_arquivo(tarefa: i64, caminho: &str, mostrar: bool) -> Result<Previa, String> {
+    let mostrar = if mostrar { "&mostrar=1" } else { "" };
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/arquivo?caminho={}{mostrar}", codificar_url(caminho)), None)
+}
+
+/// A imagem do arquivo, como PNG reduzido pelo núcleo.
+pub fn imagem_do_arquivo(tarefa: i64, caminho: &str) -> Result<Vec<u8>, String> {
+    match canal::pedir_bytes("GET", &format!("/v1/tarefas/{tarefa}/arquivo/imagem?caminho={}", codificar_url(caminho)), "application/json", &[])? {
+        (200, corpo) => Ok(corpo),
+        (status, corpo) => Err(serde_json::from_slice::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+    }
 }
 
 /// O PNG de um anexo.

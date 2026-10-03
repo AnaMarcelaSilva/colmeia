@@ -59,6 +59,8 @@ type NovoAnexo struct {
 	Origem, Legenda        string
 	// Tipo vazio é "imagem"; Formato vazio é "png".
 	Tipo, Formato, Nome string
+	// Navegador: captura do navegador da tarefa (não do terminal).
+	Navegador bool
 }
 
 func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
@@ -91,6 +93,9 @@ func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
 		conteudo := map[string]any{"sha256": n.Sha256, "origem": n.Origem}
 		if n.Tipo != "imagem" {
 			conteudo["tipo"] = n.Tipo
+		}
+		if n.Navegador {
+			conteudo["navegador"] = true
 		}
 		if n.Tarefa != 0 {
 			var projeto int64

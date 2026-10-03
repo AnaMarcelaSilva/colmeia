@@ -54,29 +54,78 @@ func PeriodoNotaValido(tipo, periodo string) error {
 	return nil
 }
 
+// Modos de gravar uma nota: substituir o texto ou acrescentar ao fim dele.
+const (
+	ModoSubstituir   = "substituir"
+	ModoComplementar = "complementar"
+)
+
+// GravacaoNota é um pedido de gravar uma nota. Versao (opcional) é o
+// atualizada_em que quem edita leu ("" se a nota não existia): se a nota
+// mudou desde então, nada é gravado e volta ErrNotaMudou. Agente diz que foi
+// um agente quem escreveu (pelas ferramentas da Colmeia).
+type GravacaoNota struct {
+	Tarefa        int64
+	Tipo, Periodo string
+	Texto         string
+	Modo          string
+	Versao        *string
+	Agente        int64
+}
+
+// ErrNotaMudou: a nota mudou desde que foi lida. Atual é como ela está agora.
+type ErrNotaMudou struct{ Atual Nota }
+
+func (e ErrNotaMudou) Error() string { return "a nota mudou enquanto você editava" }
+
 // DefinirNota grava (ou, com texto vazio, apaga) a nota da tarefa. O evento
 // leva só o tamanho do texto: o conteúdo não entra no histórico imutável.
 func (b *Banco) DefinirNota(ctx context.Context, tarefa int64, tipo, periodo, texto string) (Nota, error) {
-	if err := PeriodoNotaValido(tipo, periodo); err != nil {
-		return Nota{}, err
-	}
+	return b.GravarNota(ctx, GravacaoNota{Tarefa: tarefa, Tipo: tipo, Periodo: periodo, Texto: texto})
+}
+
+func textoDeNota(texto string) (string, error) {
 	texto = strings.TrimRight(texto, " \t\n")
-	if utf8.RuneCountInString(texto) > MaxNota {
-		return Nota{}, ErrInvalido{"a nota pode ter no máximo 4.000 caracteres"}
-	}
 	if !utf8.ValidString(texto) || strings.ContainsFunc(texto, func(r rune) bool { return (r < ' ' && r != '\n' && r != '\t') || r == 0x7f }) {
-		return Nota{}, ErrInvalido{"a nota tem caracteres de controle"}
+		return "", ErrInvalido{"a nota tem caracteres de controle"}
 	}
 	// A nota aparece no telão e vai para o texto da daily: nada que pareça
 	// senha ou chave é gravado (o mesmo filtro do histórico de mensagens).
 	if segredos.Parece(texto) {
-		return Nota{}, ErrInvalido{"a nota parece ter uma senha ou chave"}
+		return "", ErrInvalido{"a nota parece ter uma senha ou chave"}
 	}
-	n := Nota{TarefaID: tarefa, Tipo: tipo, Periodo: periodo, Texto: texto, AtualizadaEm: agora()}
-	err := b.emTransacao(ctx, func(tx *transacao) error {
+	return texto, nil
+}
+
+// GravarNota substitui ou complementa a nota. Complementar acrescenta o texto
+// ao fim, depois de uma linha em branco, e o resultado também respeita o
+// limite de MaxNota.
+func (b *Banco) GravarNota(ctx context.Context, g GravacaoNota) (Nota, error) {
+	if err := PeriodoNotaValido(g.Tipo, g.Periodo); err != nil {
+		return Nota{}, err
+	}
+	modo := g.Modo
+	if modo == "" {
+		modo = ModoSubstituir
+	}
+	if err := umDe("modo", modo, []string{ModoSubstituir, ModoComplementar}); err != nil {
+		return Nota{}, err
+	}
+	texto, err := textoDeNota(g.Texto)
+	if err != nil {
+		return Nota{}, err
+	}
+	if modo == ModoComplementar && strings.TrimSpace(texto) == "" {
+		return Nota{}, ErrInvalido{"o texto para complementar a nota está vazio"}
+	}
+	if utf8.RuneCountInString(texto) > MaxNota {
+		return Nota{}, ErrInvalido{"a nota pode ter no máximo 4.000 caracteres"}
+	}
+	n := Nota{TarefaID: g.Tarefa, Tipo: g.Tipo, Periodo: g.Periodo, AtualizadaEm: agora()}
+	err = b.emTransacao(ctx, func(tx *transacao) error {
 		var projeto int64
 		var titulo string
-		err := tx.QueryRowContext(ctx, `SELECT projeto_id, titulo FROM tarefas WHERE id = ?`, tarefa).Scan(&projeto, &titulo)
+		err := tx.QueryRowContext(ctx, `SELECT projeto_id, titulo FROM tarefas WHERE id = ?`, g.Tarefa).Scan(&projeto, &titulo)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNaoEncontrado
 		}
@@ -87,28 +136,59 @@ func (b *Banco) DefinirNota(ctx context.Context, tarefa int64, tipo, periodo, te
 		if err != nil {
 			return err
 		}
-		var antes string
-		err = tx.QueryRowContext(ctx, `SELECT texto FROM notas WHERE tarefa_id = ? AND tipo = ? AND periodo = ?`, tarefa, tipo, periodo).Scan(&antes)
+		var antes, versao string
+		err = tx.QueryRowContext(ctx, `SELECT texto, atualizada_em FROM notas WHERE tarefa_id = ? AND tipo = ? AND periodo = ?`, g.Tarefa, g.Tipo, g.Periodo).Scan(&antes, &versao)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if antes == texto {
+		if g.Versao != nil && *g.Versao != versao {
+			return ErrNotaMudou{Atual: Nota{TarefaID: g.Tarefa, Tipo: g.Tipo, Periodo: g.Periodo, Texto: antes, AtualizadaEm: versao}}
+		}
+		n.Texto = texto
+		if modo == ModoComplementar && antes != "" {
+			n.Texto = antes + "\n\n" + texto
+			if utf8.RuneCountInString(n.Texto) > MaxNota {
+				return ErrInvalido{"a nota passaria de 4.000 caracteres; resuma"}
+			}
+		}
+		if antes == n.Texto {
+			n.AtualizadaEm = versao
 			return nil // nada mudou: nenhum evento
 		}
-		if texto == "" {
-			_, err = tx.ExecContext(ctx, `DELETE FROM notas WHERE tarefa_id = ? AND tipo = ? AND periodo = ?`, tarefa, tipo, periodo)
+		if n.Texto == "" {
+			_, err = tx.ExecContext(ctx, `DELETE FROM notas WHERE tarefa_id = ? AND tipo = ? AND periodo = ?`, g.Tarefa, g.Tipo, g.Periodo)
+			n.AtualizadaEm = ""
 		} else {
 			_, err = tx.ExecContext(ctx, `INSERT INTO notas (tarefa_id, tipo, periodo, texto, atualizada_em) VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT (tarefa_id, tipo, periodo) DO UPDATE SET texto = excluded.texto, atualizada_em = excluded.atualizada_em`,
-				tarefa, tipo, periodo, texto, n.AtualizadaEm)
+				g.Tarefa, g.Tipo, g.Periodo, n.Texto, n.AtualizadaEm)
 		}
 		if err != nil {
 			return err
 		}
-		return registrar(ctx, tx, "nota.atualizada", Escopo{Perfil: perfil, Projeto: projeto, Tarefa: tarefa}, map[string]any{
-			"tarefa": tarefa, "titulo": titulo, "projeto_nome": nomeProjeto, "tipo": tipo, "periodo": periodo, "tamanho": utf8.RuneCountInString(texto),
-		})
+		conteudo := map[string]any{
+			"tarefa": g.Tarefa, "titulo": titulo, "projeto_nome": nomeProjeto, "tipo": g.Tipo, "periodo": g.Periodo, "tamanho": utf8.RuneCountInString(n.Texto),
+		}
+		escopo := Escopo{Perfil: perfil, Projeto: projeto, Tarefa: g.Tarefa}
+		if g.Agente != 0 {
+			escopo.Agente = g.Agente
+			conteudo["agente"], conteudo["modo"] = g.Agente, modo
+		}
+		return registrar(ctx, tx, "nota.atualizada", escopo, conteudo)
 	})
+	return n, err
+}
+
+// Nota lê uma nota; uma que não existe volta vazia, sem erro.
+func (b *Banco) Nota(ctx context.Context, tarefa int64, tipo, periodo string) (Nota, error) {
+	if err := PeriodoNotaValido(tipo, periodo); err != nil {
+		return Nota{}, err
+	}
+	n := Nota{TarefaID: tarefa, Tipo: tipo, Periodo: periodo}
+	err := b.db.QueryRowContext(ctx, `SELECT texto, atualizada_em FROM notas WHERE tarefa_id = ? AND tipo = ? AND periodo = ?`, tarefa, tipo, periodo).Scan(&n.Texto, &n.AtualizadaEm)
+	if errors.Is(err, sql.ErrNoRows) {
+		return n, nil
+	}
 	return n, err
 }
 

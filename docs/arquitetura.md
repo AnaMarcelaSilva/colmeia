@@ -26,7 +26,9 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | Canal | socket Unix + token | Liga tela e núcleo sem porta de rede |
 | Armazenamento | SQLite em modo WAL | Estado e eventos só acrescentados, encadeados por hash |
 | Eventos | WebSocket por perfil | Leva à tela, na hora, cada mudança e o estado dos agentes |
-| Extensões (planejado) | servidores MCP | Integrações (GitHub, Docker, banco) e o próprio núcleo para os agentes |
+| MCP dos agentes | `colmeia-nucleo mcp` (stdio) | O próprio núcleo como servidor MCP para os agentes do Claude Code que a Colmeia abre, restrito à tarefa de cada um |
+| Navegador | Chrome ou Chromium por `--remote-debugging-pipe` | Uma janela por tarefa, ao lado da Colmeia, para abrir e capturar o que o agente criou |
+| Extensões (planejado) | servidores MCP | Integrações (GitHub, Docker, banco) |
 
 ## Protocolo `/v1`
 
@@ -49,7 +51,18 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `POST /v1/perfis/{id}/anexos` | O mesmo que o das imagens, sem tarefa |
 | `GET` / `DELETE /v1/anexos/{id}` | A imagem (PNG imutável, `nosniff`; um vídeo responde 400) ou remover (o arquivo sai, o evento fica) |
 | `GET /v1/anexos/{id}/info` | `{tipo, formato, nome, bytes, largura, altura, caminho}`: a tela abre um vídeo no reprodutor do sistema pelo caminho, sempre montado pelo núcleo |
-| `PUT /v1/tarefas/{id}/notas` | Nota da tarefa numa daily (`{"tipo":"daily","periodo":"AAAA-MM-DD"}`) ou numa sprint (`"periodo":"AAAA-MM-DD..AAAA-MM-DD"`), até 4.000 caracteres; texto vazio apaga; a que parece ter senha ou chave é recusada (400) |
+| `PUT /v1/tarefas/{id}/notas` | Nota da tarefa numa daily (`{"tipo":"daily","periodo":"AAAA-MM-DD"}`) ou numa sprint (`"periodo":"AAAA-MM-DD..AAAA-MM-DD"`), até 4.000 caracteres; texto vazio apaga; a que parece ter senha ou chave é recusada (400). Com `versao` (o `atualizada_em` lido, `""` se não havia nota), responde 409 `{erro, texto, versao}` se a nota mudou desde então |
+| `GET /v1/tarefas/{id}/pedidos/destino` | Para quem um pedido ao agente iria agora: `{acao: "ativo"\|"reiniciar"\|"novo"\|"bloqueado", agente?, conversa?, outros?, motivo?}` |
+| `GET` / `POST /v1/tarefas/{id}/pedidos` | Pedidos da tarefa (`tipo=` e `periodo=` filtram); criar um (`{texto, tipo, periodo, cols?, rows?}`, até 2.000 caracteres, sem controle nem segredo): o núcleo escolhe o agente, inicia ou cria o Claude Code e põe na fila; 409 se o Claude Code está aberto na pasta fora da Colmeia |
+| `DELETE /v1/pedidos/{id}` | Cancela um pedido que ainda está na fila |
+| `GET /v1/perfis/{id}/pedidos` | Pedidos abertos de todas as tarefas do perfil |
+| `GET /v1/navegador` | `{instalado, nome}`: há Chrome ou Chromium para a Colmeia controlar |
+| `GET` / `POST` / `DELETE /v1/tarefas/{id}/navegador` | A janela da tarefa: `{aberto, descricao}`; abrir ou trazer para frente (`{url?, x, y, largura, altura}`, geometria em pixels da tela, 0 < lado ≤ 8192; se o endereço não abre, uma janela nova é fechada e a que já existia fica, sem vir para frente); fechar |
+| `POST /v1/tarefas/{id}/navegador/captura` | Captura a janela da tarefa e anexa (`origem=captura`, legenda "Navegador: endereço"); devolve `{id}` |
+| `PUT /v1/perfis/{id}/apresentando` | `{ativo, geometria?}`: a tela passou a mostrar (ou deixou de mostrar) algo que pode estar compartilhado, a apresentação, a Daily ou a Sprint; o navegador que o agente abre fica fora da tela enquanto isso. `geometria` (`{x, y, largura, altura}`) é onde a janela abre ao lado da Colmeia; menor que 360x300 é ignorada |
+| `GET /v1/tarefas/{id}/arquivos?caminho=` | Um nível da pasta da tarefa (só leitura): `{pasta, entradas: [{nome, pasta, link, ignorada, bytes, alterado, sensivel}], mais}`, pastas primeiro, até 2.000 |
+| `GET /v1/tarefas/{id}/arquivo?caminho=&mostrar=` | Pré-visualização: texto (até 256 KB, `cortado`), imagem (dimensões e formato), `binario` ou `sensivel` (o conteúdo só vem com `mostrar=1`); sempre com `caminho_absoluto` |
+| `GET /v1/tarefas/{id}/arquivo/imagem?caminho=` | A imagem (PNG, JPEG ou GIF) como PNG reduzido a 2048 px |
 | `GET` / `POST` / `DELETE /v1/agentes/{id}/mensagens` | Histórico do que você mandou ao agente (da mais nova à mais antiga, até 200), guardar uma mensagem (`{"texto"}`, responde `{"guardada": bool}`: não guarda o que parece senha ou chave) e apagar tudo |
 | `POST /v1/encerrar` | Desliga o núcleo (responde 202 antes); é o que `colmeia-nucleo --encerrar` chama |
 | `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
@@ -68,6 +81,17 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/agentes/{id}/terminal` | WebSocket do terminal do agente: binário é digitação e saída; texto é controle |
 | `POST /v1/demo/carga?modo=` | Só com `--demo`: cargas de teste nos terminais |
 
+Rotas dos agentes (`/v1/agente/*`): só aceitam o token de um agente, e o token da tela recebe 401 nelas (o token de um agente recebe 401 em todas as outras). Nenhuma leva id na URL: a tarefa sai do token.
+
+| Rota | Para quê |
+| --- | --- |
+| `GET /v1/agente/tarefa` | A tarefa (título, projeto, branch, pasta, coluna), a nota da daily de hoje, a última de sprint, os pedidos abertos e o navegador |
+| `GET` / `PUT /v1/agente/nota` | Ler (`tipo=`, `periodo=`) e gravar (`{texto, tipo?, periodo?, modo: "complementar"\|"substituir", pedido?}`); sem tipo e período, vale o do pedido aberto mais recente ou a daily de hoje. Complementar acrescenta depois de uma linha em branco; acima de 4.000 caracteres: 400 "resuma". Com `pedido`, a nota responde o pedido, mas ele só fecha com `concluir` (ou, se o agente esquecer, quando ele terminar a vez e voltar a esperar você) |
+| `POST /v1/agente/anexos` | `{caminho, legenda?}`: PNG ou JPEG de dentro da pasta da tarefa, aberto por `os.Root` |
+| `POST /v1/agente/navegador` | `{url}`: http, https ou `file://` de dentro da pasta (sem os arquivos sensíveis); abre sem tomar o foco |
+| `POST /v1/agente/navegador/captura` | `{anexar?, legenda?}`: o PNG reduzido a 1568 px (base64) e o id do anexo |
+| `POST /v1/agente/pedidos/{id}/concluir` | `{resumo?}`: só um pedido da tarefa do token; o resumo, se houver, complementa a nota |
+
 Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
 
 ### Eventos
@@ -85,8 +109,10 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `agente.iniciou` | `agente_id`, `tarefa_id`, `desde`, `desde_hora` |
 | `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação` ou `esperando resposta`), `desde`, `desde_hora` |
 | `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `hora`, `texto`) |
-| `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` |
-| `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento) |
+| `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` (e `agente_id`, se veio de um agente) |
+| `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |
+| `pedido.criado` / `pedido.entregue` / `pedido.respondido` / `pedido.cancelado` / `pedido.falhou` | `pedido_id`, `tarefa_id`, `agente_id` e `pedido` (o objeto, lido na hora; no histórico só fica o tamanho do texto) |
+| `navegador.aberto` / `navegador.fechado` / `navegador.captura` / `navegador.recusado` | `tarefa_id`, `agente_id` (0 é você), `descricao` (esquema, host e caminho, nunca a query) |
 
 Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). Para não perder nada: a tela abre o WebSocket, pede o `/quadro` (que traz o `seq` já incluído nele) e aplica só as mensagens com `seq` maior. Quem publica nunca espera: cada tela tem uma fila de 256 mensagens e, se ela encher, recebe um único `recarregar`. Tipos desconhecidos são ignorados pela tela.
 
@@ -115,6 +141,20 @@ O fim do processo vira `agente.terminou` com o motivo: `terminou` (código 0 ou 
 
 **Coluna automática.** Um agente de IA que começa numa tarefa do Backlog põe a tarefa em "Agente trabalhando" (um terminal comum não). Quando a Colmeia fecha um terminal, o estado do agente fica congelado até o fim ser gravado. Quando um agente passa a esperar você, a tarefa vai de "Agente trabalhando" para "Aguardando você"; quando ele volta a trabalhar (e ninguém mais da tarefa espera), ela volta, desde que a última mudança tenha sido do núcleo (`tarefas.coluna_auto`). Uma mudança sua zera a marca e o núcleo nunca a desfaz. Nada vai para Revisão ou Concluído sozinho.
 
+### Pedidos ao agente
+
+Pela daily, pela sprint ou pela apresentação, você pede algo a mais ao agente de uma tarefa. O núcleo escolhe quem recebe: um Claude Code ativo da tarefa (de preferência um que espera você), senão um parado (iniciado de novo, retomando a conversa), senão um novo, retomando a última conversa da pasta. O pedido fica na fila e entra no terminal por evento, quando o agente passa a `aguardando · esperando resposta` (ou já está assim na criação), nunca durante um `pede aprovação` e nunca com digitação sua nos últimos 5 s. Entra como colagem, com o número do pedido e a instrução de responder pelas ferramentas da Colmeia em até 5 linhas. Um pedido entregue que fica sem resposta continua `entregue` (a tela mostra "parou sem responder"); vira `falhou` só quando o agente termina ou é removido.
+
+### Ferramentas da Colmeia (MCP)
+
+Cada agente do Claude Code que a Colmeia abre ganha um token próprio (32 bytes aleatórios, guardado só em memória pelo sha256) e um `--mcp-config` com o servidor `colmeia`: o próprio `colmeia-nucleo mcp --socket … --token-arquivo …`, por stdio. O token fica num arquivo `0600` em `<canal>/agentes/` (tmpfs), nunca em argumento ou variável de ambiente, e é revogado quando o agente termina, é removido ou o núcleo encerra. A Colmeia passa também `--allowedTools mcp__colmeia`: tudo nelas já está confinado à tarefa. Os outros servidores MCP do usuário continuam valendo (sem `--strict-mcp-config`). Agentes que já rodavam antes desta versão ganham o MCP quando forem iniciados de novo.
+
+Ferramentas: `ler_tarefa`, `ler_nota`, `complementar_nota`, `escrever_nota`, `anexar_imagem`, `abrir_navegador`, `capturar_navegador` e `concluir_pedido`. Os argumentos são estritos (campo desconhecido é erro) e cada linha tem até 1 MB.
+
+### Navegador da tarefa
+
+Um Chrome ou Chromium por perfil (`COLMEIA_NAVEGADOR`, ou o primeiro de `chromium`, `chromium-browser`, `google-chrome-stable`, `google-chrome` no PATH), com a pasta de perfil `<dados>/navegador/<perfil>/` (0700), nunca a do usuário, e controle só por `--remote-debugging-pipe` (descritores 3 e 4, mensagens separadas por `\0`): nenhuma porta. O balão "Não é possível atualizar o Chrome" fica escondido nesse perfil (`--simulate-outdated-no-au` com uma data distante), porque cobria a página ao lado do agente. Cada tarefa tem a sua janela, posicionada ao lado da Colmeia (ou na metade direita do monitor); no Wayland o compositor pode ignorar a posição. Endereços aceitos: http, https e `file://` de dentro da pasta da tarefa, menos os arquivos sensíveis (os mesmos que a gaveta esconde: `.env*`, `*.pem`, `*.key`, `id_rsa*`…) e o `.git`. A conferência não vale só para o endereço aberto: todo `file://` que a página pede depois (redirecionamento, iframe, imagem, script) passa pela mesma regra pelo domínio `Fetch` do protocolo, e a captura confere o endereço atual da página antes de tirar o print; se a página saiu da pasta, a captura é recusada e vira `navegador.recusado` na linha do tempo. Enquanto a tela mostra algo que pode estar compartilhado (a apresentação, a Daily ou a Sprint), a janela que o agente abre fica fora da área visível (a captura continua funcionando) e vem para o lado quando você clica em "Navegador". Uma página aberta pode tentar instruir o agente (o mesmo risco do WebFetch); as ferramentas da Colmeia só agem dentro da tarefa.
+
 Um agente do Claude Code sempre tem um id de conversa: o de uma conversa retomada ou um novo, passado com `--session-id`. Ao iniciar de novo, a conversa que já existe é aberta com `--resume`. As conversas ficam onde o Claude Code guarda: `<configuração>/projects/<pasta com tudo que não é letra ou número trocado por "-">/<id>.jsonl`; a Colmeia lê só o fim de cada arquivo para achar o título.
 
 ## Dados
@@ -129,11 +169,13 @@ anexos  (id, perfil_id, tarefa_id, sha256, largura, altura, bytes,
          tipo, formato, nome)                          -- imagem ou vídeo; png, mp4, webm, mkv, mov
 mensagens (id, agente_id, texto, enviada_em)           -- histórico da caixa de mensagem, até 200 por agente
 notas   (tarefa_id, tipo, periodo, texto, atualizada_em)   -- daily ou sprint, por período
+pedidos (id, tarefa_id, agente_id, tipo, periodo, texto,
+         estado, motivo, criado_em, entregue_em, respondido_em)  -- fila, entregue, respondido, cancelado, falhou
 ```
 
 O hash cobre `anterior|momento|tipo|dados`. Os dados de cada evento começam com `"_escopo":{perfil, projeto, tarefa, agente}`, coberto pelo hash; as colunas derivadas repetem esse escopo para a linha do tempo de um perfil não ler o histórico inteiro, e a verificação confere que batem. Os eventos gravados antes delas foram ligados aos perfis uma única vez (`PRAGMA user_version = 2`), seguindo o próprio histórico: é a única exceção ao "só acréscimo", mexe só nas colunas derivadas e o que não dá para ligar fica sem perfil. As mudanças de tarefa guardam a tarefa inteira (com o título) e o nome do projeto: a linha do tempo não depende de a tarefa ainda existir.
 
-Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens e as notas ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
+Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens, as notas e os pedidos ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
 
 ## Regras de desempenho
 
@@ -148,7 +190,7 @@ Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); 
 
 ## Fases
 
-1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente (feito no Linux; falta o Windows).
-2. **Orquestração:** núcleo como servidor MCP para os agentes, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
+1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa (feito no Linux; falta o Windows).
+2. **Orquestração:** MCP para Codex, Gemini e OpenCode, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
 3. **Integrações:** servidores MCP de GitHub, Docker por branch e banco, tarefa a partir de link, tela de provedores.
 4. **Expansão:** servidores de terceiros, "entender projeto", busca e replay, custos, acesso remoto e celular.

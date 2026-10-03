@@ -19,8 +19,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, CornerRadius, FontId, Id, RichText, Sense, TextureHandle, TextureOptions, vec2};
 
 pub use comum::{
-    CacheImagens, Miniatura, data_da_tela, decodificar, duracao, em_segundo_plano, estado_do_slide, largura_numeros, numeros, pilula_do_slide, tamanho,
-    texto_em_linhas,
+    CacheImagens, MARGEM_ROLAGEM, Miniatura, data_da_tela, decodificar, duracao, em_segundo_plano, estado_do_slide, largura_numeros, numeros, pilula_do_slide,
+    sem_linhas_vazias, sombra_rolagem, tamanho, texto_cortado, texto_em_linhas,
 };
 
 use crate::api;
@@ -59,6 +59,23 @@ pub enum Acao {
         periodo: Option<api::PeriodoSprint>,
         tarefa: Option<i64>,
     },
+    /// Abrir (ou fechar) a caixa "Pedir ao agente" da tarefa, presa ao botão
+    /// do cartão. A resposta vai para a nota do deck (tipo e período).
+    PedirAoAgente {
+        tarefa: i64,
+        tipo: String,
+        periodo: String,
+        botao: egui::Rect,
+    },
+}
+
+/// O clique num cartão vira o pedido à tela principal.
+fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option<api::PeriodoSprint>) -> Acao {
+    match clique {
+        comum::CliqueCartao::Abrir(tarefa) => Acao::Apresentar { deck: Box::new(deck.clone()), periodo, tarefa: Some(tarefa) },
+        comum::CliqueCartao::Pedir(tarefa, botao) => Acao::PedirAoAgente { tarefa, tipo: deck.tipo.clone(), periodo: deck.chave_nota.clone(), botao },
+        comum::CliqueCartao::AbrirTarefa(tarefa) => Acao::AbrirTarefa { tarefa, agente: None },
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -151,6 +168,10 @@ pub struct Registro {
 
     /// Ao voltar da apresentação, a página rola até o cartão do último slide visto.
     pub rolar_ate: Option<i64>,
+    /// O pedido ao agente de cada tarefa (a tela principal põe a cada quadro)
+    /// e a tarefa com a caixa "Pedir ao agente" aberta.
+    pub pedidos: crate::pedido::Pedidos,
+    pub caixa_aberta: Option<i64>,
 }
 
 impl Default for Registro {
@@ -189,6 +210,8 @@ impl Default for Registro {
             galeria_aberta: false,
             salvando: false,
             rolar_ate: None,
+            pedidos: Default::default(),
+            caixa_aberta: None,
         }
     }
 }

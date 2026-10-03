@@ -260,6 +260,10 @@ fn visuais(p: &Paleta, mut v: Visuals) -> Visuals {
     v.selection.bg_fill = p.destaque.gamma_multiply(0.35);
     v.selection.stroke = Stroke::new(1.0, p.destaque);
     v.hyperlink_color = p.destaque;
+    // Cursor de texto fixo: o piscar redesenha a janela duas vezes por
+    // segundo enquanto um campo tem o foco (a caixa de mensagem tem quase
+    // sempre), e a tela parada deixa de ficar parada.
+    v.text_cursor.blink = false;
     let w = &mut v.widgets;
     for (estado, fundo, borda) in [
         (&mut w.inactive, p.superficie_alta, p.borda),
@@ -710,6 +714,91 @@ fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
     }
 }
 
+/// ↗ desenhado em 10×10: a diagonal e o canto (a fonte não garante o símbolo).
+pub fn externo(pintor: &egui::Painter, centro: Pos2, cor: Color32) {
+    let traco = Stroke::new(1.5, cor);
+    pintor.line_segment([centro + vec2(-3.5, 3.5), centro + vec2(3.5, -3.5)], traco);
+    pintor.add(Shape::line(vec![centro + vec2(-1.0, -3.5), centro + vec2(3.5, -3.5), centro + vec2(3.5, 1.0)], traco));
+}
+
+/// Fundo da linha escolhida (árvore de arquivos, item com o cursor do
+/// teclado): opaco e diferente do `realce` do mouse. Texto secundário sobre
+/// ele vai em `texto` (o `suave` não passa de 4,5).
+/// Nos temas claros a mistura é maior (26%): com 10%, a linha escolhida ficava mais
+/// clara que o `realce` do mouse e parecia sumir quando o mouse passava por
+/// outra linha. Quem desenha soma uma barrinha `destaque` na borda esquerda.
+pub fn fundo_escolhido() -> Color32 {
+    escolhido_em(cores(), claro())
+}
+
+fn escolhido_em(p: &Paleta, eh_claro: bool) -> Color32 {
+    misturar(p.superficie_alta, p.destaque, if eh_claro { 0.26 } else { 0.16 })
+}
+
+/// Moldura das peças que flutuam presas a um botão (caixa de pedido,
+/// endereço do navegador, gaveta de arquivos): a do aviso, como função.
+///
+/// Nos temas claros, o contorno é mais escuro e a sombra mais forte: a peça
+/// abre sobre capturas que podem ter a mesma cor dela (o creme do Leitura).
+pub fn moldura_flutuante() -> egui::Frame {
+    let p = cores();
+    let (contorno, sombra) = if claro() {
+        (misturar(p.borda, p.texto, 0.3), egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(64) })
+    } else {
+        (p.borda, sombra(6, 18))
+    };
+    egui::Frame::new()
+        .fill(p.superficie_alta)
+        .stroke(Stroke::new(1.0, contorno))
+        .corner_radius(CornerRadius::same(RAIO_SUPERFICIE))
+        .inner_margin(egui::Margin::same(16))
+        .shadow(sombra)
+}
+
+/// Largura do botão dividido. O lugar do ponto de estado é sempre reservado:
+/// o botão não muda de tamanho (nem de lugar) quando o estado muda.
+pub fn largura_botao_dividido(pintor: &egui::Painter, texto: &str) -> f32 {
+    let w = pintor.layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), Color32::WHITE).size().x;
+    14.0 + 14.0 + w + 12.0 + 1.0 + 28.0
+}
+
+/// Botão com duas partes: a ação principal à esquerda (com um ponto de
+/// estado: cheio na cor dada, ou um anel `suave` quando não há estado) e o
+/// menu (▾) à direita. Devolve as duas respostas.
+pub fn botao_dividido(ui: &mut egui::Ui, texto: &str, ponto: Option<Color32>) -> (Response, Response) {
+    let p = cores();
+    let largura = largura_botao_dividido(ui.painter(), texto);
+    let (rect, _) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::hover());
+    let esquerda = Rect::from_min_max(rect.min, pos2(rect.right() - 29.0, rect.bottom()));
+    let direita = Rect::from_min_max(pos2(rect.right() - 28.0, rect.top()), rect.max);
+    let r_esq = ui.interact(esquerda, ui.id().with(("dividido", texto, 0)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let r_dir = ui.interact(direita, ui.id().with(("dividido", texto, 1)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let pintor = ui.painter();
+    pintor.rect(rect, CornerRadius::same(16), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+    // O realce cobre só a metade sob o mouse.
+    if r_esq.hovered() {
+        pintor.rect_filled(esquerda.shrink(1.0), CornerRadius { nw: 15, sw: 15, ne: 0, se: 0 }, p.realce);
+    }
+    if r_dir.hovered() {
+        pintor.rect_filled(direita.shrink(1.0), CornerRadius { nw: 0, sw: 0, ne: 15, se: 15 }, p.realce);
+    }
+    let x = rect.left() + 14.0;
+    match ponto {
+        Some(cor) => {
+            pintor.circle_filled(pos2(x + 3.5, rect.center().y), 3.5, cor);
+        }
+        None => {
+            pintor.circle_stroke(pos2(x + 3.5, rect.center().y), 3.0, Stroke::new(1.0, p.suave));
+        }
+    }
+    let x = x + 14.0;
+    let galeria = pintor.layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.texto);
+    pintor.galley(pos2(x, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    pintor.line_segment([pos2(direita.left() - 0.5, rect.top() + 8.0), pos2(direita.left() - 0.5, rect.bottom() - 8.0)], Stroke::new(1.0, p.borda));
+    seta(pintor, pos2(direita.center().x, rect.center().y + 0.5), if r_dir.hovered() { p.texto } else { p.suave });
+    (r_esq, r_dir)
+}
+
 /// Triângulo de "tocar", um pouco à direita do centro (o centro visual dele).
 pub fn play(pintor: &egui::Painter, centro: Pos2, tamanho: f32, cor: Color32) {
     let c = centro + vec2(tamanho * 0.15, 0.0);
@@ -949,11 +1038,37 @@ pub fn cortar(pintor: &egui::Painter, texto: &str, formato: egui::TextFormat, la
             coube.push('\n');
         }
     }
-    let limpo = coube.trim_end_matches('…').trim_end_matches(|c: char| c.is_whitespace() || ",;:·-–".contains(c));
+    // Tudo junto: o "…" do egui pode vir antes de uma quebra de linha, e o
+    // texto antes dele pode terminar em ponto (saía "texto.……").
+    let limpo = coube.trim_end_matches(|c: char| c.is_whitespace() || "…,;:·-–.".contains(c));
     let mut galeria = montar(format!("{limpo}…"));
     // O texto refeito é do mesmo tamanho ou menor: cabe; o "elided" segue valendo.
     Arc::make_mut(&mut galeria).elided = true;
     galeria
+}
+
+/// Texto em até `linhas` linhas mostrando o FIM: quando não cabe, o começo
+/// sai e entra um "…" na frente. Para a nota que o agente complementa (a
+/// resposta vem no fim). Se o fim ainda não couber, corta como `cortar`.
+pub fn cortar_pelo_fim(pintor: &egui::Painter, texto: &str, formato: egui::TextFormat, largura: f32, linhas: usize) -> Arc<egui::Galley> {
+    let linhas = linhas.max(1);
+    let mut trabalho = egui::text::LayoutJob::single_section(texto.to_owned(), formato.clone());
+    trabalho.wrap = egui::text::TextWrapping { max_width: largura.max(10.0), ..Default::default() };
+    let inteiro = pintor.layout_job(trabalho);
+    let total = inteiro.rows.len();
+    if total <= linhas {
+        return cortar(pintor, texto, formato, largura, linhas, false);
+    }
+    // Pula as primeiras linhas; o "…" pode empurrar uma linha a mais: pula mais uma.
+    for pular in (total - linhas)..total {
+        let caracteres: usize = inteiro.rows[..pular].iter().map(|r| r.char_count_including_newline().0).sum();
+        let resto: String = texto.chars().skip(caracteres).collect();
+        let galeria = cortar(pintor, &format!("…{}", resto.trim_start()), formato.clone(), largura, linhas, false);
+        if !galeria.elided {
+            return galeria;
+        }
+    }
+    cortar(pintor, texto, formato, largura, linhas, false)
 }
 
 /// Uma linha em duas partes: o começo pode ser cortado com "…", o fim fica
@@ -1021,14 +1136,24 @@ pub enum TipoAviso {
 
 /// Desenha o aviso do rodapé ancorado em `ancora` (centro de baixo) e diz se a
 /// ação dele foi clicada.
-pub fn aviso(ctx: &egui::Context, ancora: Pos2, tipo: TipoAviso, texto: &str, acao: Option<&str>) -> bool {
+/// O que a pessoa fez no aviso do rodapé.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CliqueAviso {
+    Nada,
+    Acao,
+    Fechar,
+}
+
+/// Aviso do rodapé. `fechavel` põe um × no fim (os avisos que ficam até a
+/// pessoa ver).
+pub fn aviso(ctx: &egui::Context, ancora: Pos2, tipo: TipoAviso, texto: &str, acao: Option<&str>, fechavel: bool) -> CliqueAviso {
     let p = cores();
     let (borda, ponto) = match tipo {
         TipoAviso::Neutro => (Stroke::new(1.0, p.borda), None),
         TipoAviso::Alerta => (Stroke::new(1.0, p.alerta.gamma_multiply(0.6)), Some(p.alerta)),
         TipoAviso::Erro => (Stroke::new(1.0, p.erro), Some(p.erro)),
     };
-    let mut clicou = false;
+    let mut clicou = CliqueAviso::Nada;
     egui::Area::new(egui::Id::new("aviso-rodape")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
         egui::Frame::new()
             .fill(p.superficie_alta)
@@ -1050,7 +1175,15 @@ pub fn aviso(ctx: &egui::Context, ancora: Pos2, tipo: TipoAviso, texto: &str, ac
                     ui.label(RichText::new(texto).color(p.texto).size(13.5));
                     if let Some(a) = acao {
                         ui.add_space(12.0);
-                        clicou = botao_secundario(ui, a).clicked();
+                        if botao_secundario(ui, a).clicked() {
+                            clicou = CliqueAviso::Acao;
+                        }
+                    }
+                    if fechavel {
+                        ui.add_space(4.0);
+                        if botao_icone(ui, Icone::Fechar, 24.0).on_hover_text("Fechar o aviso").clicked() {
+                            clicou = CliqueAviso::Fechar;
+                        }
                     }
                 });
             });
@@ -1223,6 +1356,45 @@ mod testes {
     }
 
     #[test]
+    fn corte_de_linha_que_termina_em_ponto_tem_um_so_reticencias() {
+        let ctx = egui::Context::default();
+        let mut textos = Vec::new();
+        let mut saida = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let pintor = ui.painter().clone();
+            let formato = egui::TextFormat::simple(FontId::proportional(13.0), Color32::WHITE);
+            for texto in ["Primeira linha da nota.\nSegunda linha.\nTerceira.", "Uma frase que termina em ponto. E continua por mais um bom pedaço de texto"] {
+                let g = cortar(&pintor, texto, formato.clone(), 200.0, 1, false);
+                textos.push(g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect::<String>());
+            }
+        });
+        saida.textures_delta.clear();
+        for fim in textos {
+            assert!(fim.ends_with('…') && !fim.ends_with(".…") && !fim.ends_with("……"), "{fim:?}");
+        }
+    }
+
+    #[test]
+    fn corte_pelo_fim_mostra_o_que_o_agente_acrescentou() {
+        let ctx = egui::Context::default();
+        let (mut curto, mut longo) = (String::new(), String::new());
+        let mut linhas = 0;
+        let mut saida = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let pintor = ui.painter().clone();
+            let formato = egui::TextFormat::simple(FontId::proportional(13.0), Color32::WHITE);
+            let texto = |g: &egui::Galley| g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect::<String>();
+            curto = texto(&cortar_pelo_fim(&pintor, "Só uma linha", formato.clone(), 400.0, 2));
+            let nota = "Primeiro parágrafo.\nSegundo parágrafo.\nTerceiro parágrafo.\nQuarto.\nCobertura de testes: 87%";
+            let g = cortar_pelo_fim(&pintor, nota, formato, 400.0, 2);
+            linhas = g.rows.len();
+            longo = texto(&g);
+        });
+        saida.textures_delta.clear();
+        assert_eq!(curto, "Só uma linha");
+        assert_eq!(linhas, 2);
+        assert!(longo.starts_with('…') && longo.ends_with("Cobertura de testes: 87%"), "{longo:?}");
+    }
+
+    #[test]
     fn faixas_tingidas_sao_opacas_e_legiveis() {
         // A faixa "Núcleo desconectado" (alerta) e a de núcleo antigo (erro):
         // texto do tema sobre o fundo tingido, pelo menos 4,5:1.
@@ -1241,10 +1413,30 @@ mod testes {
         // A pílula de estado põe a palavra em `texto` sobre o fundo tingido
         // da cor do estado: pelo menos 4,5:1 com destaque e ok também.
         for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
-            for (cor, c) in [("destaque", p.destaque), ("ok", p.ok), ("suave", p.suave)] {
+            for (cor, c) in [("destaque", p.destaque), ("ok", p.ok), ("suave", p.suave), ("alerta", p.alerta), ("erro", p.erro)] {
                 let r = contraste(p.texto, fundo_tingido(p, c, eh_claro));
                 assert!(r >= 4.5, "texto na pílula de {cor} no tema {nome}: {r:.2}");
             }
+        }
+    }
+
+    #[test]
+    fn linha_escolhida_e_calha_do_terminal_sao_legiveis() {
+        // A linha escolhida da árvore leva `texto`; os números de linha da
+        // pré-visualização vão em `suave` sobre o fundo do terminal.
+        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+            let escolhido = escolhido_em(p, eh_claro);
+            let r = contraste(p.texto, escolhido);
+            assert!(r >= 4.5, "texto na linha escolhida no tema {nome}: {r:.2}");
+            // A escolhida se afasta do fundo pelo menos tanto quanto o realce
+            // do mouse: com o mouse em outra linha, ela não some.
+            let distancia = |c: Color32| {
+                let (a, b) = (c, p.superficie_alta);
+                (a.r() as f32 - b.r() as f32).abs() + (a.g() as f32 - b.g() as f32).abs() + (a.b() as f32 - b.b() as f32).abs()
+            };
+            assert!(distancia(escolhido) >= distancia(p.realce), "linha escolhida mais fraca que o realce no tema {nome}");
+            let r = contraste(p.suave, p.terminal_fundo);
+            assert!(r >= 4.5, "suave sobre o terminal no tema {nome}: {r:.2}");
         }
     }
 
@@ -1256,6 +1448,8 @@ mod testes {
         assert_eq!(escuro.text_styles, claro.text_styles);
         assert_eq!(escuro.spacing.item_spacing, claro.spacing.item_spacing);
         assert_eq!(escuro.spacing.interact_size, claro.spacing.interact_size);
+        // Sem piscar: um campo com foco não redesenha a tela parada.
+        assert!(!escuro.visuals.text_cursor.blink && !claro.visuals.text_cursor.blink);
     }
 
     #[test]

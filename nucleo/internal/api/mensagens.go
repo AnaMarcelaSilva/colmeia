@@ -1,6 +1,12 @@
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
+)
 
 // Histórico de mensagens de cada agente (seta para cima na caixa de
 // mensagem) e notas da daily e da sprint.
@@ -71,16 +77,28 @@ func (s *Servidor) definirNota(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	// versao (opcional): o atualizada_em da nota que a tela leu ("" se não
+	// havia nota). Se ela mudou desde então (o agente complementou), nada é
+	// gravado: a resposta é 409 com o texto e a versão atuais, para a tela
+	// juntar as duas.
 	var pedido struct {
-		Tipo    string `json:"tipo"`
-		Periodo string `json:"periodo"`
-		Texto   string `json:"texto"`
+		Tipo    string  `json:"tipo"`
+		Periodo string  `json:"periodo"`
+		Texto   string  `json:"texto"`
+		Versao  *string `json:"versao"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
 		return
 	}
-	nota, err := s.Banco.DefinirNota(r.Context(), id, pedido.Tipo, pedido.Periodo, pedido.Texto)
+	nota, err := s.Banco.GravarNota(r.Context(), dados.GravacaoNota{Tarefa: id, Tipo: pedido.Tipo, Periodo: pedido.Periodo, Texto: pedido.Texto, Versao: pedido.Versao})
+	var mudou dados.ErrNotaMudou
+	if errors.As(err, &mudou) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"erro": mudou.Error(), "texto": mudou.Atual.Texto, "versao": mudou.Atual.AtualizadaEm})
+		return
+	}
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -92,4 +110,5 @@ func (s *Servidor) definirNota(w http.ResponseWriter, r *http.Request) {
 type notaDados struct {
 	Tipo    string `json:"tipo"`
 	Periodo string `json:"periodo"`
+	Modo    string `json:"modo"`
 }

@@ -4,7 +4,7 @@ Um app desktop para coordenar vários agentes de IA de código (Claude Code, Cod
 
 ![A abelha-robô da Colmeia nos cinco estados: dormindo, trabalhando, aguardando você, bugado e comemorando](docs/imagens/abelha.gif)
 
-> **Estado atual (0.2.0):** perfis, contas de IA, workspaces, projetos (repositórios git ou pastas de trabalho sem git), tarefas e agentes de verdade. Cada tarefa abre o Claude Code, o Codex, outra ferramenta ou um terminal comum na pasta dela (ou numa cópia isolada do repositório), e retoma conversas do Claude Code começadas em outro lugar. O quadro se atualiza sozinho quando um agente trabalha, espera você ou para; a linha do tempo, a daily e a sprint mostram o trabalho por tarefa, e o modo apresentação passa a daily inteira em tela cheia, com notas, fotos e vídeos. Roda no Linux; o Windows ainda não (veja [Plataformas](#plataformas)).
+> **Estado atual (0.2.0):** perfis, contas de IA, workspaces, projetos (repositórios git ou pastas de trabalho sem git), tarefas e agentes de verdade. Cada tarefa abre o Claude Code, o Codex, outra ferramenta ou um terminal comum na pasta dela (ou numa cópia isolada do repositório), e retoma conversas do Claude Code começadas em outro lugar. O quadro se atualiza sozinho quando um agente trabalha, espera você ou para; a linha do tempo, a daily e a sprint mostram o trabalho por tarefa, e o modo apresentação passa a daily inteira em tela cheia, com notas, fotos e vídeos. Pela daily dá para pedir algo a mais ao agente de uma tarefa, que responde na nota e anexa prints do navegador da tarefa, e o painel da tarefa mostra os arquivos da pasta. Roda no Linux; o Windows ainda não (veja [Plataformas](#plataformas)).
 
 ## Por que existe
 
@@ -128,6 +128,19 @@ As páginas **Quadro · Linha do tempo · Daily · Sprint** ficam na barra de ci
 
 ![A página da daily, com os números do período e os cartões das tarefas](docs/imagens/daily.png)
 
+## Pedir ao agente
+
+Na Daily, na Sprint (botão "Pedir ao agente" no cartão ou botão direito) e no slide (P), você pede algo a mais ao agente de uma tarefa sem sair dali: "traga o total de testes gerados e complemente a nota", "capture prints das telas finalizadas e anexe à nota".
+
+- **Para quem vai.** A caixa diz antes: o Claude Code ativo da tarefa, um parado (que volta na mesma conversa) ou um novo, retomando a última conversa da pasta. O pedido espera o agente terminar a vez e nunca entra no meio de uma aprovação ou do que você está digitando.
+- **A resposta volta para a nota** da daily ou da sprint e as capturas viram anexos da tarefa. A pílula do cartão e a faixa do slide mostram o estado (na fila, com o agente, respondido, parou sem responder), e "O agente respondeu · Ver" avisa quando terminou.
+- **Ferramentas da Colmeia (MCP).** Todo Claude Code que a Colmeia abre recebe o próprio núcleo como servidor MCP (`colmeia-nucleo mcp`), com um token que só vale para a tarefa dele: ler a tarefa e a nota, complementar ou reescrever a nota, anexar uma imagem da pasta, abrir e capturar o navegador da tarefa e concluir o pedido. Tudo aparece na linha do tempo. Um agente que já rodava antes desta versão ganha as ferramentas quando for iniciado de novo; Codex, Gemini e OpenCode ainda não.
+
+## Navegador e arquivos da tarefa
+
+- **Navegador** (no topo do painel da tarefa) abre um Chrome ou Chromium da Colmeia ao lado da janela, com perfil próprio (nunca o seu) e controle só por pipe, sem porta de rede. "Navegador ▾" tem "Ir para endereço…" (`localhost:5173`, `https://…` ou um arquivo da pasta), "Capturar navegador" (Ctrl+Shift+B, anexa à tarefa) e "Fechar navegador". Só abre `http`, `https` e arquivos de dentro da pasta da tarefa, menos `.env` e chaves. Durante a apresentação, a Daily e a Sprint, a janela que o agente abre fica fora da tela, para não aparecer no compartilhamento. Sem Chrome nem Chromium instalado, a Colmeia avisa; `COLMEIA_NAVEGADOR` aponta outro executável.
+- **Arquivos** (Ctrl+Shift+E) abre uma gaveta por cima do terminal com a árvore da pasta, só leitura e um nível por vez (`.git`, `node_modules` e `target` ficam fechados), e a pré-visualização de texto e imagem. Dali dá para abrir no editor ou no sistema e citar o arquivo na mensagem ao agente. `.env`, chaves e certificados pedem confirmação antes de aparecer.
+
 ## Atalhos
 
 A Colmeia reserva **Ctrl+Shift+letra** para ela: esses atalhos não chegam ao programa do terminal (antes, Ctrl+Shift+L chegava como Ctrl+L).
@@ -140,6 +153,9 @@ A Colmeia reserva **Ctrl+Shift+letra** para ela: esses atalhos não chegam ao pr
 | F5 / Shift+F5 | Apresenta a daily (ou a sprint, na página da sprint) / retoma do último slide visto |
 | ↑ / ↓ na caixa de mensagem | Mensagens anteriores ao agente em foco |
 | Ctrl+Shift+S | Captura o terminal em foco |
+| Ctrl+Shift+B | Captura o navegador da tarefa |
+| Ctrl+Shift+E | Arquivos da tarefa |
+| P (no slide) | Pedir ao agente da tarefa |
 | Ctrl+Esc | Volta do painel da tarefa ao quadro |
 
 Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com o histórico de mudanças encadeado por hash.
@@ -153,6 +169,7 @@ Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com
 | `COLMEIA_NUCLEO` | tela | Caminho do `colmeia-nucleo` a iniciar, se ele não estiver ao lado da tela nem no PATH |
 | `COLMEIA_DEMO=1` | tela | Inicia o núcleo em modo demonstração |
 | `COLMEIA_EDITOR` | tela | Comando do editor para "Abrir no…" |
+| `COLMEIA_NAVEGADOR` | núcleo | Chrome ou Chromium do navegador da tarefa (caminho ou nome no PATH); padrão: o primeiro que achar |
 | `COLMEIA_TEMA` | tela | `escuro`, `claro` ou `leitura`, só antes de entrar num perfil |
 | `COLMEIA_SEM_ABELHA=1` | tela | Desliga a abelha |
 | `COLMEIA_TAMANHO` | tela | Tamanho inicial da janela, como `1280x720` (para conferir telas menores) |
@@ -175,18 +192,19 @@ Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com
 - **Eventos por perfil.** Um WebSocket leva à tela, na hora, cada mudança gravada e o estado dos agentes; a tela parada não faz nenhum pedido ([decisão 0004](docs/decisoes/0004-eventos-por-websocket.md)).
 - **Só o terminal em foco é tempo real.** Cada conexão pede o seu ritmo (16 ms, 250 ms, 1 s), o que corta o processador de 3 a 5 vezes.
 - **Controle de fluxo.** A tela confirma o que desenhou; se ficar para trás, o núcleo para de ler o terminal e o programa que escreve espera.
+- **O núcleo também é o servidor MCP dos agentes**, por stdio, falando com ele pelo mesmo socket com um token por agente; o navegador da tarefa é controlado por pipe ([decisão 0007](docs/decisoes/0007-nucleo-mcp-e-navegador-por-pipe.md)).
 
 Mais detalhes em [docs/arquitetura.md](docs/arquitetura.md) e nas [decisões registradas](docs/decisoes/).
 
 ## Segurança
 
-O núcleo **não abre nenhuma porta de rede**. Ele escuta num socket Unix dentro de um diretório só do usuário, e toda conexão precisa de um token que é gerado a cada início. As cargas de teste, que escrevem comandos nos terminais, só existem com `--demo`. O modelo completo está em [SECURITY.md](SECURITY.md).
+O núcleo **não abre nenhuma porta de rede**. Ele escuta num socket Unix dentro de um diretório só do usuário, e toda conexão precisa de um token que é gerado a cada início. Cada agente tem um token próprio, que só vale para a tarefa dele, e o navegador da tarefa é controlado por pipe, nunca por porta de depuração. As cargas de teste, que escrevem comandos nos terminais, só existem com `--demo`. O modelo completo está em [SECURITY.md](SECURITY.md).
 
 ## Estrutura
 
 | Pasta | O que tem |
 | --- | --- |
-| `nucleo/` | Núcleo em Go: canal local, API `/v1`, dados, terminais e agentes, cópias isoladas, conversas do Claude Code |
+| `nucleo/` | Núcleo em Go: canal local, API `/v1`, dados, terminais e agentes, cópias isoladas, conversas do Claude Code, servidor MCP dos agentes e navegador da tarefa |
 | `app/` | Tela em Rust + egui, com as fontes Inter e JetBrains Mono embutidas (licença OFL) |
 | `mascote/` | A abelha-robô, como biblioteca, e a vitrine em `examples/` |
 | `docs/` | Arquitetura e decisões |

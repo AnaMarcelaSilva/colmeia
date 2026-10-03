@@ -107,3 +107,37 @@ func TestAmbienteLimpoTiraSoAsVariaveisDeSessao(t *testing.T) {
 		t.Errorf("ambiente limpo: %v", limpo)
 	}
 }
+
+func TestColagem(t *testing.T) {
+	if string(Colagem("git status", true)) != "git status" {
+		t.Error("uma linha não leva marca de colagem")
+	}
+	if string(Colagem("um\ndois", true)) != "\x1b[200~um\ndois\x1b[201~" {
+		t.Error("várias linhas vão entre as marcas de colagem")
+	}
+	// Sem o modo de colagem, as marcas apareceriam cruas: as linhas vão juntas.
+	if got := string(Colagem("[Pedido da daily]\r\nTraga o total\n\nQuando terminar, responda.", false)); got != "[Pedido da daily] Traga o total Quando terminar, responda." {
+		t.Errorf("sem modo de colagem: %q", got)
+	}
+}
+
+func TestModoDeColagemPelaSaida(t *testing.T) {
+	var n atomic.Int64
+	s := NovaSessao(1, nil, &n)
+	if s.ColagemLigada() {
+		t.Fatal("começa desligado")
+	}
+	s.guardar([]byte("ola\x1b[?20"))
+	s.guardar([]byte("04hmais"))
+	if !s.ColagemLigada() {
+		t.Error("a sequência partida entre duas leituras não ligou")
+	}
+	s.guardar([]byte("x\x1b[?2004ly\x1b[?2004h"))
+	if !s.ColagemLigada() {
+		t.Error("vale a última sequência")
+	}
+	s.guardar([]byte("\x1b[?2004l"))
+	if s.ColagemLigada() {
+		t.Error("não desligou")
+	}
+}

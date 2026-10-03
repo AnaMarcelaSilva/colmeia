@@ -188,7 +188,7 @@ func Abrir(dir string) (*Banco, error) {
 	// Uma conexão só: o SQLite serializa as escritas de qualquer forma, e assim
 	// o encadeamento dos eventos nunca disputa com outra transação.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(esquema); err != nil {
+	if _, err := db.Exec(esquema + esquemaPedidos); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("aplicando o esquema: %w", err)
 	}

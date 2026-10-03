@@ -21,12 +21,18 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/api"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/mcp"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
 const versao = "0.2.0"
 
 func main() {
+	// "colmeia-nucleo mcp": o servidor MCP que o Claude Code de cada agente roda.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		servirMCP(os.Args[2:])
+		return
+	}
 	quantidade := flag.Int("terminais", 10, "quantidade de terminais de teste no modo demonstração")
 	modoDemo := flag.Bool("demo", false, "modo demonstração: terminais de teste e cargas que escrevem comandos neles")
 	encerrar := flag.Bool("encerrar", false, "encerra o núcleo que está rodando (e os agentes dele) e sai")
@@ -94,10 +100,18 @@ func main() {
 
 	agentes := terminal.NovoGerente()
 	parar := make(chan os.Signal, 1)
+	dirCanal, _ := canal.Diretorio()
+	api.LimparAgentesAntigos(dirCanal)
+	executavel, err := os.Executable()
+	if err != nil {
+		log.Printf("sem o caminho do próprio núcleo; os agentes ficam sem as ferramentas da Colmeia: %v", err)
+	}
+	fichas := canal.NovasFichas()
 	servidor := &api.Servidor{Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados,
-		AvisoHistorico: avisoHistorico, AoEncerrar: func() { parar <- syscall.SIGTERM }}
+		AvisoHistorico: avisoHistorico, AoEncerrar: func() { parar <- syscall.SIGTERM },
+		Fichas: fichas, DirCanal: dirCanal, Executavel: executavel}
 	servidorHTTP := &http.Server{
-		Handler:           canal.ExigirToken(token, servidor.Rotas()),
+		Handler:           canal.Autenticar(token, fichas, servidor.Rotas()),
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
@@ -117,9 +131,32 @@ func main() {
 	// Fechar o terminal avisa cada agente, que tem uns segundos para salvar a
 	// conversa; o fim de cada um é gravado antes de o banco fechar.
 	agentes.FecharTodos()
+	servidor.Navegadores.FecharTodos()
 	servidor.Encerrar()
 	for _, s := range sessoes {
 		s.Fechar()
+	}
+}
+
+// servirMCP atende o Claude Code de um agente pelo stdin e stdout. O token
+// do agente vem de um arquivo 0600 (nunca de argumento ou variável de
+// ambiente), e o log vai só para o stderr: o stdout é do protocolo.
+func servirMCP(args []string) {
+	log.SetOutput(os.Stderr)
+	opcoes := flag.NewFlagSet("mcp", flag.ExitOnError)
+	socket := opcoes.String("socket", "", "socket do núcleo")
+	arquivoToken := opcoes.String("token-arquivo", "", "arquivo com o token do agente")
+	opcoes.Parse(args)
+	if *socket == "" || *arquivoToken == "" {
+		log.Fatal("uso: colmeia-nucleo mcp --socket <nucleo.sock> --token-arquivo <arquivo>")
+	}
+	token, err := os.ReadFile(*arquivoToken)
+	if err != nil {
+		log.Fatalf("lendo o token do agente: %v", err)
+	}
+	s := &mcp.Servidor{Nucleo: mcp.NovoClienteSocket(*socket, strings.TrimSpace(string(token))), Versao: versao}
+	if err := s.Servir(context.Background(), os.Stdin, os.Stdout); err != nil {
+		log.Fatal(err)
 	}
 }
 

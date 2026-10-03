@@ -99,3 +99,62 @@ func TestExigirToken(t *testing.T) {
 		})
 	}
 }
+
+func TestTokensDaTelaEDosAgentesTemRotasSeparadas(t *testing.T) {
+	fichas := NovasFichas()
+	var quem Quem
+	protegido := Autenticar("tela", fichas, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		quem, _ = QuemPediu(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	doAgente, err := fichas.Emitir(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pedir := func(caminho, token string) int {
+		r := httptest.NewRequest("GET", "http://c"+caminho, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		protegido.ServeHTTP(w, r)
+		return w.Code
+	}
+	casos := []struct {
+		caminho, token string
+		esperado       int
+		agente         int64
+	}{
+		{"/v1/tarefas/1/notas", "tela", http.StatusOK, 0},
+		{"/v1/agentes/7/terminal", "tela", http.StatusOK, 0},
+		{"/v1/agente/tarefa", "tela", http.StatusUnauthorized, 0},
+		{"/v1/agente", "tela", http.StatusUnauthorized, 0},
+		{"/v1//agente/tarefa", "tela", http.StatusUnauthorized, 0},
+		{"/v1/agente/tarefa", doAgente, http.StatusOK, 7},
+		{"/v1/agente/nota", doAgente, http.StatusOK, 7},
+		{"/v1/tarefas/1/notas", doAgente, http.StatusUnauthorized, 0},
+		{"/v1/agentes/7/terminal", doAgente, http.StatusUnauthorized, 0},
+		{"/v1/agente/../tarefas/1", doAgente, http.StatusUnauthorized, 0},
+		{"/v1/agente/tarefa", "outro", http.StatusUnauthorized, 0},
+	}
+	for _, c := range casos {
+		quem = Quem{Agente: -1}
+		if got := pedir(c.caminho, c.token); got != c.esperado {
+			t.Errorf("%s: status %d, esperado %d", c.caminho, got, c.esperado)
+		}
+		if c.esperado == http.StatusOK && quem.Agente != c.agente {
+			t.Errorf("%s: quem pediu = %d, esperado %d", c.caminho, quem.Agente, c.agente)
+		}
+	}
+
+	// Um token novo derruba o anterior, e revogar derruba o atual.
+	novo, _ := fichas.Emitir(7)
+	if pedir("/v1/agente/tarefa", doAgente) != http.StatusUnauthorized {
+		t.Error("o token antigo continuou valendo depois de emitir outro")
+	}
+	if pedir("/v1/agente/tarefa", novo) != http.StatusOK {
+		t.Error("o token novo não vale")
+	}
+	fichas.Revogar(7)
+	if pedir("/v1/agente/tarefa", novo) != http.StatusUnauthorized {
+		t.Error("o token revogado continuou valendo")
+	}
+}

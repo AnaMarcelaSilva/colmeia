@@ -14,6 +14,8 @@ mod dados;
 mod dialogos;
 mod entrada;
 mod eventos;
+mod gaveta;
+mod pedido;
 mod quadro;
 mod registro;
 mod sistema;
@@ -84,8 +86,13 @@ enum Conexao {
 #[derive(Clone, Copy)]
 enum AcaoAviso {
     DesfazerCaptura(i64),
-    Abrir { tarefa: i64, agente: i64 },
+    Abrir {
+        tarefa: i64,
+        agente: i64,
+    },
     VerAbelha,
+    /// O agente respondeu: ver o cartão da tarefa na Daily.
+    VerPedido(i64),
 }
 
 /// Aviso passageiro no rodapé. Um por vez: o mais novo substitui o anterior.
@@ -108,6 +115,23 @@ struct CapturaEnviada {
     tarefa: i64,
     resultado: Result<api::Anexo, String>,
 }
+
+/// A peça presa ao botão "Navegador": o endereço a abrir ou o aviso de que
+/// não há Chrome instalado.
+enum PopoverNavegador {
+    Endereco { tarefa: i64, botao: egui::Rect, url: String, erro: Option<String>, focar: bool, quadros: u32 },
+    SemChrome { botao: egui::Rect, quadros: u32 },
+}
+
+/// Respostas do núcleo para o navegador (pedidas numa thread).
+enum RespostaNavegador {
+    Aberto { tarefa: i64, url: String, resultado: Result<(), String> },
+    Capturado { tarefa: i64, resultado: Result<i64, String> },
+    Fechado(Result<(), String>),
+}
+
+/// Largura mínima do título no cabeçalho do painel da tarefa.
+const TITULO_MINIMO: f32 = 160.0;
 
 /// Avisos de "precisa de você" que chegam juntos viram um só.
 const JUNTAR_AVISOS: f64 = 10.0;
@@ -166,6 +190,31 @@ struct Colmeia {
     pode_fechar: bool,
     /// Onde o aviso do rodapé aparece neste quadro.
     ancora_aviso: Option<egui::Pos2>,
+    /// A caixa "Pedir ao agente" aberta na Daily ou na Sprint, presa ao botão
+    /// do cartão, e os rascunhos por tarefa (ficam quando a caixa fecha).
+    caixa_pedido: Option<(pedido::Caixa, egui::Rect)>,
+    rascunhos: HashMap<i64, String>,
+    /// Quando cada agente respondeu um pedido pela última vez.
+    respondeu_em: HashMap<i64, f64>,
+    /// Navegador da tarefa: se há Chrome (lido uma vez), a caixa de endereço
+    /// ou o aviso de "sem Chrome" presos ao botão, o último endereço de cada
+    /// tarefa e as respostas do núcleo (abrir pode levar uns segundos).
+    navegador: Option<api::InfoNavegador>,
+    popover_navegador: Option<PopoverNavegador>,
+    enderecos: HashMap<i64, String>,
+    respostas_navegador: (Sender<RespostaNavegador>, Receiver<RespostaNavegador>),
+    abrindo_navegador: Option<i64>,
+    /// O topo do terminal da tarefa, em pontos da janela (o navegador sem
+    /// espaço ao lado fica abaixo do cabeçalho).
+    topo_terminal: Option<f32>,
+    /// O que o núcleo já sabe da tela: o perfil, se ela mostra algo que
+    /// pode estar compartilhado (apresentação, Daily ou Sprint) e onde o
+    /// navegador abre ao lado dela. Mandado só quando muda (e de novo ao
+    /// reconectar); a geometria só chega depois dos primeiros quadros.
+    tela_avisada: Option<(i64, bool, Option<[i32; 4]>)>,
+    /// Gaveta de arquivos: a árvore de cada tarefa (em cache) e a tarefa com a gaveta aberta.
+    arvores: HashMap<i64, gaveta::Arvore>,
+    gaveta: Option<i64>,
     carga: &'static str,
     bytes: Arc<AtomicU64>,
     quadros: u64,
@@ -222,6 +271,18 @@ impl Colmeia {
             pediu_atencao: false,
             pode_fechar: false,
             ancora_aviso: None,
+            caixa_pedido: None,
+            rascunhos: HashMap::new(),
+            respondeu_em: HashMap::new(),
+            navegador: None,
+            popover_navegador: None,
+            enderecos: HashMap::new(),
+            respostas_navegador: mpsc::channel(),
+            abrindo_navegador: None,
+            topo_terminal: None,
+            tela_avisada: None,
+            arvores: HashMap::new(),
+            gaveta: None,
             carga: "parada",
             bytes: bytes.clone(),
             quadros: 0,
@@ -294,6 +355,10 @@ impl Colmeia {
     // Perfil e eventos
 
     fn entrar(&mut self, perfil: api::Perfil, ctx: &egui::Context) {
+        // O perfil anterior deixa de estar na tela.
+        if let Some((anterior, true, _)) = self.tela_avisada.take() {
+            avisar_apresentando(anterior, false, None);
+        }
         self.tema = tema::Escolha::da_chave(&perfil.tema);
         self.tema.aplicar(ctx);
         self.perfis = api::perfis().unwrap_or_default();
@@ -343,6 +408,10 @@ impl Colmeia {
                     }
                     if matches!(self.conexao, Conexao::Fora | Conexao::Antigo) {
                         self.avisar(TipoAviso::Neutro, "Conectado de novo", agora);
+                        // O núcleo pode ter reiniciado: esquece o que ele sabia da
+                        // tela e se havia Chrome (lido de novo no próximo clique).
+                        self.tela_avisada = None;
+                        self.navegador = None;
                     }
                     self.conexao = Conexao::Ligado;
                     linha_mudou = true;
@@ -351,6 +420,15 @@ impl Colmeia {
                     linha_mudou |= e.entra_na_linha();
                     // Nota e anexos que a própria apresentação mudou não são novidade;
                     // os que vieram de fora (outra tela, a API) são.
+                    if let (dados::Evento::NotaAtualizada { tarefa_id, agente_id, .. }, Some(a)) = (&e, self.apresentacao.as_mut())
+                        && *agente_id != 0
+                    {
+                        a.nota_do_agente(*tarefa_id);
+                    }
+                    let tarefa_mudada = match &e {
+                        dados::Evento::NotaAtualizada { tarefa_id, .. } | dados::Evento::AnexoAdicionado { tarefa_id, .. } => Some(*tarefa_id),
+                        _ => None,
+                    };
                     let proprio = match (&e, self.apresentacao.as_mut()) {
                         (dados::Evento::NotaAtualizada { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::Nota, *tarefa_id),
                         (dados::Evento::AnexoAdicionado { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::AnexoNovo, *tarefa_id),
@@ -358,6 +436,16 @@ impl Colmeia {
                         _ => false,
                     };
                     de_fora |= e.entra_na_linha() && !proprio;
+                    // O agente respondendo um pedido (a nota e as capturas chegam
+                    // uma a uma): o slide se atualiza sozinho, sem sair dali.
+                    if let (Some(t), false, Some(a)) = (tarefa_mudada, proprio, self.apresentacao.as_mut())
+                        && self.modelo.pedidos.iter().any(|p| {
+                            p.tarefa_id == t
+                                && (p.aberto() || (p.estado == "respondido" && self.respondeu_em.get(&p.agente_id).is_some_and(|r| agora - r < 120.0)))
+                        })
+                    {
+                        a.atualizar_pelo_agente(ctx);
+                    }
                     estado_mudou |= matches!(e, dados::Evento::AgenteEstado { .. });
                     for efeito in self.modelo.aplicar(e) {
                         match efeito {
@@ -372,8 +460,34 @@ impl Colmeia {
                                 self.compositor.esquecer(id);
                             }
                             Efeito::Concluiu { tarefa, projeto } => self.abelha.concluiu(tarefa, projeto, agora),
+                            // O agente que acabou de responder um pedido espera você: é o
+                            // normal, e o aviso "respondeu · Ver" fica no lugar.
+                            // Também não chama quem espera só para receber um pedido da fila.
+                            Efeito::Atencao { agente, erro: false, .. }
+                                if self.respondeu_em.get(&agente).is_some_and(|t| agora - t < 30.0)
+                                    || self.modelo.pedidos.iter().any(|p| p.agente_id == agente && p.estado == "fila") => {}
                             Efeito::Atencao { tarefa, agente, texto, erro } => atencoes.push((tarefa, agente, texto, erro)),
                             Efeito::Recarregar => {}
+                            Efeito::PedidoRespondido { tarefa, agente, titulo } => {
+                                self.respondeu_em.insert(agente, agora);
+                                match self.apresentacao.as_mut() {
+                                    // Na apresentação: o slide se atualiza e a faixa avisa.
+                                    Some(a) => a.pedido_respondido(ctx, tarefa, &titulo),
+                                    // Fora dela, o aviso fica até ser visto ou fechado.
+                                    None => {
+                                        self.avisar_com(
+                                            TipoAviso::Neutro,
+                                            format!("O agente respondeu em «{titulo}»"),
+                                            "Ver",
+                                            AcaoAviso::VerPedido(tarefa),
+                                            agora,
+                                        );
+                                        if let Some(a) = &mut self.aviso {
+                                            a.ate = f64::INFINITY;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1177,36 +1291,54 @@ impl Colmeia {
         let pasta = tarefa.pasta.clone();
         let p = cores();
         let pode = self.pode_mudar();
-        let (mut voltar, mut novo_agente, mut abrir_editor, mut abrir_pasta) = (false, false, false, false);
+        let (mut voltar, mut novo_agente, mut abrir_editor) = (false, false, false);
+        let (mut alternar_gaveta, mut clique_navegador, mut menu_navegador) = (false, None, None);
+        let gaveta_aberta = self.gaveta == Some(id);
+        let navegador_aberto = self.modelo.navegadores.contains(&id);
         ui.horizontal(|ui| {
             voltar = tema::botao_secundario(ui, "‹ Quadro").on_hover_text("Voltar ao quadro (Ctrl+Esc)").clicked();
             ui.add_space(8.0);
             // O título é o que se corta: os botões da direita, o número, a
             // branch e a etiqueta de estado nunca. O título inteiro fica na dica.
+            // O espaço dos botões é medido com as peças de verdade (texto +
+            // margens + o vão de 6 + o espaçamento do egui de cada uma; o
+            // add_space não leva espaçamento).
             let espaco = ui.spacing().item_spacing.x;
             let corpo = egui::TextStyle::Body.resolve(ui.style());
             let pintor = ui.painter().clone();
             let medir = |t: &str, fonte: egui::FontId| pintor.layout_no_wrap(t.to_owned(), fonte, p.texto).size().x;
-            let mut reservado = 16.0;
+            // Uma folga de 2 px contra arredondamento.
+            let mut reservado = 2.0;
+            let mut reservado_editor = 0.0;
             if !self.demo {
                 if !agentes.is_empty() {
                     reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
                 }
-                reservado += medir("Abrir pasta", egui::FontId::proportional(13.0)) + 28.0 + espaco;
+                reservado += tema::largura_botao_dividido(&pintor, "Navegador") + 6.0 + espaco;
+                let fonte_arquivos = if gaveta_aberta { tema::forte(13.0) } else { egui::FontId::proportional(13.0) };
+                reservado += medir("Arquivos", fonte_arquivos) + 28.0 + espaco;
                 if let Some((nome, _)) = self.editor {
-                    reservado += medir(&format!("Abrir no {nome}"), egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
+                    reservado_editor = medir(&format!("Abrir no {nome}"), egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
                 }
             }
             reservado += medir(&format!("#{}", tarefa.id), corpo.clone()) + espaco;
             let branch = if tarefa.branch.is_empty() { "pasta" } else { tarefa.branch.as_str() };
             reservado += medir(branch, egui::FontId::monospace(11.0)) + 12.0 + espaco;
             if tarefa.em_copia && !self.demo {
-                reservado += medir("cópia isolada", corpo) + espaco;
+                reservado += medir("cópia isolada", corpo.clone()) + espaco;
             }
             reservado += medir(tema::rotulo_coluna(tarefa.coluna), tema::fonte_etiqueta()) + 12.0 + espaco;
             if tarefa.erro.is_some() {
                 reservado += medir("Erro", tema::fonte_etiqueta()) + 12.0 + espaco;
             }
+            // Abaixo de 160 para o título, "Abrir no IntelliJ" vira "IntelliJ".
+            let editor_curto = self.editor.is_some() && ui.available_width() - reservado - reservado_editor < TITULO_MINIMO;
+            if let Some((nome, _)) = self.editor
+                && editor_curto
+            {
+                reservado_editor = medir(nome, egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
+            }
+            reservado += reservado_editor;
             let largura_titulo = (ui.available_width() - reservado).max(80.0);
             ui.allocate_ui(egui::vec2(largura_titulo, 24.0), |ui| {
                 ui.add(egui::Label::new(texto_forte(&tarefa.titulo, 16.0).color(p.texto)).truncate());
@@ -1230,10 +1362,37 @@ impl Colmeia {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 novo_agente = !agentes.is_empty() && tema::botao_principal(ui, "+ Agente", pode).clicked();
                 ui.add_space(6.0);
-                abrir_pasta = tema::botao_secundario(ui, "Abrir pasta").on_hover_text(&pasta).clicked();
+                let ponto = navegador_aberto.then_some(p.ok);
+                let (principal, menu) = tema::botao_dividido(ui, "Navegador", ponto);
+                let dica = if navegador_aberto { "Trazer o navegador da tarefa para frente" } else { "Abrir o navegador da tarefa ao lado da Colmeia" };
+                // Os balões presos ao botão usam o retângulo dele (não o da
+                // fileira, que vai até o "+ Agente").
+                let rect_botao = menu.rect.union(principal.rect);
+                if principal.on_hover_text(dica).clicked() {
+                    clique_navegador = Some(rect_botao);
+                }
+                egui::Popup::menu(&menu).show(|ui| {
+                    ui.set_min_width(250.0);
+                    if tema::opcao_menu_com(ui, "Ir para endereço…", None, pode) {
+                        menu_navegador = Some(("endereco", rect_botao));
+                        ui.close();
+                    }
+                    if tema::opcao_menu_com(ui, "Capturar navegador", Some("Ctrl+Shift+B"), pode && navegador_aberto) {
+                        menu_navegador = Some(("capturar", rect_botao));
+                        ui.close();
+                    }
+                    ui.add_space(6.0);
+                    if tema::opcao_menu_com(ui, "Fechar navegador", None, pode && navegador_aberto) {
+                        menu_navegador = Some(("fechar", rect_botao));
+                        ui.close();
+                    }
+                });
+                ui.add_space(6.0);
+                alternar_gaveta = tema::chip_alternar(ui, "Arquivos", gaveta_aberta).on_hover_text("Arquivos da pasta da tarefa (Ctrl+Shift+E)").clicked();
                 if let Some((nome, _)) = self.editor {
                     ui.add_space(6.0);
-                    abrir_editor = tema::botao_secundario(ui, &format!("Abrir no {nome}")).on_hover_text(&pasta).clicked();
+                    let rotulo = if editor_curto { nome.to_string() } else { format!("Abrir no {nome}") };
+                    abrir_editor = tema::botao_secundario(ui, &rotulo).on_hover_text(format!("Abrir no {nome}: {pasta}")).clicked();
                 }
             });
         });
@@ -1244,8 +1403,24 @@ impl Colmeia {
         {
             self.erro(format!("Não consegui abrir o {nome}: {e}"), agora);
         }
-        if abrir_pasta && let Err(e) = sistema::abrir_pasta(&pasta) {
-            self.erro(format!("Não consegui abrir a pasta: {e}"), agora);
+        if alternar_gaveta {
+            self.alternar_gaveta(id, ui.ctx());
+        }
+        if let Some(botao) = clique_navegador {
+            self.clique_navegador(id, botao, ui.ctx(), agora);
+        }
+        match menu_navegador {
+            Some(("endereco", botao)) => self.pedir_endereco(id, botao),
+            Some(("capturar", _)) => self.capturar_navegador(id, ui.ctx()),
+            Some(("fechar", _)) => {
+                let envio = self.respostas_navegador.0.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = envio.send(RespostaNavegador::Fechado(api::fechar_navegador(id)));
+                    ctx.request_repaint();
+                });
+            }
+            _ => {}
         }
         if novo_agente {
             self.adicionar_agente(id, false);
@@ -1261,11 +1436,15 @@ impl Colmeia {
             let terminal = egui::Rect::from_min_max(area.min + egui::vec2(1.5, 40.0), area.max - egui::vec2(1.5, self.compositor.altura() + 10.0 + 8.0));
             terminal::estimar_em_foco(ui, terminal, 13.0);
             self.sem_agentes(ui, id, &pasta);
+            if self.gaveta == Some(id) {
+                self.mostrar_gaveta(ui.ctx(), id, area, area.width(), &pasta, None, agora);
+            }
             return;
         }
         let foco = if agentes.iter().any(|a| a.id == foco) { foco } else { agentes[0].id };
 
         let area = ui.available_rect_before_wrap();
+        self.topo_terminal = Some(area.top());
         let outros: Vec<AgenteTela> = agentes.iter().filter(|a| a.id != foco).cloned().collect();
         let em_foco = agentes.iter().find(|a| a.id == foco).cloned().expect("o foco é um dos agentes");
         let largura_lateral = if outros.is_empty() { 0.0 } else { (area.width() * 0.3).max(280.0) };
@@ -1274,6 +1453,12 @@ impl Colmeia {
         // O aviso do rodapé fica sobre o terminal, sem cobrir a caixa de mensagem.
         self.ancora_aviso = Some(principal.center_bottom() - egui::vec2(0.0, 16.0));
         let mut pedidos = vec![self.caixa_terminal(ui, principal, &em_foco, id, true, 13.0, agora)];
+        // A gaveta de arquivos fica por cima do terminal em foco, sem mudar o tamanho dele.
+        if self.gaveta == Some(id) {
+            // 2 px para dentro: a borda de foco do terminal continua inteira.
+            let area_gaveta = principal.shrink(2.0);
+            self.mostrar_gaveta(ui.ctx(), id, area_gaveta, coluna.width(), &pasta, Some(foco), agora);
+        }
         let caixa_mensagem = egui::Rect::from_min_max(egui::pos2(coluna.min.x, principal.max.y + 10.0), coluna.max);
         if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco, id) {
             for agente in envio.destinos {
@@ -1445,7 +1630,9 @@ impl Colmeia {
                         }
                     }
                 }
-                if parado {
+                // Com a gaveta de arquivos por cima, o cartão de fim sairia em
+                // tirinha ao lado dela: fica escondido até a gaveta fechar.
+                if parado && !(focado && self.gaveta == Some(tarefa)) {
                     let centro = ui.min_rect().center();
                     if let Some(p) = cartao_de_fim(ui, centro, agente, focado, pode) {
                         pedido = Some(p);
@@ -1484,10 +1671,19 @@ impl Colmeia {
             return;
         }
         let ancora = self.ancora_aviso.unwrap_or_else(|| ctx.content_rect().center_bottom() - egui::vec2(0.0, 24.0));
-        let clicou = tema::aviso(ctx, ancora, aviso.tipo, &aviso.texto, aviso.acao.map(|(t, _)| t));
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(aviso.ate - agora));
-        if !clicou {
-            return;
+        // O aviso sem prazo (o agente respondeu) fica até ser visto ou fechado.
+        let fixo = aviso.ate.is_infinite();
+        let clique = tema::aviso(ctx, ancora, aviso.tipo, &aviso.texto, aviso.acao.map(|(t, _)| t), fixo);
+        if !fixo {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(aviso.ate - agora));
+        }
+        match clique {
+            tema::CliqueAviso::Nada => return,
+            tema::CliqueAviso::Fechar => {
+                self.aviso = None;
+                return;
+            }
+            tema::CliqueAviso::Acao => {}
         }
         let Some((_, acao)) = aviso.acao else { return };
         self.aviso = None;
@@ -1498,6 +1694,20 @@ impl Colmeia {
             },
             AcaoAviso::Abrir { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
             AcaoAviso::VerAbelha => self.abelha.resumo_aberto = true,
+            AcaoAviso::VerPedido(tarefa) => {
+                let aba = match self.tela {
+                    Tela::Registro(registro::Aba::Sprint) => registro::Aba::Sprint,
+                    _ => registro::Aba::Daily,
+                };
+                if let Some(projeto) = self.modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.projeto_id)
+                    && !self.escopo.contem(projeto)
+                {
+                    self.mudar_escopo(Escopo::Projeto(projeto));
+                }
+                self.tela = Tela::Registro(aba);
+                self.registro.marcar_suja();
+                self.registro.rolar_ate = Some(tarefa);
+            }
         }
     }
 
@@ -1537,6 +1747,15 @@ impl Colmeia {
             && foco != 0
         {
             self.capturar(foco, id);
+        }
+        // Ctrl+Shift+E: a gaveta de arquivos; Ctrl+Shift+B: capturar o navegador.
+        if let Tela::Tarefa { id, .. } = self.tela {
+            if atalho(Key::E) {
+                self.alternar_gaveta(id, ctx);
+            }
+            if atalho(Key::B) && self.modelo.navegadores.contains(&id) {
+                self.capturar_navegador(id, ctx);
+            }
         }
     }
 
@@ -1593,11 +1812,302 @@ impl Colmeia {
             self.ultimo_slide = Some((a.daily(), tarefa));
             self.registro.rolar_ate = Some(tarefa);
         }
-        if let Some(aviso) = &mut self.aviso {
+        if let Some(aviso) = &mut self.aviso
+            && aviso.ate.is_finite()
+        {
             aviso.ate = agora + 8.0;
         }
         self.registro.marcar_suja();
         ctx.request_repaint();
+    }
+
+    // Gaveta de arquivos
+
+    fn alternar_gaveta(&mut self, tarefa: i64, ctx: &egui::Context) {
+        if self.gaveta == Some(tarefa) {
+            self.fechar_gaveta(tarefa);
+            return;
+        }
+        self.gaveta = Some(tarefa);
+        self.arvores.entry(tarefa).or_insert_with(|| gaveta::Arvore::nova(ctx, tarefa)).focar = true;
+    }
+
+    /// Fecha a gaveta e devolve o teclado ao terminal em foco.
+    fn fechar_gaveta(&mut self, tarefa: i64) {
+        self.gaveta = None;
+        if let Tela::Tarefa { foco, .. } = self.tela
+            && let Some(t) = self.terminais.get(&foco)
+        {
+            t.focar();
+        }
+        let _ = tarefa;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mostrar_gaveta(&mut self, ctx: &egui::Context, tarefa: i64, area: egui::Rect, largura: f32, pasta: &str, _foco: Option<i64>, agora: f64) {
+        let editor = self.editor;
+        let Some(arvore) = self.arvores.get_mut(&tarefa) else { return };
+        match arvore.mostrar(ctx, area, largura, pasta, editor.map(|(nome, _)| nome)) {
+            None => {}
+            Some(gaveta::PedidoGaveta::Fechar) => self.fechar_gaveta(tarefa),
+            Some(gaveta::PedidoGaveta::AbrirPasta) => {
+                if let Err(e) = sistema::abrir_pasta(pasta) {
+                    self.erro(format!("Não consegui abrir a pasta: {e}"), agora);
+                }
+            }
+            Some(gaveta::PedidoGaveta::AbrirNoEditor(arquivo)) => {
+                if let Some((nome, comando)) = editor
+                    && let Err(e) = sistema::abrir_arquivo_com(comando, &arquivo)
+                {
+                    self.erro(format!("Não consegui abrir no {nome}: {e}"), agora);
+                }
+            }
+            Some(gaveta::PedidoGaveta::AbrirNoSistema(arquivo)) => {
+                if let Err(e) = sistema::abrir_no_sistema(&arquivo) {
+                    self.erro(format!("Não consegui abrir: {e}"), agora);
+                }
+            }
+            // A citação vai para a caixa de mensagem, que fica com o teclado.
+            Some(gaveta::PedidoGaveta::Citar(texto)) => {
+                self.compositor.citar(&texto);
+                self.gaveta = None;
+            }
+        }
+    }
+
+    // Navegador da tarefa
+
+    /// Há Chrome ou Chromium? Lido do núcleo uma vez.
+    fn tem_navegador(&mut self) -> bool {
+        if self.navegador.is_none() {
+            self.navegador = api::info_navegador().ok();
+        }
+        self.navegador.as_ref().is_some_and(|n| n.instalado)
+    }
+
+    /// Clique no "Navegador": sem Chrome, explica; aberto, traz para frente;
+    /// fechado, abre o último endereço da tarefa (ou pede um).
+    fn clique_navegador(&mut self, tarefa: i64, botao: egui::Rect, ctx: &egui::Context, _agora: f64) {
+        if !self.tem_navegador() {
+            self.popover_navegador = Some(PopoverNavegador::SemChrome { botao, quadros: 0 });
+            return;
+        }
+        if self.modelo.navegadores.contains(&tarefa) {
+            self.abrir_navegador(tarefa, String::new(), ctx);
+        } else if let Some(url) = self.enderecos.get(&tarefa).cloned() {
+            self.abrir_navegador(tarefa, url, ctx);
+        } else {
+            self.pedir_endereco(tarefa, botao);
+        }
+    }
+
+    fn pedir_endereco(&mut self, tarefa: i64, botao: egui::Rect) {
+        if !self.tem_navegador() {
+            self.popover_navegador = Some(PopoverNavegador::SemChrome { botao, quadros: 0 });
+            return;
+        }
+        let url = self.enderecos.get(&tarefa).cloned().unwrap_or_default();
+        self.popover_navegador = Some(PopoverNavegador::Endereco { tarefa, botao, url, erro: None, focar: true, quadros: 0 });
+    }
+
+    /// Conta ao núcleo, quando muda, se a tela mostra algo que pode estar
+    /// compartilhado: a apresentação, a Daily e a Sprint. Enquanto isso, o
+    /// navegador que o agente abrir fica fora da tela (a captura funciona) e
+    /// não cobre os cartões nem o aviso "respondeu · Ver"; o botão
+    /// "Navegador" da tarefa o traz para o lado. Vai junto a geometria ao
+    /// lado da janela, para o agente não abrir num lugar inventado.
+    fn avisar_tela(&mut self, ctx: &egui::Context) {
+        let Some(perfil) = self.perfil.as_ref().map(|p| p.id) else { return };
+        if self.demo || self.conexao != Conexao::Ligado {
+            return;
+        }
+        let compartilhavel = self.apresentacao.is_some() || matches!(self.tela, Tela::Registro(registro::Aba::Daily) | Tela::Registro(registro::Aba::Sprint));
+        let geometria = ctx.input(|i| gaveta::geometria_ao_lado(i.viewport().outer_rect, i.viewport().monitor_size, i.pixels_per_point, None));
+        if self.tela_avisada == Some((perfil, compartilhavel, geometria)) {
+            return;
+        }
+        self.tela_avisada = Some((perfil, compartilhavel, geometria));
+        avisar_apresentando(perfil, compartilhavel, geometria);
+    }
+
+    /// Abre (ou traz para frente) a janela da tarefa ao lado da Colmeia.
+    fn abrir_navegador(&mut self, tarefa: i64, url: String, ctx: &egui::Context) {
+        let topo = self.topo_terminal;
+        let geometria = ctx.input(|i| {
+            let topo = topo.and_then(|t| Some(i.viewport().inner_rect?.top() + t));
+            gaveta::geometria_ao_lado(i.viewport().outer_rect, i.viewport().monitor_size, i.pixels_per_point, topo)
+        });
+        let envio = self.respostas_navegador.0.clone();
+        let ctx = ctx.clone();
+        self.abrindo_navegador = Some(tarefa);
+        std::thread::spawn(move || {
+            let resultado = api::abrir_navegador(tarefa, &url, geometria);
+            let _ = envio.send(RespostaNavegador::Aberto { tarefa, url, resultado });
+            ctx.request_repaint();
+        });
+    }
+
+    fn capturar_navegador(&mut self, tarefa: i64, ctx: &egui::Context) {
+        let envio = self.respostas_navegador.0.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = envio.send(RespostaNavegador::Capturado { tarefa, resultado: api::capturar_navegador(tarefa) });
+            ctx.request_repaint();
+        });
+    }
+
+    fn receber_navegador(&mut self, agora: f64) {
+        while let Ok(r) = self.respostas_navegador.1.try_recv() {
+            match r {
+                RespostaNavegador::Aberto { tarefa, url, resultado } => {
+                    self.abrindo_navegador = None;
+                    match resultado {
+                        Ok(()) => {
+                            if !url.is_empty() {
+                                self.enderecos.insert(tarefa, url);
+                            }
+                            self.modelo.navegadores.insert(tarefa);
+                            if matches!(self.popover_navegador, Some(PopoverNavegador::Endereco { tarefa: t, .. }) if t == tarefa) {
+                                self.popover_navegador = None;
+                            }
+                        }
+                        // A URL recusada aparece embaixo do campo; o resto, no aviso.
+                        Err(e) => match &mut self.popover_navegador {
+                            Some(PopoverNavegador::Endereco { tarefa: t, erro, .. }) if *t == tarefa => *erro = Some(e),
+                            _ => self.erro(format!("O navegador não abriu: {e}"), agora),
+                        },
+                    }
+                }
+                RespostaNavegador::Capturado { tarefa, resultado } => match resultado {
+                    Ok(anexo) => {
+                        let titulo = self.modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.titulo.clone()).unwrap_or_default();
+                        self.avisar_com(
+                            TipoAviso::Neutro,
+                            format!("Captura do navegador anexada a «{titulo}»"),
+                            "Desfazer",
+                            AcaoAviso::DesfazerCaptura(anexo),
+                            agora,
+                        );
+                    }
+                    Err(e) => self.erro(e, agora),
+                },
+                RespostaNavegador::Fechado(Err(e)) => self.erro(e, agora),
+                RespostaNavegador::Fechado(Ok(())) => {}
+            }
+        }
+    }
+
+    /// A caixa de endereço ou o aviso de "sem Chrome", presos ao botão.
+    fn mostrar_popover_navegador(&mut self, ctx: &egui::Context) {
+        let p = cores();
+        let Some(pop) = &mut self.popover_navegador else { return };
+        let mut fechar = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let mut abrir = None;
+        let abrindo = self.abrindo_navegador.is_some();
+        let (botao, quadros) = match pop {
+            PopoverNavegador::Endereco { botao, quadros, .. } | PopoverNavegador::SemChrome { botao, quadros } => (*botao, quadros),
+        };
+        *quadros = quadros.saturating_add(1);
+        let primeiro = *quadros <= 1;
+        let area = egui::Area::new(egui::Id::new("popover-navegador"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(botao.right_bottom() + egui::vec2(0.0, 6.0))
+            .show(ctx, |ui| {
+                tema::moldura_flutuante().show(ui, |ui| match pop {
+                    PopoverNavegador::SemChrome { .. } => {
+                        ui.set_width(360.0 - 32.0);
+                        ui.horizontal(|ui| {
+                            let titulo = ui.painter().layout_no_wrap("Nenhum Chrome ou Chromium instalado".into(), tema::forte(14.0), p.texto);
+                            // O ponto no meio da linha do título (a altura da linha, não a do bloco).
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, titulo.size().y), egui::Sense::hover());
+                            ui.painter().circle_filled(r.center(), 4.0, p.alerta);
+                            ui.label(texto_forte("Nenhum Chrome ou Chromium instalado", 14.0).color(p.texto));
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new("Instale o Chromium ou aponte a variável").color(p.texto).size(13.0));
+                            tema::tecla(ui, "COLMEIA_NAVEGADOR");
+                            ui.label(RichText::new("para o executável.").color(p.texto).size(13.0));
+                        });
+                    }
+                    PopoverNavegador::Endereco { tarefa, url, erro, focar, .. } => {
+                        ui.set_width(380.0 - 32.0);
+                        let resposta = tema::campo(ui, "Endereço", url, "localhost:5173 ou https://…");
+                        if std::mem::take(focar) {
+                            resposta.request_focus();
+                        }
+                        // O erro era do endereço anterior: some ao editar.
+                        if resposta.changed() {
+                            *erro = None;
+                        }
+                        let enter = resposta.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        if let Some(e) = erro {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(e.as_str()).color(p.erro).size(12.5));
+                        }
+                        ui.add_space(10.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let rotulo = if abrindo { "Abrindo…" } else { "Abrir ao lado" };
+                            let pode = !url.trim().is_empty() && !abrindo;
+                            if (tema::botao_principal(ui, rotulo, pode).clicked() || enter) && pode {
+                                *erro = None;
+                                abrir = Some((*tarefa, gaveta::normalizar_endereco(url)));
+                            }
+                        });
+                    }
+                });
+            });
+        let fora = ctx.input(|i| i.pointer.any_released() && i.pointer.interact_pos().is_some_and(|pos| !area.response.rect.contains(pos)));
+        fechar |= fora && !primeiro;
+        if let Some((tarefa, url)) = abrir {
+            self.abrir_navegador(tarefa, url, ctx);
+        } else if fechar {
+            self.popover_navegador = None;
+        }
+    }
+
+    /// Fecha a caixa "Pedir ao agente", guardando o rascunho da tarefa.
+    fn fechar_caixa_pedido(&mut self) {
+        if let Some((caixa, _)) = self.caixa_pedido.take()
+            && !caixa.texto.trim().is_empty()
+        {
+            self.rascunhos.insert(caixa.tarefa, caixa.texto);
+        }
+    }
+
+    /// A caixa da Daily e da Sprint, presa ao botão do cartão: abre embaixo,
+    /// ou em cima se não couber.
+    fn mostrar_caixa_pedido(&mut self, ctx: &egui::Context, agora: f64) {
+        let Some((caixa, botao)) = &mut self.caixa_pedido else { return };
+        let tela = ctx.content_rect();
+        let (ancora, pivo) = if botao.bottom() + 6.0 + 380.0 < tela.bottom() {
+            (botao.right_bottom() + egui::vec2(0.0, 6.0), egui::Align2::RIGHT_TOP)
+        } else {
+            (botao.right_top() - egui::vec2(0.0, 6.0), egui::Align2::RIGHT_BOTTOM)
+        };
+        let resumos = pedido::resumir(&self.modelo);
+        let tarefa = caixa.tarefa;
+        let saida = caixa.mostrar(ctx, ancora, pivo, resumos.get(&tarefa));
+        match saida {
+            None => {}
+            Some(pedido::Saida::Fechar) => self.fechar_caixa_pedido(),
+            Some(pedido::Saida::Enviado(p)) => {
+                self.caixa_pedido = None;
+                self.rascunhos.remove(&tarefa);
+                let titulo = self.modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.titulo.clone()).unwrap_or_default();
+                if !self.modelo.pedidos.iter().any(|x| x.id == p.id) {
+                    self.modelo.pedidos.push(*p);
+                }
+                self.avisar(TipoAviso::Neutro, format!("Pedido enviado ao agente de «{titulo}»"), agora);
+            }
+            Some(pedido::Saida::AbrirTarefa) => {
+                self.fechar_caixa_pedido();
+                let agente = resumos.get(&tarefa).map(|r| r.pedido.agente_id);
+                self.abrir_tarefa(tarefa, agente);
+            }
+        }
     }
 
     /// Fechar a janela não para os agentes: com algum rodando, a Colmeia pergunta.
@@ -1746,10 +2256,12 @@ impl eframe::App for Colmeia {
         }
         self.receber_eventos(&ctx, agora);
         self.receber_capturas(agora);
+        self.receber_navegador(agora);
         self.atalhos(&ctx);
         self.ao_fechar(&ctx);
         self.ajustar_ritmos();
         self.ancora_aviso = None;
+        self.avisar_tela(&ctx);
 
         // A apresentação ocupa a janela inteira: sem barra lateral, topo nem avisos
         // (a tela está sendo compartilhada); os avisos guardados aparecem ao sair.
@@ -1757,6 +2269,7 @@ impl eframe::App for Colmeia {
             let mut pedido = None;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
                 if let Some(a) = &mut self.apresentacao {
+                    a.pedidos = pedido::resumir(&self.modelo);
                     pedido = a.mostrar(ui, &mut self.favo, agora);
                 }
             });
@@ -1827,6 +2340,8 @@ impl eframe::App for Colmeia {
                             None => self.modelo.projetos.iter().map(|p| p.nome.clone()).collect(),
                         };
                         self.registro.conectado = self.pode_mudar();
+                        self.registro.pedidos = pedido::resumir(&self.modelo);
+                        self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
                         // O conteúdo das páginas tem as próprias margens (24 nas laterais).
                         ui.add_space(4.0);
                         acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.projeto(), &projetos);
@@ -1855,9 +2370,30 @@ impl eframe::App for Colmeia {
                 registro::Acao::VerTodos => self.mudar_escopo(Escopo::Perfil),
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
                 registro::Acao::Apresentar { deck, periodo, tarefa } => {
+                    self.fechar_caixa_pedido();
                     self.abrir_apresentacao(&ctx, Some(*deck), periodo, tarefa.map_or(Inicio::Capa, Inicio::Tarefa), false)
                 }
+                registro::Acao::PedirAoAgente { tarefa, tipo, periodo, botao } => {
+                    // O mesmo botão de novo fecha (o rascunho fica).
+                    let mesma = self.caixa_pedido.as_ref().is_some_and(|(c, _)| c.tarefa == tarefa);
+                    self.fechar_caixa_pedido();
+                    if !mesma && self.pode_mudar() {
+                        let rascunho = self.rascunhos.remove(&tarefa).unwrap_or_default();
+                        self.caixa_pedido = Some((pedido::Caixa::nova(&ctx, tarefa, &tipo, &periodo, rascunho), botao));
+                    }
+                }
             }
+        }
+        if matches!(self.tela, Tela::Registro(_)) {
+            self.mostrar_caixa_pedido(&ctx, agora);
+        } else {
+            self.fechar_caixa_pedido();
+        }
+        if let Tela::Tarefa { .. } = self.tela {
+            self.mostrar_popover_navegador(&ctx);
+        } else {
+            self.popover_navegador = None;
+            self.gaveta = None;
         }
 
         if let Some(dialogo) = &mut self.dialogo {
@@ -1922,6 +2458,16 @@ impl eframe::App for Colmeia {
         self.mostrar_aviso(&ctx, agora);
         self.atualizar_titulo(&ctx);
     }
+}
+
+/// Avisa o núcleo, numa thread, se a tela mostra algo compartilhável e onde
+/// o navegador deve abrir.
+fn avisar_apresentando(perfil: i64, ativo: bool, geometria: Option<[i32; 4]>) {
+    std::thread::spawn(move || {
+        if let Err(e) = api::apresentando(perfil, ativo, geometria) {
+            eprintln!("avisando a tela ao núcleo: {e}");
+        }
+    });
 }
 
 fn main() -> eframe::Result {

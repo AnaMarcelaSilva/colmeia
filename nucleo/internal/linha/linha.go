@@ -31,6 +31,8 @@ type Contexto struct {
 	// aparece como aberta se ainda roda.
 	Ativos          map[int64]Ativo
 	AnexosRemovidos map[int64]bool
+	// Pedidos: o texto de cada pedido ao agente (o evento só tem o tamanho).
+	Pedidos map[int64]string
 	// VariosProjetos: o escopo é o perfil e há mais de um projeto, então o
 	// nome do projeto aparece junto da tarefa nos textos.
 	VariosProjetos bool
@@ -105,6 +107,17 @@ const (
 	TipoCaptura      = "captura"
 	TipoProjeto      = "projeto"
 	TipoNota         = "nota"
+	// Pedidos ao agente pela daily, pela sprint ou pela apresentação.
+	TipoPedido           = "pedido"
+	TipoPedidoEntregue   = "pedido_entregue"
+	TipoPedidoRespondido = "pedido_respondido"
+	TipoPedidoCancelado  = "pedido_cancelado"
+	TipoPedidoFalhou     = "pedido_falhou"
+	// Nota escrita pelo agente (pelas ferramentas da Colmeia).
+	TipoNotaAgente = "nota_agente"
+	// Navegador da tarefa.
+	TipoNavegador        = "navegador"
+	TipoNavegadorFechado = "navegador_fechado"
 )
 
 type Dia struct {
@@ -150,6 +163,10 @@ type conteudo struct {
 	Tipo         string `json:"tipo"`
 	Periodo      string `json:"periodo"`
 	Tamanho      int    `json:"tamanho"`
+	Pedido       int64  `json:"pedido"`
+	Descricao    string `json:"descricao"`
+	Navegador    bool   `json:"navegador"`
+	Modo         string `json:"modo"`
 }
 
 type tarefaNoEvento struct {
@@ -369,16 +386,100 @@ func (m *montador) passar(e dados.Evento) {
 		if d.Tamanho == 0 {
 			texto, curto = "Apagou a nota "+de+" de "+m.cita(tarefa, projeto)+".", "Apagou a nota "+de+"."
 		}
+		tipo := TipoNota
+		if d.Agente != 0 {
+			chave += "/agente"
+			tipo = TipoNotaAgente
+			verbo := "complementou"
+			if d.Modo == "substituir" {
+				verbo = "reescreveu"
+			}
+			texto, curto = "O agente "+verbo+" a nota "+de+" de "+m.cita(tarefa, projeto)+".", "O agente "+verbo+" a nota "+de+"."
+		}
 		// Várias gravações seguidas (a nota salva ao perder o foco) viram uma linha.
 		if i, ok := m.notas[chave]; ok && quando.Sub(m.itens[i].quando) <= juntarMovimentos && !m.itens[i].descartado {
 			item := &m.itens[i]
 			item.quando, item.Momento, item.Evento, item.Texto, item.Curto = quando, e.Momento, e.ID, texto, curto
 			return
 		}
-		item := m.novo(e, quando, TipoNota)
+		item := m.novo(e, quando, tipo)
 		item.Texto, item.Curto = texto, curto
 		m.notas[chave] = len(m.itens) - 1
+	case "pedido.criado", "pedido.entregue", "pedido.respondido", "pedido.cancelado", "pedido.falhou":
+		if d.Titulo != "" {
+			m.titulos[tarefa] = d.Titulo
+		}
+		m.pedido(e, quando, d)
+	case "navegador.aberto", "navegador.captura", "navegador.fechado", "navegador.recusado":
+		if d.Titulo != "" {
+			m.titulos[tarefa] = d.Titulo
+		}
+		quem := "Você"
+		if e.Escopo.Agente != 0 {
+			quem = "O agente"
+		}
+		var texto, curto string
+		tipo := TipoNavegador
+		switch e.Tipo {
+		case "navegador.aberto":
+			curto = quem + " abriu o navegador"
+			if d.Descricao != "" {
+				curto += " em " + d.Descricao
+			}
+			texto = curto + " (" + m.cita(tarefa, projeto) + ")."
+			curto += "."
+		case "navegador.captura":
+			texto, curto = quem+" capturou o navegador de "+m.cita(tarefa, projeto)+".", quem+" capturou o navegador."
+		case "navegador.recusado":
+			texto = "A captura do navegador de " + m.cita(tarefa, projeto) + " foi recusada: a página saiu da pasta da tarefa."
+			curto = "A captura do navegador foi recusada: a página saiu da pasta da tarefa."
+		default:
+			tipo = TipoNavegadorFechado
+			texto, curto = "O navegador de "+m.cita(tarefa, projeto)+" fechou.", "O navegador fechou."
+		}
+		item := m.novo(e, quando, tipo)
+		item.Texto, item.Curto = texto, curto
 	}
+}
+
+// pedido monta a linha de um pedido ao agente; o texto vem do contexto (o
+// evento só tem o tamanho) e aparece cortado em uma linha.
+func (m *montador) pedido(e dados.Evento, quando time.Time, d conteudo) {
+	tarefa, projeto := e.Escopo.Tarefa, e.Escopo.Projeto
+	citado := ""
+	if texto := m.c.Pedidos[d.Pedido]; texto != "" {
+		citado = " «" + encurtar(strings.ReplaceAll(texto, "\n", " "), 80) + "»"
+	}
+	var tipo, texto, curto string
+	switch e.Tipo {
+	case "pedido.criado":
+		tipo = TipoPedido
+		curto = "Pediu ao agente:" + citado
+		if citado == "" {
+			curto = "Pediu algo ao agente"
+		}
+		texto = curto + " em " + m.cita(tarefa, projeto) + "."
+		curto += "."
+	case "pedido.entregue":
+		tipo, curto = TipoPedidoEntregue, "O agente recebeu o pedido"+citado+"."
+		texto = "O agente de " + m.cita(tarefa, projeto) + " recebeu o pedido" + citado + "."
+	case "pedido.respondido":
+		tipo, curto = TipoPedidoRespondido, "O agente respondeu o pedido"+citado+"."
+		texto = "O agente respondeu o pedido" + citado + " em " + m.cita(tarefa, projeto) + "."
+	case "pedido.cancelado":
+		tipo, curto = TipoPedidoCancelado, "Pedido cancelado"+citado+"."
+		texto = "Cancelou o pedido" + citado + " em " + m.cita(tarefa, projeto) + "."
+	default:
+		tipo = TipoPedidoFalhou
+		motivo := ""
+		if d.Motivo != "" {
+			motivo = ": " + d.Motivo
+		}
+		curto = "O pedido" + citado + " ficou sem resposta" + motivo + "."
+		texto = "O pedido" + citado + " em " + m.cita(tarefa, projeto) + " ficou sem resposta" + motivo + "."
+	}
+	item := m.novo(e, quando, tipo)
+	item.Texto, item.Curto = texto, curto
 }
 
 func textoCaptura(n int, d conteudo, cita string) string {
@@ -388,6 +489,8 @@ func textoCaptura(n int, d conteudo, cita string) string {
 		texto = fmt.Sprintf("%d vídeos anexados", n)
 	case d.Tipo == "video":
 		texto = "Vídeo anexado"
+	case d.Origem == "captura" && d.Navegador:
+		texto = "Captura do navegador"
 	case d.Origem == "captura" && d.Ferramenta != "":
 		texto = "Captura do terminal de " + agente(d.Ferramenta, d.Papel)
 	case d.Origem == "captura":

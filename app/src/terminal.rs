@@ -44,6 +44,8 @@ pub struct TerminalAgente {
     area: Cell<Option<egui::Rect>>,
     /// Rolagem da rodinha que ainda não completou uma linha (a rolagem suave chega aos pedaços).
     rolagem_pendente: Cell<f32>,
+    /// Pedir o teclado no próximo quadro (uma vez só): a gaveta de arquivos devolve o foco.
+    focar: Cell<bool>,
 }
 
 /// Tamanho do terminal em foco (colunas << 16 | linhas), ou 0 enquanto nenhum
@@ -118,6 +120,7 @@ impl TerminalAgente {
             colou_texto_em: Cell::new(0.0),
             area: Cell::new(None),
             rolagem_pendente: Cell::new(0.0),
+            focar: Cell::new(false),
         }
     }
 
@@ -130,6 +133,11 @@ impl TerminalAgente {
     /// O retângulo onde o terminal foi desenhado no último quadro (para a captura).
     pub fn area(&self) -> Option<egui::Rect> {
         self.area.get()
+    }
+
+    /// O terminal pede o teclado no próximo quadro.
+    pub fn focar(&self) {
+        self.focar.set(true);
     }
 
     pub fn encerrado(&self) -> bool {
@@ -226,7 +234,7 @@ impl TerminalAgente {
         }
         // O terminal só recebe o teclado depois de clicado, como qualquer campo de
         // texto; assim a caixa de mensagem do painel e o terminal convivem.
-        if resposta.clicked() {
+        if resposta.clicked() || self.focar.take() {
             ui.memory_mut(|m| m.request_focus(resposta.id));
         }
         let com_teclado = ui.memory(|m| m.has_focus(resposta.id));

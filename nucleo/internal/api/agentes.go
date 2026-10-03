@@ -159,6 +159,9 @@ func (s *Servidor) removerAgente(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Agentes.Fechar(id)
+	// Antes de apagar o agente: os pedidos dele falham e o token sai.
+	s.limparMCP(id)
+	s.falharPedidosDoAgente(r.Context(), id, motivoDaFalha(terminal.PelaRemocao))
 	if err := s.Banco.RemoverAgente(r.Context(), id); err != nil {
 		responderErro(w, err)
 		return
@@ -269,6 +272,14 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho te
 			}
 			env = append(env, ferramentas.Variavel(a.Ferramenta)+"="+separada)
 		}
+		if a.Ferramenta == "claude" {
+			// As ferramentas da Colmeia (MCP), com o token deste agente.
+			extras, err := s.prepararMCP(a.ID)
+			if err != nil {
+				return fmt.Errorf("preparando as ferramentas da Colmeia: %w", err)
+			}
+			comando = append(comando, extras...)
+		}
 		if a.Ferramenta == "claude" && sessoes.IDValido(a.Sessao) {
 			configuracao, err := sessoes.PastaDeConfiguracao(separada)
 			if err != nil {
@@ -288,6 +299,7 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho te
 	}
 	pty, err := terminal.Iniciar(comando, env, pasta, tamanho.OuPadrao())
 	if err != nil {
+		s.limparMCP(a.ID)
 		return fmt.Errorf("abrindo o terminal: %w", err)
 	}
 	sessao := terminal.NovaSessao(a.ID, pty, s.Bytes)

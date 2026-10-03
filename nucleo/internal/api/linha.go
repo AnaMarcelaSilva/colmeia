@@ -117,6 +117,10 @@ func (s *Servidor) contextoDaLinha(ctx context.Context, perfil, projeto int64) (
 		}
 	}
 	c.AnexosRemovidos, err = s.Banco.AnexosRemovidos(ctx, perfil)
+	if err != nil {
+		return c, err
+	}
+	c.Pedidos, err = s.Banco.TextosDosPedidos(ctx, perfil)
 	return c, err
 }
 

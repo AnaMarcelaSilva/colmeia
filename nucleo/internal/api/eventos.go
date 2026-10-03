@@ -192,11 +192,17 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 	m := mu.m
 	switch m.Tipo {
 	case "estado":
+		if m.Estado == terminal.Aguardando && m.Motivo == terminal.EsperandoResposta {
+			s.fecharRespondidos(ctx, c.ID, m.Desde)
+		}
 		s.Avisos.Publicar(c.Perfil, map[string]any{
 			"tipo": "agente.estado", "agente_id": c.ID, "tarefa_id": c.TarefaID,
 			"estado": m.Estado, "motivo": m.Motivo, "desde": m.Desde.UTC().Format(time.RFC3339Nano), "desde_hora": hora(m.Desde),
 		})
 		s.regraDeColuna(ctx, c, m.Estado)
+		if m.Estado == terminal.Aguardando && m.Motivo == terminal.EsperandoResposta {
+			s.tentarEntregar(c.ID)
+		}
 	case "terminou":
 		motivo, erro := classificar(c.Ferramenta, m.Saida, m.PelaColmeia)
 		d := terminouDados{
@@ -206,6 +212,12 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 		}
 		if err := s.Banco.Registrar(ctx, "agente.terminou", c.Escopo(), d); err != nil {
 			log.Printf("agente %d: gravando o fim: %v", c.ID, err)
+		}
+		// O token do agente morre com ele; o que ele não respondeu, falhou.
+		// (Se ele já foi iniciado de novo, o token e os pedidos são da sessão nova.)
+		if !s.Agentes.Ativa(c.ID) {
+			s.limparMCP(c.ID)
+			s.falharPedidosDoAgente(ctx, c.ID, motivoDaFalha(motivo))
 		}
 	}
 }
@@ -291,7 +303,7 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 	case "anexo.adicionado":
 		var d anexoDados
 		ler(&d)
-		return map[string]any{"tipo": e.Tipo, "anexo_id": d.Anexo, "tarefa_id": e.Escopo.Tarefa}
+		return map[string]any{"tipo": e.Tipo, "anexo_id": d.Anexo, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
 	case "anexo.removido":
 		var d anexoDados
 		ler(&d)
@@ -299,7 +311,28 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 	case "nota.atualizada":
 		var d notaDados
 		ler(&d)
-		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "nota_tipo": d.Tipo, "periodo": d.Periodo}
+		m := map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "nota_tipo": d.Tipo, "periodo": d.Periodo}
+		if e.Escopo.Agente != 0 {
+			m["agente_id"], m["modo"] = e.Escopo.Agente, d.Modo
+		}
+		return m
+	case "pedido.criado", "pedido.entregue", "pedido.respondido", "pedido.cancelado", "pedido.falhou":
+		var d struct {
+			Pedido int64 `json:"pedido"`
+		}
+		ler(&d)
+		m := map[string]any{"tipo": e.Tipo, "pedido_id": d.Pedido, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+		// O pedido inteiro (com o texto, que não está no evento), lido agora.
+		if p, err := s.Banco.Pedido(context.Background(), d.Pedido); err == nil {
+			m["pedido"] = p
+		}
+		return m
+	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
+		var d struct {
+			Descricao string `json:"descricao"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente, "descricao": d.Descricao}
 	}
 	return nil
 }
@@ -401,7 +434,21 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 	for _, a := range agentes {
 		lista = append(lista, s.comEstado(a, "", fins))
 	}
-	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista})
+	// Os pedidos abertos e os das últimas 12 horas (o "Respondido · 21:44"
+	// continua no cartão depois de reabrir a tela) e as tarefas com o
+	// navegador aberto.
+	pedidos, err := s.Banco.PedidosRecentesDoPerfil(r.Context(), id, time.Now().Add(-12*time.Hour).UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	navegadores := []int64{}
+	for _, t := range tarefas {
+		if s.Navegadores.Aberto(id, t.ID).Aberto {
+			navegadores = append(navegadores, t.ID)
+		}
+	}
+	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores})
 }
 
 // comEstado junta ao agente o que o núcleo sabe dele agora: se roda, em que

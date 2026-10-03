@@ -52,8 +52,9 @@ impl Registro {
                 }
                 rotulo_grupo(ui, titulo, slides.len(), cor, marca);
                 ui.add_space(8.0);
-                if let Some(tarefa) = comum::grade(ui, &slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate) {
-                    acoes.push(Acao::Apresentar { deck: Box::new(deck.clone()), periodo: None, tarefa: Some(tarefa) });
+                let clique = comum::grade(ui, &slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
+                if let Some(c) = clique {
+                    acoes.push(super::acao_do_clique(c, &deck, None));
                 }
                 ui.add_space(16.0);
             }

@@ -112,11 +112,14 @@ type Slide struct {
 	// Secao é o projeto, na sprint: a tela põe um slide divisor quando muda.
 	Secao string `json:"secao,omitempty"`
 	// Partes em que a tarefa aparece ("Ontem", "Hoje"), para as marcas do cabeçalho.
-	Partes       []string      `json:"partes"`
-	Feito        []Feito       `json:"feito"`
-	Numeros      NumerosSlide  `json:"numeros"`
-	Anexos       []AnexoSlide  `json:"anexos"`
-	Nota         string        `json:"nota"`
+	Partes  []string     `json:"partes"`
+	Feito   []Feito      `json:"feito"`
+	Numeros NumerosSlide `json:"numeros"`
+	Anexos  []AnexoSlide `json:"anexos"`
+	Nota    string       `json:"nota"`
+	// NotaVersao é o atualizada_em da nota: a tela manda de volta ao salvar,
+	// para não apagar o que o agente complementou enquanto ela editava.
+	NotaVersao   string        `json:"nota_versao"`
 	NotaAnterior *NotaAnterior `json:"nota_anterior,omitempty"`
 
 	ultimo  time.Time
@@ -625,7 +628,7 @@ func (d *Deck) Completar(anexos []dados.Anexo, notas, anteriores map[int64]dados
 				}
 			}
 		}
-		s.Nota = notas[s.TarefaID].Texto
+		s.Nota, s.NotaVersao = notas[s.TarefaID].Texto, notas[s.TarefaID].AtualizadaEm
 		if n, ok := anteriores[s.TarefaID]; ok && s.Nota == "" && n.Periodo != d.ChaveNota && n.Texto != "" {
 			s.NotaAnterior = &NotaAnterior{Texto: n.Texto, Periodo: periodoLegivel(n.Periodo)}
 		}

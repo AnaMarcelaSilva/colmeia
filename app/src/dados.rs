@@ -95,6 +95,8 @@ pub struct AgenteTela {
     pub motivo: String,
     /// Hora local da última mudança de estado, "14:32".
     pub desde: String,
+    /// O mesmo momento em RFC 3339 (UTC), para comparar com outros momentos do núcleo.
+    pub desde_em: String,
     /// Como terminou, se parou.
     pub fim: Option<api::Fim>,
     /// Você já viu o erro dele (abriu a tarefa); a abelha para de insistir.
@@ -111,6 +113,7 @@ impl AgenteTela {
             estado: EstadoAgente::da_chave(&a.estado),
             motivo: a.motivo.clone(),
             desde: a.desde_hora.clone(),
+            desde_em: a.desde.clone(),
             fim: if a.ativo { None } else { a.ultimo_fim.clone() },
             // Erros de antes de a tela abrir entram como já vistos: a faixa fica, a abelha não insiste.
             erro_visto: true,
@@ -288,6 +291,10 @@ impl Tarefa {
 pub struct Modelo {
     pub projetos: Vec<Projeto>,
     pub tarefas: Vec<Tarefa>,
+    /// Pedidos ao agente: os abertos e os fechados há pouco (um por id).
+    pub pedidos: Vec<api::Pedido>,
+    /// Tarefas com o navegador da Colmeia aberto.
+    pub navegadores: std::collections::HashSet<i64>,
 }
 
 /// O que a tela principal precisa fazer depois de aplicar um evento.
@@ -303,6 +310,8 @@ pub enum Efeito {
     Atencao { tarefa: i64, agente: i64, texto: String, erro: bool },
     /// O núcleo pediu para refazer o retrato do quadro.
     Recarregar,
+    /// O agente respondeu um pedido (a nota e as capturas já chegaram).
+    PedidoRespondido { tarefa: i64, agente: i64, titulo: String },
 }
 
 /// Mensagem do WebSocket de eventos do núcleo. Tipos desconhecidos são
@@ -333,7 +342,14 @@ pub enum Evento {
     #[serde(rename = "agente.removido")]
     AgenteRemovido { seq: u64, agente_id: i64, tarefa_id: i64 },
     #[serde(rename = "agente.iniciou")]
-    AgenteIniciou { seq: u64, agente_id: i64, tarefa_id: i64, desde_hora: String },
+    AgenteIniciou {
+        seq: u64,
+        agente_id: i64,
+        tarefa_id: i64,
+        desde_hora: String,
+        #[serde(default)]
+        desde: String,
+    },
     #[serde(rename = "agente.terminou")]
     AgenteTerminou { seq: u64, agente_id: i64, tarefa_id: i64, fim: api::Fim },
     #[serde(rename = "agente.estado")]
@@ -346,6 +362,8 @@ pub enum Evento {
         motivo: String,
         #[serde(default)]
         desde_hora: String,
+        #[serde(default)]
+        desde: String,
     },
     #[serde(rename = "anexo.adicionado")]
     AnexoAdicionado {
@@ -364,7 +382,19 @@ pub enum Evento {
         seq: u64,
         #[serde(default)]
         tarefa_id: i64,
+        /// O agente que escreveu (pelas ferramentas da Colmeia); 0 é você.
+        #[serde(default)]
+        agente_id: i64,
     },
+    /// Qualquer mudança de um pedido ao agente, com o pedido inteiro.
+    #[serde(rename = "pedido.criado", alias = "pedido.entregue", alias = "pedido.respondido", alias = "pedido.cancelado", alias = "pedido.falhou")]
+    PedidoMudou { seq: u64, pedido: api::Pedido },
+    #[serde(rename = "navegador.aberto")]
+    NavegadorAberto { seq: u64, tarefa_id: i64 },
+    #[serde(rename = "navegador.fechado")]
+    NavegadorFechado { seq: u64, tarefa_id: i64 },
+    #[serde(rename = "navegador.captura", alias = "navegador.recusado")]
+    NavegadorCaptura { seq: u64 },
     #[serde(other)]
     Desconhecido,
 }
@@ -386,7 +416,11 @@ impl Evento {
             | Evento::AgenteEstado { seq, .. }
             | Evento::AnexoAdicionado { seq, .. }
             | Evento::AnexoRemovido { seq, .. }
-            | Evento::NotaAtualizada { seq, .. } => *seq,
+            | Evento::NotaAtualizada { seq, .. }
+            | Evento::PedidoMudou { seq, .. }
+            | Evento::NavegadorAberto { seq, .. }
+            | Evento::NavegadorFechado { seq, .. }
+            | Evento::NavegadorCaptura { seq } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -416,6 +450,15 @@ impl Modelo {
             t.derivar();
         }
         self.tarefas = tarefas;
+        self.pedidos = q.pedidos;
+        self.navegadores = q.navegadores.into_iter().collect();
+    }
+
+    /// O pedido que o cartão da tarefa mostra: o aberto mais antigo (o que
+    /// está com o agente ou é o próximo) ou, sem aberto, o último fechado.
+    pub fn pedido_da_tarefa(&self, tarefa: i64) -> Option<&api::Pedido> {
+        let da_tarefa = || self.pedidos.iter().filter(move |p| p.tarefa_id == tarefa);
+        da_tarefa().find(|p| p.aberto()).or_else(|| da_tarefa().filter(|p| p.estado != "cancelado").max_by_key(|p| p.id))
     }
 
     fn agente(&mut self, tarefa: i64, agente: i64) -> Option<(&mut Tarefa, usize)> {
@@ -431,7 +474,35 @@ impl Modelo {
     pub fn aplicar(&mut self, evento: Evento) -> Vec<Efeito> {
         let mut efeitos = Vec::new();
         match evento {
-            Evento::Ola { .. } | Evento::Desconhecido | Evento::AnexoAdicionado { .. } | Evento::AnexoRemovido { .. } | Evento::NotaAtualizada { .. } => {}
+            Evento::Ola { .. }
+            | Evento::Desconhecido
+            | Evento::AnexoAdicionado { .. }
+            | Evento::AnexoRemovido { .. }
+            | Evento::NotaAtualizada { .. }
+            | Evento::NavegadorCaptura { .. } => {}
+            Evento::PedidoMudou { pedido, .. } => {
+                let respondido = pedido.estado == "respondido";
+                let (tarefa, agente) = (pedido.tarefa_id, pedido.agente_id);
+                match self.pedidos.iter_mut().find(|p| p.id == pedido.id) {
+                    Some(p) => {
+                        let ja_sabia = p.estado == pedido.estado;
+                        *p = pedido;
+                        if ja_sabia {
+                            return efeitos;
+                        }
+                    }
+                    None => self.pedidos.push(pedido),
+                }
+                if respondido && let Some(t) = self.tarefas.iter().find(|t| t.id == tarefa) {
+                    efeitos.push(Efeito::PedidoRespondido { tarefa, agente, titulo: t.titulo.clone() });
+                }
+            }
+            Evento::NavegadorAberto { tarefa_id, .. } => {
+                self.navegadores.insert(tarefa_id);
+            }
+            Evento::NavegadorFechado { tarefa_id, .. } => {
+                self.navegadores.remove(&tarefa_id);
+            }
             Evento::Recarregar => efeitos.push(Efeito::Recarregar),
             Evento::ProjetoCriado { projeto, .. } => {
                 let projeto = Projeto::from(projeto);
@@ -477,6 +548,8 @@ impl Modelo {
                     efeitos.extend(t.agentes.iter().map(|a| Efeito::Soltar(a.id)));
                 }
                 self.tarefas.retain(|t| t.id != tarefa_id);
+                self.pedidos.retain(|p| p.tarefa_id != tarefa_id);
+                self.navegadores.remove(&tarefa_id);
             }
             Evento::AgenteCriado { agente, .. } => {
                 if let Some(t) = self.tarefas.iter_mut().find(|t| t.id == agente.tarefa_id) {
@@ -498,13 +571,14 @@ impl Modelo {
                 }
                 efeitos.push(Efeito::Soltar(agente_id));
             }
-            Evento::AgenteIniciou { agente_id, tarefa_id, desde_hora, .. } => {
+            Evento::AgenteIniciou { agente_id, tarefa_id, desde_hora, desde, .. } => {
                 if let Some((t, i)) = self.agente(tarefa_id, agente_id) {
                     let a = &mut t.agentes[i];
                     a.ativo = true;
                     a.estado = EstadoAgente::Trabalhando;
                     a.motivo.clear();
                     a.desde = desde_hora;
+                    a.desde_em = desde;
                     // Iniciar de novo tira o erro anterior.
                     a.fim = None;
                     t.derivar();
@@ -525,7 +599,7 @@ impl Modelo {
                     t.derivar();
                 }
             }
-            Evento::AgenteEstado { agente_id, tarefa_id, estado, motivo, desde_hora, .. } => {
+            Evento::AgenteEstado { agente_id, tarefa_id, estado, motivo, desde_hora, desde, .. } => {
                 if let Some((t, i)) = self.agente(tarefa_id, agente_id) {
                     let a = &mut t.agentes[i];
                     let novo = EstadoAgente::da_chave(&estado);
@@ -534,6 +608,7 @@ impl Modelo {
                     a.estado = novo;
                     a.motivo = motivo;
                     a.desde = desde_hora;
+                    a.desde_em = desde;
                     if passou_a_esperar {
                         let acao = if a.motivo == PEDE_APROVACAO { "pede aprovação" } else { "espera sua resposta" };
                         efeitos.push(Efeito::Atencao {
@@ -595,6 +670,7 @@ pub fn gerar_demo(quantidade: usize) -> Vec<Tarefa> {
                 estado: EstadoAgente::Trabalhando,
                 motivo: String::new(),
                 desde: String::new(),
+                desde_em: String::new(),
                 fim: None,
                 erro_visto: true,
             })
@@ -753,5 +829,33 @@ mod testes {
         for p in projetos_demo() {
             assert!(tarefas.iter().any(|t| t.projeto_id == p.id && t.projeto == p.nome));
         }
+    }
+
+    #[test]
+    fn pedido_e_navegador_pelos_eventos() {
+        let mut m = modelo();
+        let pedido = |estado: &str| {
+            format!(
+                r#"{{"tipo":"pedido.{estado}","seq":9,"pedido":{{"id":3,"tarefa_id":10,"agente_id":7,"tipo":"daily","periodo":"2026-10-02","texto":"Traga o total de testes","estado":"{estado}"}}}}"#
+            )
+        };
+        let criado = pedido("criado").replace(r#""estado":"criado""#, r#""estado":"fila""#);
+        assert!(m.aplicar(evento(&criado)).is_empty());
+        assert_eq!(m.pedido_da_tarefa(10).map(|p| p.estado.as_str()), Some("fila"));
+        m.aplicar(evento(&pedido("entregue")));
+        assert_eq!(m.pedidos.len(), 1);
+        // Respondido: a tela avisa uma vez só, mesmo com a mensagem repetida.
+        assert!(matches!(m.aplicar(evento(&pedido("respondido")))[..], [Efeito::PedidoRespondido { tarefa: 10, .. }]));
+        assert!(m.aplicar(evento(&pedido("respondido"))).is_empty());
+        assert_eq!(m.pedido_da_tarefa(10).map(|p| p.estado.as_str()), Some("respondido"));
+
+        m.aplicar(evento(r#"{"tipo":"navegador.aberto","seq":10,"tarefa_id":10,"descricao":"localhost:5173/pedidos"}"#));
+        assert!(m.navegadores.contains(&10));
+        m.aplicar(evento(r#"{"tipo":"navegador.fechado","seq":11,"tarefa_id":10}"#));
+        assert!(!m.navegadores.contains(&10));
+        let nota = evento(r#"{"tipo":"nota.atualizada","seq":12,"tarefa_id":10,"agente_id":7,"modo":"complementar"}"#);
+        assert!(matches!(nota, Evento::NotaAtualizada { agente_id: 7, .. }));
+        m.aplicar(evento(r#"{"tipo":"tarefa.removida","seq":13,"tarefa_id":10}"#));
+        assert!(m.pedidos.is_empty());
     }
 }

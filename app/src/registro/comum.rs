@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, ColorImage, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2};
 
 use crate::api;
+use crate::pedido;
 use crate::tema::{self, EstadoVisual, Marca, Pilula, cores, forte};
 
 /// Faz o pedido numa thread e acorda a tela quando a resposta chega.
@@ -108,8 +109,19 @@ pub fn ponto_do_tipo(tipo: &str) -> EstadoVisual {
         // Terminal aberto e parado: anel cinza, como "Parado" no cartão.
         "sessao_parada" => EstadoVisual::Parado,
         "interrompido" => EstadoVisual::Interrompido,
+        // Pedidos ao agente e o navegador da tarefa.
+        "pedido" | "pedido_cancelado" | "navegador" => EstadoVisual::Parado,
+        "pedido_entregue" => EstadoVisual::Trabalhando,
+        "pedido_respondido" | "nota_agente" => EstadoVisual::Concluiu,
+        "pedido_falhou" => EstadoVisual::Erro,
         _ => EstadoVisual::Terminou,
     }
+}
+
+/// O texto sem linhas em branco (a nota complementada pelo agente vem
+/// separada por uma): num espaço de poucas linhas, cada linha conta.
+pub fn sem_linhas_vazias(texto: &str) -> String {
+    texto.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 /// Uma linha de texto cortada com "…" (o centro vertical em `pos.y`); diz se cortou.
@@ -384,19 +396,25 @@ fn topicos(s: &api::Slide) -> Vec<&str> {
 const ALTURA_TOPICO: f32 = 20.0;
 const LADO_MINIATURA: f32 = 64.0;
 
+/// Largura do título do cartão: o botão "Pedir ao agente" fica no canto de cima.
+fn largura_titulo(pintor: &egui::Painter, largura_cartao: f32) -> f32 {
+    let interno = largura_cartao - 32.0;
+    interno - pedido::largura_botao(pintor, pedido::texto_botao(largura_cartao)) - 8.0
+}
+
 /// Altura do cartão de tarefa da Daily e da Sprint numa largura.
 pub fn altura_cartao(ui: &egui::Ui, s: &api::Slide, largura: f32) -> f32 {
     let p = cores();
     let interno = largura - 32.0;
-    let titulo = texto_em_linhas(ui.painter(), &s.titulo, forte(15.0), p.texto, interno, 2).size().y;
+    let titulo = texto_em_linhas(ui.painter(), &s.titulo, forte(15.0), p.texto, largura_titulo(ui.painter(), largura), 2).size().y.max(32.0 - 16.0 + 4.0);
     let total = topicos(s).len();
     let mut altura = 16.0 + titulo + 8.0 + 22.0;
     if total > 0 {
         altura += 8.0 + total.min(3) as f32 * ALTURA_TOPICO + if total > 3 { 18.0 } else { 0.0 };
     }
-    let nota = if s.nota.is_empty() { None } else { Some(&s.nota) };
+    let nota = if s.nota.is_empty() { None } else { Some(sem_linhas_vazias(&s.nota)) };
     if let Some(nota) = nota {
-        let g = texto_em_linhas(ui.painter(), nota, FontId::proportional(13.5), p.texto, interno - 12.0, 2);
+        let g = texto_em_linhas(ui.painter(), &nota, FontId::proportional(13.5), p.texto, interno - 12.0, 2);
         altura += 10.0 + g.size().y;
     }
     if !s.anexos.is_empty() {
@@ -405,12 +423,44 @@ pub fn altura_cartao(ui: &egui::Ui, s: &api::Slide, largura: f32) -> f32 {
     altura + 16.0
 }
 
+/// O que o clique num cartão pede.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CliqueCartao {
+    /// Abrir a apresentação no slide da tarefa.
+    Abrir(i64),
+    /// Abrir a caixa "Pedir ao agente", presa ao botão.
+    Pedir(i64, Rect),
+    AbrirTarefa(i64),
+}
+
+/// O pedido da tarefa e se a caixa dela está aberta (para o cartão).
+pub struct PedidoNoCartao<'a> {
+    pub estado: Option<&'a pedido::Estado>,
+    pub caixa_aberta: bool,
+    /// O último pedido foi respondido: a resposta entrou no fim da nota, e
+    /// o cartão mostra o fim (o começo sai com "…").
+    pub respondido: bool,
+}
+
 /// Cartão de uma tarefa (Daily e Sprint): título, etiquetas, até 3 tópicos,
-/// a nota e as miniaturas. O clique abre a apresentação no slide dela.
+/// a nota e as miniaturas. O clique abre a apresentação no slide dela; o
+/// botão do canto e a pílula do pedido abrem a caixa "Pedir ao agente".
 #[allow(clippy::too_many_arguments)]
-pub fn cartao(ui: &mut egui::Ui, rect: Rect, s: &api::Slide, com_projeto: bool, cache: &mut CacheImagens, rolar_ate: &mut Option<i64>) -> egui::Response {
+pub fn cartao(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    s: &api::Slide,
+    com_projeto: bool,
+    cache: &mut CacheImagens,
+    rolar_ate: &mut Option<i64>,
+    pedido_info: &PedidoNoCartao,
+) -> Option<CliqueCartao> {
     let p = cores();
+    let mut clique = None;
     let resposta = ui.interact(rect, Id::new(("cartao-registro", s.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resposta.clicked() {
+        clique = Some(CliqueCartao::Abrir(s.tarefa_id));
+    }
     if *rolar_ate == Some(s.tarefa_id) {
         ui.scroll_to_rect(rect, Some(egui::Align::Center));
         *rolar_ate = None;
@@ -418,10 +468,37 @@ pub fn cartao(ui: &mut egui::Ui, rect: Rect, s: &api::Slide, com_projeto: bool, 
     let borda = if resposta.hovered() { p.destaque.gamma_multiply(0.55) } else { p.borda };
     let pintor = ui.painter().clone();
     pintor.rect(rect, CornerRadius::same(tema::RAIO_CARTAO), p.superficie_alta, Stroke::new(1.0, borda), StrokeKind::Inside);
+    // Registrados depois do cartão (o clique no botão e na pílula é deles) e
+    // desenhados depois do fundo dele.
+    let texto_botao = pedido::texto_botao(rect.width());
+    let largura_botao = pedido::largura_botao(ui.painter(), texto_botao);
+    let botao = Rect::from_min_size(pos2(rect.right() - 12.0 - largura_botao, rect.top() + 12.0), vec2(largura_botao, 32.0));
+    let r_botao = pedido::botao_no_cartao(ui, botao, Id::new(("pedir-cartao", s.tarefa_id)), texto_botao, pedido_info.caixa_aberta, !s.removida);
+    let r_botao = if s.removida { r_botao.on_hover_text("Tarefa removida") } else { r_botao.on_hover_text("Pedir algo a mais ao agente desta tarefa") };
+    if r_botao.clicked() {
+        clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
+    }
+    if !s.removida {
+        resposta.context_menu(|ui| {
+            ui.set_min_width(220.0);
+            if tema::opcao_menu(ui, "Pedir ao agente…", false) {
+                clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
+                ui.close();
+            }
+            if tema::opcao_menu(ui, "Abrir tarefa", false) {
+                clique = Some(CliqueCartao::AbrirTarefa(s.tarefa_id));
+                ui.close();
+            }
+            if tema::opcao_menu(ui, "Apresentar a partir daqui", false) {
+                clique = Some(CliqueCartao::Abrir(s.tarefa_id));
+                ui.close();
+            }
+        });
+    }
     let interno = rect.shrink(16.0);
     let mut y = interno.top();
-    let titulo = texto_em_linhas(&pintor, &s.titulo, forte(15.0), p.texto, interno.width(), 2);
-    let altura_titulo = titulo.size().y;
+    let titulo = texto_em_linhas(&pintor, &s.titulo, forte(15.0), p.texto, largura_titulo(&pintor, rect.width()), 2);
+    let altura_titulo = titulo.size().y.max(32.0 - 16.0 + 4.0);
     pintor.galley(pos2(interno.left(), y), titulo, p.texto);
     y += altura_titulo + 8.0;
 
@@ -437,6 +514,21 @@ pub fn cartao(ui: &mut egui::Ui, rect: Rect, s: &api::Slide, com_projeto: bool, 
         }
         let cor = if parte == "Hoje" { p.destaque } else { p.suave };
         x = tema::etiqueta(&pintor, pos2(x, y + 1.5), parte, tema::fonte_etiqueta(), cor).right() + 6.0;
+    }
+    // A pílula do pedido: o texto longo na dica; o clique abre a caixa.
+    if let Some(e) = pedido_info.estado {
+        let pilula = pedido::pilula(e);
+        let area = Rect::from_min_size(pos2(x + 2.0, y), vec2(pilula.largura(&pintor), 22.0));
+        if area.right() <= interno.right() {
+            pilula.pintar(&pintor, area.min);
+            let r = ui.interact(area, Id::new(("pilula-pedido", s.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                pintor.rect_stroke(area, CornerRadius::same(11), Stroke::new(1.0, e.cor.gamma_multiply(0.6)), StrokeKind::Inside);
+            }
+            if r.on_hover_text(&e.longo).clicked() {
+                clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
+            }
+        }
     }
     y += 22.0;
 
@@ -458,11 +550,17 @@ pub fn cartao(ui: &mut egui::Ui, rect: Rect, s: &api::Slide, com_projeto: bool, 
     }
     if !s.nota.is_empty() {
         y += 10.0;
-        let g = texto_em_linhas(&pintor, &s.nota, FontId::proportional(13.5).clone(), p.texto, interno.width() - 12.0, 2);
+        let nota = sem_linhas_vazias(&s.nota);
+        let g = texto_em_linhas(&pintor, &nota, FontId::proportional(13.5).clone(), p.texto, interno.width() - 12.0, 2);
         let altura = g.size().y;
         pintor.rect_filled(Rect::from_min_size(pos2(interno.left(), y), vec2(2.0, altura)), CornerRadius::same(1), p.destaque);
         let formato = egui::TextFormat { font_id: FontId::proportional(13.5), color: p.texto, italics: true, ..Default::default() };
-        pintor.galley(pos2(interno.left() + 12.0, y), tema::cortar(&pintor, &s.nota, formato, interno.width() - 12.0, 2, false), p.texto);
+        let galeria = if pedido_info.respondido {
+            tema::cortar_pelo_fim(&pintor, &nota, formato, interno.width() - 12.0, 2)
+        } else {
+            tema::cortar(&pintor, &nota, formato, interno.width() - 12.0, 2, false)
+        };
+        pintor.galley(pos2(interno.left() + 12.0, y), galeria, p.texto);
         y += altura;
     }
     if !s.anexos.is_empty() {
@@ -499,7 +597,7 @@ pub fn cartao(ui: &mut egui::Ui, rect: Rect, s: &api::Slide, com_projeto: bool, 
         }
     }
     // Sem dica: o cursor de mão e a borda realçada já dizem que abre o slide.
-    resposta
+    clique
 }
 
 /// A pílula de estado de um slide: a palavra e a marca de `estado_do_slide`.
@@ -527,8 +625,16 @@ pub fn sombra_rolagem(pintor: &egui::Painter, area: Rect, deslocamento: f32) {
 }
 
 /// Grade de cartões (2 colunas a partir de 1100 px, 1 abaixo), com a altura
-/// do maior em cada linha. Devolve a tarefa clicada.
-pub fn grade(ui: &mut egui::Ui, slides: &[&api::Slide], com_projeto: bool, cache: &mut CacheImagens, rolar_ate: &mut Option<i64>) -> Option<i64> {
+/// do maior em cada linha. Devolve o clique.
+pub fn grade(
+    ui: &mut egui::Ui,
+    slides: &[&api::Slide],
+    com_projeto: bool,
+    cache: &mut CacheImagens,
+    rolar_ate: &mut Option<i64>,
+    pedidos: &pedido::Pedidos,
+    caixa_aberta: Option<i64>,
+) -> Option<CliqueCartao> {
     let largura = ui.available_width();
     let colunas = if largura >= 1100.0 { 2 } else { 1 };
     let largura_cartao = (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32;
@@ -538,8 +644,16 @@ pub fn grade(ui: &mut egui::Ui, slides: &[&api::Slide], com_projeto: bool, cache
         let (faixa, _) = ui.allocate_exact_size(vec2(largura, altura), Sense::hover());
         for (i, s) in linha.iter().enumerate() {
             let rect = Rect::from_min_size(faixa.min + vec2(i as f32 * (largura_cartao + 12.0), 0.0), vec2(largura_cartao, altura));
-            if (ui.is_rect_visible(rect) || *rolar_ate == Some(s.tarefa_id)) && cartao(ui, rect, s, com_projeto, cache, rolar_ate).clicked() {
-                clicada = Some(s.tarefa_id);
+            if ui.is_rect_visible(rect) || *rolar_ate == Some(s.tarefa_id) {
+                let resumo = pedidos.get(&s.tarefa_id);
+                let info = PedidoNoCartao {
+                    estado: resumo.map(|r| &r.estado),
+                    caixa_aberta: caixa_aberta == Some(s.tarefa_id),
+                    respondido: resumo.is_some_and(|r| r.pedido.estado == "respondido"),
+                };
+                if let Some(c) = cartao(ui, rect, s, com_projeto, cache, rolar_ate, &info) {
+                    clicada = Some(c);
+                }
             }
         }
         ui.add_space(12.0 - ui.spacing().item_spacing.y);
@@ -595,6 +709,11 @@ mod testes {
         assert_eq!(img.pixels[0], Color32::from_rgb(200, 200, 200));
         let inteira = decodificar(&png, None).unwrap();
         assert_eq!(inteira.size, [400, 300]);
+    }
+
+    #[test]
+    fn nota_sem_linhas_em_branco() {
+        assert_eq!(sem_linhas_vazias("Tela quase pronta.\n\nTotal de testes: 42"), "Tela quase pronta.\nTotal de testes: 42");
     }
 
     #[test]
