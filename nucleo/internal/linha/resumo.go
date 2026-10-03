@@ -2,6 +2,7 @@ package linha
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -420,6 +421,9 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 			s.Erros = append(s.Erros, resumoDe(item, strings.TrimSuffix(item.Texto, ".")+" ("+item.quando.In(fuso).Format("02/01")+")"))
 		case TipoCaptura:
 			for _, a := range item.Anexos {
+				if slices.Contains(item.Videos, a) {
+					continue // a sprint salva PNGs; o vídeo fica na apresentação
+				}
 				r.Capturas = append(r.Capturas, Captura{Anexo: a, TarefaID: item.TarefaID, Texto: strings.TrimSuffix(item.Texto, "."), Dia: item.quando.In(fuso).Format("02/01")})
 			}
 		}

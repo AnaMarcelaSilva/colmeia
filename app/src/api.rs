@@ -117,7 +117,6 @@ pub struct Quadro {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ItemLinha {
-    pub evento: i64,
     pub hora: String,
     pub tipo: String,
     pub texto: String,
@@ -129,17 +128,33 @@ pub struct ItemLinha {
     pub agente_id: i64,
     #[serde(default)]
     pub removida: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub anexos: Vec<i64>,
+    /// Os anexos que são vídeos (não têm miniatura).
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub videos: Vec<i64>,
+    /// O texto sem o nome da tarefa (para o cartão da tarefa).
+    #[serde(default)]
+    pub curto: String,
+    /// Título e coluna da tarefa agora.
+    #[serde(default)]
+    pub titulo: String,
+    #[serde(default)]
+    pub coluna: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Dia {
     pub dia: String,
     pub titulo: String,
-    #[serde(default)]
-    pub resumo: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub itens: Vec<ItemLinha>,
+    #[serde(default)]
+    pub concluidas: usize,
+    #[serde(default)]
+    pub erros: usize,
+    #[serde(default)]
+    pub tempo_s: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -150,46 +165,16 @@ pub struct PaginaLinha {
     pub perfil_criado_em: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct ItemResumo {
-    pub texto: String,
-    #[serde(default)]
-    pub tipo: String,
-    #[serde(default)]
-    pub tarefa_id: i64,
-    #[serde(default)]
-    pub agente_id: i64,
-    #[serde(default)]
-    pub removida: bool,
-}
-
 /// Uma lista que pode vir como `null` (um núcleo antigo manda assim quando
 /// está vazia): vira lista vazia em vez de quebrar a resposta inteira.
 fn lista_ou_nulo<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
     Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct Bloco {
-    pub titulo: String,
-    #[serde(default, deserialize_with = "lista_ou_nulo")]
-    pub itens: Vec<ItemResumo>,
-    #[serde(default)]
-    pub mais: usize,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ParteDaily {
-    pub titulo: String,
-    #[serde(default, deserialize_with = "lista_ou_nulo")]
-    pub blocos: Vec<Bloco>,
-}
-
+/// O texto da daily (os blocos que o núcleo também manda não são usados:
+/// os cartões da página vêm do deck da apresentação).
 #[derive(Clone, Debug, Deserialize)]
 pub struct Daily {
-    pub periodo: String,
-    pub ontem: Option<ParteDaily>,
-    pub hoje: ParteDaily,
     pub texto: String,
     pub vazio: bool,
 }
@@ -221,6 +206,165 @@ pub struct Anexo {
     pub id: i64,
     /// Onde a imagem ficou, para mandar ao agente numa mensagem.
     pub caminho: String,
+}
+
+/// O que é um anexo e onde ele está (para abrir um vídeo no reprodutor).
+#[derive(Clone, Debug, Deserialize)]
+pub struct InfoAnexo {
+    pub caminho: String,
+}
+
+/// Uma mensagem do histórico de um agente.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MensagemGuardada {
+    pub texto: String,
+}
+
+// Apresentação da daily e da sprint (um slide por tarefa).
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TempoFerramenta {
+    pub nome: String,
+    pub segundos: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NumerosCapa {
+    #[serde(default)]
+    pub concluidas: usize,
+    #[serde(default)]
+    pub revisao: usize,
+    #[serde(default)]
+    pub aguardando: usize,
+    #[serde(default)]
+    pub trabalhando: usize,
+    /// Sessões que pararam com erro no período.
+    #[serde(default)]
+    pub erros: usize,
+    /// Todas as tarefas criadas no período.
+    #[serde(default)]
+    pub novas: usize,
+    #[serde(default)]
+    pub tempo_s: i64,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub por_ferramenta: Vec<TempoFerramenta>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ParteCapa {
+    pub titulo: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub tarefas: Vec<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Capa {
+    #[serde(default)]
+    pub numeros: NumerosCapa,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub destaques: Vec<String>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub partes: Vec<ParteCapa>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub novas: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Feito {
+    #[serde(default)]
+    pub parte: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub itens: Vec<String>,
+    #[serde(default)]
+    pub mais: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NumerosSlide {
+    #[serde(default)]
+    pub tempo_s: i64,
+    #[serde(default)]
+    pub sessoes: usize,
+    #[serde(default)]
+    pub erros: usize,
+    #[serde(default)]
+    pub capturas: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct AnexoSlide {
+    pub id: i64,
+    /// "imagem" ou "video".
+    pub tipo: String,
+    #[serde(default)]
+    pub nome: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub largura: u32,
+    #[serde(default)]
+    pub altura: u32,
+}
+
+impl AnexoSlide {
+    pub fn video(&self) -> bool {
+        self.tipo == "video"
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct NotaAnterior {
+    pub texto: String,
+    pub periodo: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Slide {
+    pub tarefa_id: i64,
+    pub titulo: String,
+    #[serde(default)]
+    pub projeto: String,
+    #[serde(default)]
+    pub coluna: String,
+    /// concluidas, revisao, aguardando, trabalhando, erros ou outras.
+    #[serde(default)]
+    pub grupo: String,
+    #[serde(default)]
+    pub removida: bool,
+    #[serde(default)]
+    pub secao: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub partes: Vec<String>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub feito: Vec<Feito>,
+    #[serde(default)]
+    pub numeros: NumerosSlide,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub anexos: Vec<AnexoSlide>,
+    #[serde(default)]
+    pub nota: String,
+    #[serde(default)]
+    pub nota_anterior: Option<NotaAnterior>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Deck {
+    /// "daily" ou "sprint".
+    pub tipo: String,
+    pub titulo: String,
+    #[serde(default)]
+    pub periodo: String,
+    /// Período das notas deste deck (o dia, ou "de..ate").
+    #[serde(default)]
+    pub chave_nota: String,
+    #[serde(default)]
+    pub capa: Capa,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub slides: Vec<Slide>,
+    #[serde(default)]
+    pub mais: usize,
+    #[serde(default)]
+    pub vazio: bool,
 }
 
 /// Uma conversa do Claude Code guardada para a pasta da tarefa.
@@ -338,12 +482,15 @@ pub enum PeriodoSprint {
 
 pub fn sprint(perfil: i64, projeto: Option<i64>, periodo: &PeriodoSprint) -> Result<Sprint, String> {
     let projeto = projeto.map(|p| format!("&projeto={p}")).unwrap_or_default();
-    let periodo = match periodo {
+    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=sprint&{}{projeto}", consulta_periodo(periodo)), None)
+}
+
+fn consulta_periodo(periodo: &PeriodoSprint) -> String {
+    match periodo {
         PeriodoSprint::Ultimos(n) => format!("ultimos={n}"),
         PeriodoSprint::MesAtual => "mes=atual".into(),
         PeriodoSprint::Datas(de, ate) => format!("de={de}&ate={ate}"),
-    };
-    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=sprint&{periodo}{projeto}"), None)
+    }
 }
 
 /// Manda um PNG ao núcleo, anexado à tarefa. `origem`: captura ou mensagem;
@@ -351,11 +498,102 @@ pub fn sprint(perfil: i64, projeto: Option<i64>, periodo: &PeriodoSprint) -> Res
 pub fn anexar(tarefa: i64, origem: &str, agente: Option<i64>, png: &[u8]) -> Result<Anexo, String> {
     let agente = agente.map(|a| format!("&agente={a}")).unwrap_or_default();
     let (status, corpo) = canal::pedir_bytes("POST", &format!("/v1/tarefas/{tarefa}/anexos?origem={origem}{agente}"), "image/png", png)?;
-    let corpo = String::from_utf8_lossy(&corpo);
+    resposta_anexo(status, &corpo)
+}
+
+fn resposta_anexo(status: u16, corpo: &[u8]) -> Result<Anexo, String> {
+    let corpo = String::from_utf8_lossy(corpo);
     if !(200..300).contains(&status) {
         return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo")));
     }
     serde_json::from_str(&corpo).map_err(|e| inesperada("/v1/tarefas/anexos", e))
+}
+
+/// Formatos que dá para anexar na apresentação, pela extensão.
+pub const FORMATOS_ANEXO: [&str; 7] = ["png", "jpg", "jpeg", "mp4", "webm", "mkv", "mov"];
+/// Maior vídeo aceito pelo núcleo.
+pub const MAIOR_VIDEO: u64 = 512 << 20;
+
+/// O tipo (Content-Type) de um arquivo pela extensão, e se é vídeo.
+pub fn tipo_do_arquivo(caminho: &std::path::Path) -> Option<(&'static str, bool)> {
+    let extensao = caminho.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extensao.as_str() {
+        "png" => ("image/png", false),
+        "jpg" | "jpeg" => ("image/jpeg", false),
+        "mp4" => ("video/mp4", true),
+        "webm" => ("video/webm", true),
+        "mkv" => ("video/x-matroska", true),
+        "mov" => ("video/quicktime", true),
+        _ => return None,
+    })
+}
+
+/// Codifica um valor para ir na URL (o nome de um arquivo, com espaço ou acento).
+pub fn codificar_url(valor: &str) -> String {
+    let mut saida = String::with_capacity(valor.len());
+    for b in valor.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => saida.push(b as char),
+            _ => saida.push_str(&format!("%{b:02X}")),
+        }
+    }
+    saida
+}
+
+/// Anexa uma foto ou um vídeo do disco à tarefa, enviado direto do arquivo.
+/// `progresso` recebe os bytes enviados e o total.
+pub fn anexar_arquivo(tarefa: i64, arquivo: &std::path::Path, progresso: impl FnMut(u64, u64)) -> Result<Anexo, String> {
+    let (tipo, video) = tipo_do_arquivo(arquivo).ok_or("formato não aceito")?;
+    let nome = arquivo.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let nome = codificar_url(&nome.chars().take(200).collect::<String>());
+    let caminho = if video { format!("/v1/tarefas/{tarefa}/videos?nome={nome}") } else { format!("/v1/tarefas/{tarefa}/anexos?origem=arquivo&nome={nome}") };
+    let (status, corpo) = canal::pedir_arquivo("POST", &caminho, tipo, arquivo, progresso)?;
+    resposta_anexo(status, &corpo)
+}
+
+/// Anexa uma imagem já em PNG (colada na apresentação).
+pub fn anexar_png(tarefa: i64, png: &[u8]) -> Result<Anexo, String> {
+    let (status, corpo) = canal::pedir_bytes("POST", &format!("/v1/tarefas/{tarefa}/anexos?origem=colagem"), "image/png", png)?;
+    resposta_anexo(status, &corpo)
+}
+
+pub fn info_anexo(id: i64) -> Result<InfoAnexo, String> {
+    chamar("GET", &format!("/v1/anexos/{id}/info"), None)
+}
+
+/// O histórico de mensagens do agente, da mais nova para a mais antiga.
+pub fn mensagens(agente: i64) -> Result<Vec<MensagemGuardada>, String> {
+    chamar("GET", &format!("/v1/agentes/{agente}/mensagens"), None)
+}
+
+#[derive(Deserialize)]
+struct Guardada {
+    guardada: bool,
+}
+
+/// Guarda o que foi mandado ao agente; diz se ficou no histórico (um texto
+/// que parece ter senha ou chave não fica).
+pub fn guardar_mensagem(agente: i64, texto: &str) -> Result<bool, String> {
+    chamar::<Guardada>("POST", &format!("/v1/agentes/{agente}/mensagens"), Some(json!({ "texto": texto }))).map(|g| g.guardada)
+}
+
+pub fn limpar_mensagens(agente: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/agentes/{agente}/mensagens"), None).map(|_| ())
+}
+
+/// O deck da daily ou da sprint (`periodo` só na sprint).
+pub fn apresentacao(perfil: i64, projeto: Option<i64>, periodo: Option<&PeriodoSprint>) -> Result<Deck, String> {
+    let projeto = projeto.map(|p| format!("&projeto={p}")).unwrap_or_default();
+    let caminho = match periodo {
+        None => format!("/v1/perfis/{perfil}/apresentacao?tipo=daily{projeto}"),
+        Some(p) => format!("/v1/perfis/{perfil}/apresentacao?tipo=sprint&{}{projeto}", consulta_periodo(p)),
+    };
+    chamar("GET", &caminho, None)
+}
+
+/// Grava a nota da tarefa na daily ou na sprint (texto vazio apaga).
+pub fn definir_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str) -> Result<(), String> {
+    chamar::<serde_json::Value>("PUT", &format!("/v1/tarefas/{tarefa}/notas"), Some(json!({ "tipo": tipo, "periodo": periodo, "texto": texto }))).map(|_| ())
 }
 
 /// O PNG de um anexo.
@@ -458,10 +696,31 @@ mod testes {
     use super::*;
 
     #[test]
-    fn daily_com_blocos_nulos_vira_lista_vazia() {
+    fn daily_com_blocos_nulos_ainda_e_lida() {
         // Um núcleo da 0.2.0 mandava "blocos":null num projeto sem nada hoje.
         let d: Daily = serde_json::from_str(r#"{"periodo":"Hoje","hoje":{"titulo":"Hoje","blocos":null},"texto":"x","vazio":true}"#).unwrap();
-        assert!(d.hoje.blocos.is_empty() && d.ontem.is_none());
+        assert!(d.vazio && d.texto == "x");
+    }
+
+    #[test]
+    fn deck_com_listas_nulas() {
+        let d: Deck = serde_json::from_str(
+            r#"{"tipo":"daily","titulo":"Daily","capa":{"numeros":{"por_ferramenta":null},"destaques":null,"partes":null,"novas":null},
+                "slides":[{"tarefa_id":3,"titulo":"T","partes":null,"feito":[{"parte":"Hoje","itens":null}],"anexos":null}],"mais":0}"#,
+        )
+        .unwrap();
+        assert!(d.capa.destaques.is_empty() && d.capa.partes.is_empty() && d.capa.numeros.por_ferramenta.is_empty());
+        assert_eq!(d.slides[0].tarefa_id, 3);
+        assert!(d.slides[0].anexos.is_empty() && d.slides[0].feito[0].itens.is_empty());
+    }
+
+    #[test]
+    fn nome_de_arquivo_vai_codificado_na_url() {
+        assert_eq!(codificar_url("demo da tela.mp4"), "demo%20da%20tela.mp4");
+        assert_eq!(codificar_url("ação&x=1"), "a%C3%A7%C3%A3o%26x%3D1");
+        assert_eq!(tipo_do_arquivo(std::path::Path::new("/x/Foto.JPG")), Some(("image/jpeg", false)));
+        assert_eq!(tipo_do_arquivo(std::path::Path::new("/x/demo.mov")), Some(("video/quicktime", true)));
+        assert_eq!(tipo_do_arquivo(std::path::Path::new("/x/foto.heic")), None);
     }
 
     #[test]

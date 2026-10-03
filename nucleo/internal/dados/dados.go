@@ -86,7 +86,31 @@ CREATE TABLE IF NOT EXISTS eventos (
 	hash_anterior TEXT NOT NULL,
 	hash TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS anexos (
+CREATE TABLE IF NOT EXISTS anexos (` + colunasAnexos + `);
+-- Histórico do que você mandou a cada agente (seta para cima na caixa de
+-- mensagem). Fica fora dos eventos: um segredo colado por engano pode ser
+-- apagado (decisão 0006).
+CREATE TABLE IF NOT EXISTS mensagens (
+	id INTEGER PRIMARY KEY,
+	agente_id INTEGER NOT NULL REFERENCES agentes(id) ON DELETE CASCADE,
+	texto TEXT NOT NULL,
+	enviada_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mensagens_por_agente ON mensagens (agente_id, id);
+-- Notas da daily e da sprint, por tarefa e período.
+CREATE TABLE IF NOT EXISTS notas (
+	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	tipo TEXT NOT NULL CHECK (tipo IN ('daily', 'sprint')),
+	periodo TEXT NOT NULL,
+	texto TEXT NOT NULL,
+	atualizada_em TEXT NOT NULL,
+	PRIMARY KEY (tarefa_id, tipo, periodo)
+);
+`
+
+// colunasAnexos é a definição da tabela anexos desde a versão 3 do banco
+// (fotos e vídeos). A migração para ela está em migrarAnexos.
+const colunasAnexos = `
 	id INTEGER PRIMARY KEY,
 	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
 	tarefa_id INTEGER,
@@ -94,11 +118,13 @@ CREATE TABLE IF NOT EXISTS anexos (
 	largura INTEGER NOT NULL,
 	altura INTEGER NOT NULL,
 	bytes INTEGER NOT NULL,
-	origem TEXT NOT NULL CHECK (origem IN ('captura', 'colagem', 'mensagem')),
+	origem TEXT NOT NULL CHECK (origem IN ('captura', 'colagem', 'mensagem', 'arquivo')),
 	legenda TEXT NOT NULL DEFAULT '',
 	criado_em TEXT NOT NULL,
-	removido INTEGER NOT NULL DEFAULT 0
-);
+	removido INTEGER NOT NULL DEFAULT 0,
+	tipo TEXT NOT NULL DEFAULT 'imagem' CHECK (tipo IN ('imagem', 'video')),
+	formato TEXT NOT NULL DEFAULT 'png',
+	nome TEXT NOT NULL DEFAULT ''
 `
 
 type Banco struct {
@@ -238,7 +264,70 @@ func migrar(db *sql.DB) error {
 			return fmt.Errorf("ligando eventos antigos aos perfis: %w", err)
 		}
 	}
+	if versao < 3 {
+		if err := migrarAnexos(db); err != nil {
+			return fmt.Errorf("preparando os anexos para fotos e vídeos: %w", err)
+		}
+	}
 	return nil
+}
+
+// migrarAnexos leva a tabela anexos à versão 3: aceita a origem "arquivo" e
+// ganha tipo (imagem ou vídeo), formato e nome. O SQLite não muda um CHECK
+// com ALTER, então a tabela é refeita numa transação, como a documentação
+// dele recomenda (chaves estrangeiras desligadas só durante a troca e
+// conferidas antes do commit). Os ids e as linhas ficam iguais.
+func migrarAnexos(db *sql.DB) error {
+	ctx := context.Background()
+	// Uma conexão fixa: o PRAGMA vale por conexão.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var temTipo int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('anexos') WHERE name = 'tipo'`).Scan(&temTipo); err != nil {
+		return err
+	}
+	if temTipo > 0 {
+		// Banco novo: a tabela já nasceu na versão 3.
+		_, err := conn.ExecContext(ctx, `PRAGMA user_version = 3`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, comando := range []string{
+		`CREATE TABLE anexos_nova (` + colunasAnexos + `)`,
+		`INSERT INTO anexos_nova (id, perfil_id, tarefa_id, sha256, largura, altura, bytes, origem, legenda, criado_em, removido)
+			SELECT id, perfil_id, tarefa_id, sha256, largura, altura, bytes, origem, legenda, criado_em, removido FROM anexos`,
+		`DROP TABLE anexos`,
+		`ALTER TABLE anexos_nova RENAME TO anexos`,
+		`CREATE INDEX IF NOT EXISTS anexos_por_tarefa ON anexos (tarefa_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, comando); err != nil {
+			return err
+		}
+	}
+	linhas, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	problema := linhas.Next()
+	linhas.Close()
+	if problema {
+		return errors.New("a troca da tabela de anexos quebraria referências")
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 3`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // preencherEscopo liga os eventos gravados antes das colunas de escopo ao

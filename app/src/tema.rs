@@ -105,7 +105,9 @@ pub const LEITURA: Paleta = Paleta {
     suave: rgb(0x77695a),
     destaque: rgb(0x9a4a22),
     ok: rgb(0x4d7a36),
-    alerta: rgb(0x965d08),
+    // Âmbar puxado para o amarelo: perto do destaque (ferrugem) e do erro,
+    // um marrom a mais não se distinguia no telão.
+    alerta: rgb(0x806300),
     erro: rgb(0xb3372d),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 12),
     terminal_fundo: rgb(0xf7f1e3),
@@ -586,6 +588,65 @@ pub fn fonte_etiqueta() -> FontId {
     forte(11.5)
 }
 
+/// Rótulo da pílula de cada coluna, no feminino de "tarefa": o mesmo no
+/// cabeçalho da tarefa, na linha do tempo, na Daily, na Sprint e no slide
+/// (o nome da coluna no quadro continua "Revisão", "Concluído").
+pub fn rotulo_coluna(coluna: crate::dados::Coluna) -> &'static str {
+    use crate::dados::Coluna;
+    match coluna {
+        Coluna::Backlog => "Backlog",
+        Coluna::Trabalhando => "Trabalhando",
+        Coluna::AguardandoVoce => "Aguardando você",
+        Coluna::Revisao => "Em revisão",
+        Coluna::Concluido => "Concluída",
+    }
+}
+
+/// Forma da marca de estado, para o estado não depender só da cor (no tema
+/// leitura, destaque, alerta e erro são tons próximos): cheia para concluída,
+/// em revisão e trabalhando; anel para o que espera (você ou parado); anel
+/// grosso para erro.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Marca {
+    Cheia,
+    Anel,
+    AnelGrosso,
+}
+
+pub fn marca(pintor: &egui::Painter, centro: Pos2, raio: f32, cor: Color32, marca: Marca) {
+    match marca {
+        Marca::Cheia => {
+            pintor.circle_filled(centro, raio, cor);
+        }
+        Marca::Anel => {
+            pintor.circle_stroke(centro, raio - 0.75, Stroke::new(1.5, cor));
+        }
+        Marca::AnelGrosso => {
+            let grossura = (raio * 0.55).max(2.5);
+            pintor.circle_stroke(centro, raio - grossura / 2.0, Stroke::new(grossura, cor));
+        }
+    }
+}
+
+/// Estado de uma tarefa no registro (linha do tempo, Daily, Sprint e slide):
+/// cor, rótulo e marca, de um lugar só. `coluna` é a chave do núcleo.
+pub fn estado_da_tarefa(coluna: &str, erro: bool, removida: bool) -> (Color32, &'static str, Marca) {
+    use crate::dados::Coluna;
+    let p = cores();
+    if removida {
+        return (p.suave, "Removida", Marca::Anel);
+    }
+    let conhecida = Coluna::TODAS.into_iter().find(|c| c.chave() == coluna);
+    if erro && conhecida != Some(Coluna::Concluido) {
+        return (p.erro, "Com erro", Marca::AnelGrosso);
+    }
+    match conhecida {
+        Some(c @ (Coluna::Concluido | Coluna::Revisao | Coluna::Trabalhando)) => (cor_coluna(c), rotulo_coluna(c), Marca::Cheia),
+        Some(c) => (cor_coluna(c), rotulo_coluna(c), Marca::Anel),
+        None => (p.suave, "Parada", Marca::Anel),
+    }
+}
+
 /// Cor de cada coluna, usada no selo do cabeçalho da tarefa.
 pub fn cor_coluna(coluna: crate::dados::Coluna) -> Color32 {
     use crate::dados::Coluna;
@@ -603,6 +664,8 @@ pub fn cor_coluna(coluna: crate::dados::Coluna) -> Color32 {
 pub enum Icone {
     Mais,
     Fechar,
+    Anterior,
+    Proximo,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -639,11 +702,174 @@ fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
             pintor.line_segment([c + vec2(-m, -m), c + vec2(m, m)], Stroke::new(1.5, cor));
             pintor.line_segment([c + vec2(-m, m), c + vec2(m, -m)], Stroke::new(1.5, cor));
         }
+        Icone::Anterior | Icone::Proximo => {
+            let lado = if icone == Icone::Anterior { 1.0 } else { -1.0 };
+            let pontos = vec![c + vec2(2.5 * lado, -5.0), c + vec2(-2.5 * lado, 0.0), c + vec2(2.5 * lado, 5.0)];
+            pintor.add(Shape::line(pontos, Stroke::new(1.5, cor)));
+        }
     }
+}
+
+/// Triângulo de "tocar", um pouco à direita do centro (o centro visual dele).
+pub fn play(pintor: &egui::Painter, centro: Pos2, tamanho: f32, cor: Color32) {
+    let c = centro + vec2(tamanho * 0.15, 0.0);
+    let pontos = vec![c + vec2(-tamanho * 0.6, -tamanho), c + vec2(tamanho, 0.0), c + vec2(-tamanho * 0.6, tamanho)];
+    pintor.add(Shape::convex_polygon(pontos, cor, Stroke::NONE));
+}
+
+/// Cor do texto (ou do ícone) sobre o destaque, como no botão principal.
+pub fn sobre_destaque() -> Color32 {
+    if claro() { Color32::WHITE } else { cores().fundo }
+}
+
+/// Pílula de estado: ponto na cor do estado e a palavra na cor do texto, sobre
+/// o fundo tingido (legível nos três temas, mesmo no telão). `cheio`: ponto
+/// cheio ou anel; `ponto` falso deixa só a palavra (o chip neutro do projeto).
+/// `pos` é o canto de cima à esquerda; devolve onde ficou.
+pub struct Pilula<'a> {
+    pub texto: &'a str,
+    pub cor: Color32,
+    pub cheio: bool,
+    pub ponto: bool,
+    pub grande: bool,
+}
+
+impl<'a> Pilula<'a> {
+    pub fn grande(mut self) -> Self {
+        self.grande = true;
+        self
+    }
+
+    pub fn neutra(texto: &'a str) -> Self {
+        Pilula { texto, cor: cores().suave, cheio: true, ponto: false, grande: false }
+    }
+
+    fn medidas(&self) -> (f32, f32, f32, FontId) {
+        if self.grande { (32.0, 14.0, 5.0, forte(15.0)) } else { (22.0, 10.0, 3.5, forte(12.0)) }
+    }
+
+    pub fn largura(&self, pintor: &egui::Painter) -> f32 {
+        let (_, margem, raio, fonte) = self.medidas();
+        let texto = pintor.layout_no_wrap(self.texto.to_owned(), fonte, Color32::WHITE).size().x;
+        margem * 2.0 + texto + if self.ponto { raio * 2.0 + 7.0 } else { 0.0 }
+    }
+
+    pub fn pintar(&self, pintor: &egui::Painter, pos: Pos2) -> Rect {
+        let p = cores();
+        let (altura, margem, raio, fonte) = self.medidas();
+        let rect = Rect::from_min_size(pos, vec2(self.largura(pintor), altura));
+        if self.ponto {
+            pintor.rect_filled(rect, CornerRadius::same((altura / 2.0) as u8), fundo_tingido(p, self.cor, claro()));
+            let centro = pos2(rect.left() + margem + raio, rect.center().y);
+            if self.cheio {
+                pintor.circle_filled(centro, raio, self.cor);
+            } else {
+                pintor.circle_stroke(centro, raio - 0.75, Stroke::new(1.5, self.cor));
+            }
+        } else {
+            pintor.rect(rect, CornerRadius::same((altura / 2.0) as u8), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+        }
+        let x = rect.left() + margem + if self.ponto { raio * 2.0 + 7.0 } else { 0.0 };
+        let galeria = pintor.layout_no_wrap(self.texto.to_owned(), fonte, p.texto);
+        pintor.galley(pos2(x, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+        rect
+    }
+}
+
+/// Um número grande com o rótulo embaixo (e a marca do estado antes do rótulo).
+/// A mesma peça na Daily, na Sprint, na capa e no slide final.
+pub fn metrica(ui: &mut egui::Ui, valor: &str, rotulo: &str, ponto: Option<(Color32, Marca)>, tamanho: f32) -> Response {
+    let p = cores();
+    let rotulo_tamanho = if tamanho >= 48.0 { 16.0 } else { 13.0 };
+    let pintor = ui.painter();
+    let g_valor = pintor.layout_no_wrap(valor.to_owned(), forte(tamanho), p.texto);
+    let g_rotulo = pintor.layout_no_wrap(rotulo.to_owned(), FontId::proportional(rotulo_tamanho), p.suave);
+    let recuo = if ponto.is_some() { 14.0 } else { 0.0 };
+    let largura = g_valor.size().x.max(g_rotulo.size().x + recuo);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, g_valor.size().y + 4.0 + g_rotulo.size().y), Sense::hover());
+    let pintor = ui.painter();
+    pintor.galley(rect.min, g_valor.clone(), p.texto);
+    let y = rect.top() + g_valor.size().y + 4.0;
+    if let Some((cor, forma)) = ponto {
+        marca(pintor, pos2(rect.left() + 4.0, y + g_rotulo.size().y / 2.0), 4.5, cor, forma);
+    }
+    pintor.galley(pos2(rect.left() + recuo, y), g_rotulo, p.suave);
+    resposta
+}
+
+/// Filtro de liga e desliga: o desenho do `chip`, sem a seta (que quer dizer menu).
+pub fn chip_alternar(ui: &mut egui::Ui, rotulo: &str, ativo: bool) -> Response {
+    let p = cores();
+    let fonte = if ativo { forte(13.0) } else { FontId::proportional(13.0) };
+    let galeria = ui.painter().layout_no_wrap(rotulo.to_owned(), fonte, p.texto);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
+    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (fundo, borda) = if ativo {
+        (p.destaque.gamma_multiply(if claro() { 0.12 } else { 0.18 }), p.destaque.gamma_multiply(0.6))
+    } else if resposta.hovered() {
+        (p.realce, p.borda)
+    } else {
+        (p.superficie_alta, p.borda)
+    };
+    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
+    resposta
+}
+
+/// Uma tecla desenhada (no painel de atalhos e nas dicas).
+pub fn tecla(ui: &mut egui::Ui, texto: &str) -> Response {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::monospace(12.5), p.texto);
+    let (rect, resposta) = ui.allocate_exact_size(vec2((galeria.size().x + 16.0).max(22.0), 22.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(RAIO_ETIQUETA), p.superficie, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
+    resposta
+}
+
+/// Seção que abre e fecha ("Texto da daily", "Galeria"): seta e título, fundo
+/// só ao passar o mouse. Devolve se foi clicada (e já troca `aberta`).
+pub fn secao_recolhivel(ui: &mut egui::Ui, titulo: &str, aberta: &mut bool) -> Response {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(titulo.to_owned(), forte(13.5), p.texto);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 40.0, 32.0), Sense::click());
+    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resposta.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_CONTROLE), p.realce);
+    }
+    let centro = pos2(rect.left() + 14.0, rect.center().y);
+    let pontos = if *aberta {
+        vec![centro + vec2(-3.5, -1.5), centro + vec2(3.5, -1.5), centro + vec2(0.0, 2.5)]
+    } else {
+        vec![centro + vec2(-1.5, -3.5), centro + vec2(-1.5, 3.5), centro + vec2(2.5, 0.0)]
+    };
+    ui.painter().add(Shape::convex_polygon(pontos, p.suave, Stroke::NONE));
+    ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    if resposta.clicked() {
+        *aberta = !*aberta;
+    }
+    resposta
+}
+
+/// Bloco parado do estado "carregando" (desenhado uma vez, sem animação).
+pub fn esqueleto(pintor: &egui::Painter, rect: Rect, raio: u8) {
+    pintor.rect_filled(rect, CornerRadius::same(raio), cores().superficie);
 }
 
 /// Campo de várias linhas, com a moldura do `campo` (e borda de destaque com foco).
 pub fn campo_multilinha(ui: &mut egui::Ui, texto: &mut String, linhas: usize, altura_maxima: f32, id: egui::Id, so_leitura: bool) -> Response {
+    campo_multilinha_com(ui, texto, linhas, altura_maxima, id, so_leitura, FontId::proportional(13.5))
+}
+
+/// O mesmo campo, com a fonte escolhida (a nota do slide é de 18 px).
+pub fn campo_multilinha_com(
+    ui: &mut egui::Ui,
+    texto: &mut String,
+    linhas: usize,
+    altura_maxima: f32,
+    id: egui::Id,
+    so_leitura: bool,
+    fonte: FontId,
+) -> Response {
     let p = cores();
     let com_foco = ui.memory(|m| m.has_focus(id));
     let largura = ui.available_width();
@@ -664,7 +890,7 @@ pub fn campo_multilinha(ui: &mut egui::Ui, texto: &mut String, linhas: usize, al
                             .frame(egui::Frame::NONE)
                             .desired_rows(linhas)
                             .desired_width(largura - 22.0)
-                            .font(FontId::proportional(13.5))
+                            .font(fonte)
                             .text_color(cor)
                             .interactive(!so_leitura),
                     )
@@ -699,15 +925,43 @@ pub fn caixa_marcar(ui: &mut egui::Ui, texto: &str, marcada: &mut bool) -> Respo
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Texto em até `linhas` linhas, cortado com "…" (U+2026) no fim. Antes do
+/// "…" não fica espaço nem vírgula: "paginação…", nunca "paginação, …". É o
+/// único jeito de cortar texto na tela, para todo corte terminar igual.
+/// `qualquer_ponto`: corta no meio da palavra (linhas de lista); falso corta
+/// entre palavras (títulos, notas).
+pub fn cortar(pintor: &egui::Painter, texto: &str, formato: egui::TextFormat, largura: f32, linhas: usize, qualquer_ponto: bool) -> Arc<egui::Galley> {
+    let montar = |t: String| {
+        let mut trabalho = egui::text::LayoutJob::single_section(t, formato.clone());
+        trabalho.wrap =
+            egui::text::TextWrapping { max_width: largura.max(10.0), max_rows: linhas.max(1), break_anywhere: qualquer_ponto, overflow_character: Some('…') };
+        pintor.layout_job(trabalho)
+    };
+    let galeria = montar(texto.to_owned());
+    if !galeria.elided {
+        return galeria;
+    }
+    // O que coube, sem o "…" e sem espaço ou pontuação no fim.
+    let mut coube = String::new();
+    for linha in &galeria.rows {
+        coube.extend(linha.glyphs.iter().map(|g| g.chr));
+        if linha.ends_with_newline {
+            coube.push('\n');
+        }
+    }
+    let limpo = coube.trim_end_matches('…').trim_end_matches(|c: char| c.is_whitespace() || ",;:·-–".contains(c));
+    let mut galeria = montar(format!("{limpo}…"));
+    // O texto refeito é do mesmo tamanho ou menor: cabe; o "elided" segue valendo.
+    Arc::make_mut(&mut galeria).elided = true;
+    galeria
+}
+
 /// Uma linha em duas partes: o começo pode ser cortado com "…", o fim fica
 /// inteiro (a hora, o projeto). `pos` é o canto de cima à esquerda. Diz se cortou.
 #[allow(clippy::too_many_arguments)]
 pub fn texto_com_fim(pintor: &egui::Painter, pos: Pos2, corta: &str, fim: &str, fonte: FontId, cor: Color32, cor_fim: Color32, largura: f32) -> bool {
     let galeria_fim = pintor.layout_no_wrap(fim.to_owned(), fonte.clone(), cor_fim);
-    let mut trabalho = egui::text::LayoutJob::simple_singleline(corta.to_owned(), fonte, cor);
-    trabalho.wrap =
-        egui::text::TextWrapping { max_width: (largura - galeria_fim.size().x).max(24.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let galeria = pintor.layout_job(trabalho);
+    let galeria = cortar(pintor, corta, egui::TextFormat::simple(fonte, cor), (largura - galeria_fim.size().x).max(24.0), 1, true);
     let cortou = galeria.elided;
     let x_fim = pos.x + galeria.size().x;
     pintor.galley(pos, galeria, cor);
@@ -915,6 +1169,60 @@ mod testes {
     }
 
     #[test]
+    fn suave_e_legivel_sobre_o_fundo_e_os_cartoes() {
+        // `suave` (horas, títulos de tarefa removida, rótulos) só vai sobre o
+        // fundo e o cartão: sobre `superficie` não passa de 4,5:1 nos claros.
+        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+            for (onde, fundo) in [("fundo", p.fundo), ("superficie_alta", p.superficie_alta)] {
+                let r = contraste(p.suave, fundo);
+                assert!(r >= 4.5, "suave sobre {onde} no tema {nome}: {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn alerta_se_separa_do_destaque_e_do_erro() {
+        // Os pontos de "Aguardando você", "Concluídas" e "Com erro" lado a lado:
+        // o alerta precisa de matiz própria (mais de 20° de distância).
+        let matiz = |c: Color32| {
+            let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+            let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+            let d = (max - min).max(1.0);
+            let h = if max == r {
+                ((g - b) / d).rem_euclid(6.0)
+            } else if max == g {
+                (b - r) / d + 2.0
+            } else {
+                (r - g) / d + 4.0
+            };
+            h * 60.0
+        };
+        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+            for (outra, c) in [("destaque", p.destaque), ("erro", p.erro)] {
+                let distancia = (matiz(p.alerta) - matiz(c)).abs();
+                assert!(distancia.min(360.0 - distancia) > 20.0, "alerta e {outra} no tema {nome}: {distancia:.0}°");
+            }
+        }
+        // No leitura o alerta também vai sobre o fundo (capa, números).
+        assert!(contraste(LEITURA.alerta, LEITURA.fundo) >= 4.5, "alerta sobre o fundo no tema leitura");
+    }
+
+    #[test]
+    fn corte_termina_com_reticencias_sem_espaco_nem_virgula() {
+        let ctx = egui::Context::default();
+        let mut fim = String::new();
+        let mut saida = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let pintor = ui.painter().clone();
+            let formato = egui::TextFormat::simple(FontId::proportional(13.0), Color32::WHITE);
+            let largura = pintor.layout_no_wrap("Migrar os filtros da listagem, ".into(), FontId::proportional(13.0), Color32::WHITE).size().x + 4.0;
+            let g = cortar(&pintor, "Migrar os filtros da listagem, com paginação e cache", formato, largura, 1, false);
+            fim = g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect();
+        });
+        saida.textures_delta.clear();
+        assert!(fim.ends_with('…') && !fim.ends_with(" …") && !fim.ends_with(",…"), "{fim:?}");
+    }
+
+    #[test]
     fn faixas_tingidas_sao_opacas_e_legiveis() {
         // A faixa "Núcleo desconectado" (alerta) e a de núcleo antigo (erro):
         // texto do tema sobre o fundo tingido, pelo menos 4,5:1.
@@ -924,6 +1232,18 @@ mod testes {
                 assert_eq!(fundo.a(), 255, "faixa de {cor} no tema {nome} não é opaca");
                 let r = contraste(p.texto, fundo);
                 assert!(r >= 4.5, "texto na faixa de {cor} no tema {nome}: {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn pilulas_sao_legiveis_em_todos_os_temas() {
+        // A pílula de estado põe a palavra em `texto` sobre o fundo tingido
+        // da cor do estado: pelo menos 4,5:1 com destaque e ok também.
+        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+            for (cor, c) in [("destaque", p.destaque), ("ok", p.ok), ("suave", p.suave)] {
+                let r = contraste(p.texto, fundo_tingido(p, c, eh_claro));
+                assert!(r >= 4.5, "texto na pílula de {cor} no tema {nome}: {r:.2}");
             }
         }
     }

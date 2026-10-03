@@ -296,6 +296,10 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		var d anexoDados
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "anexo_id": d.Anexo, "tarefa_id": e.Escopo.Tarefa}
+	case "nota.atualizada":
+		var d notaDados
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "nota_tipo": d.Tipo, "periodo": d.Periodo}
 	}
 	return nil
 }

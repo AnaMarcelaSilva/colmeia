@@ -348,9 +348,23 @@ pub enum Evento {
         desde_hora: String,
     },
     #[serde(rename = "anexo.adicionado")]
-    AnexoAdicionado { seq: u64 },
+    AnexoAdicionado {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+    },
     #[serde(rename = "anexo.removido")]
-    AnexoRemovido { seq: u64 },
+    AnexoRemovido {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+    },
+    #[serde(rename = "nota.atualizada")]
+    NotaAtualizada {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+    },
     #[serde(other)]
     Desconhecido,
 }
@@ -370,8 +384,9 @@ impl Evento {
             | Evento::AgenteIniciou { seq, .. }
             | Evento::AgenteTerminou { seq, .. }
             | Evento::AgenteEstado { seq, .. }
-            | Evento::AnexoAdicionado { seq }
-            | Evento::AnexoRemovido { seq } => *seq,
+            | Evento::AnexoAdicionado { seq, .. }
+            | Evento::AnexoRemovido { seq, .. }
+            | Evento::NotaAtualizada { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -416,7 +431,7 @@ impl Modelo {
     pub fn aplicar(&mut self, evento: Evento) -> Vec<Efeito> {
         let mut efeitos = Vec::new();
         match evento {
-            Evento::Ola { .. } | Evento::Desconhecido | Evento::AnexoAdicionado { .. } | Evento::AnexoRemovido { .. } => {}
+            Evento::Ola { .. } | Evento::Desconhecido | Evento::AnexoAdicionado { .. } | Evento::AnexoRemovido { .. } | Evento::NotaAtualizada { .. } => {}
             Evento::Recarregar => efeitos.push(Efeito::Recarregar),
             Evento::ProjetoCriado { projeto, .. } => {
                 let projeto = Projeto::from(projeto);

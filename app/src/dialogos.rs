@@ -66,6 +66,13 @@ pub enum Dialogo {
         rodando: usize,
         erro: Option<String>,
     },
+    /// Apagar o histórico de mensagens de um agente.
+    LimparHistorico {
+        agente: i64,
+        nome: String,
+        guardadas: usize,
+        erro: Option<String>,
+    },
 }
 
 pub enum Resultado {
@@ -82,6 +89,8 @@ pub enum Resultado {
         tarefa: i64,
         nao_mostrar: bool,
     },
+    /// O histórico de mensagens do agente foi apagado no núcleo.
+    HistoricoLimpo(i64),
     /// Fechar só a janela: os agentes seguem no núcleo.
     FecharJanela,
     /// O núcleo já foi encerrado (e os agentes com ele): fechar a janela.
@@ -221,6 +230,7 @@ impl Dialogo {
                         }
                     }
                     Dialogo::Fechar { rodando, erro } => fechar(ui, *rodando, erro),
+                    Dialogo::LimparHistorico { agente, nome, guardadas, erro } => limpar_historico(ui, *agente, nome, *guardadas, erro),
                 }
             });
         match modal.inner {
@@ -283,6 +293,35 @@ fn fechar(ui: &mut egui::Ui, rodando: usize, erro: &mut Option<String>) -> Resul
             Ok(()) => Resultado::PararEFechar,
             Err(e) => {
                 *erro = Some(format!("Não consegui encerrar o núcleo: {e}"));
+                Resultado::Continua
+            }
+        };
+    }
+    Resultado::Continua
+}
+
+/// Apagar as mensagens guardadas de um agente (a seta para cima deixa de trazê-las).
+fn limpar_historico(ui: &mut egui::Ui, agente: i64, nome: &str, guardadas: usize, erro: &mut Option<String>) -> Resultado {
+    let texto =
+        if guardadas == 1 { format!("Apagar a mensagem guardada de «{nome}»?") } else { format!("Apagar as {guardadas} mensagens guardadas de «{nome}»?") };
+    tema::cabecalho(ui, "Limpar histórico", &texto);
+    mostrar_erro(ui, erro);
+    let (mut cancelar, mut apagar) = (false, false);
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        cancelar = tema::botao_secundario(ui, "Cancelar").on_hover_text("Esc").clicked();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            apagar = tema::botao_alerta(ui, "Apagar").clicked();
+        });
+    });
+    if cancelar {
+        return Resultado::Fechar;
+    }
+    if apagar {
+        return match api::limpar_mensagens(agente) {
+            Ok(()) => Resultado::HistoricoLimpo(agente),
+            Err(e) => {
+                *erro = Some(format!("Não consegui apagar: {e}"));
                 Resultado::Continua
             }
         };

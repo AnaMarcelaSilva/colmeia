@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,8 +19,10 @@ type anexoDados struct {
 
 func (s *Servidor) rotasAnexos(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tarefas/{id}/anexos", s.anexarNaTarefa)
+	mux.HandleFunc("POST /v1/tarefas/{id}/videos", s.anexarVideo)
 	mux.HandleFunc("POST /v1/perfis/{id}/anexos", s.anexarNoPerfil)
 	mux.HandleFunc("GET /v1/anexos/{id}", s.lerAnexo)
+	mux.HandleFunc("GET /v1/anexos/{id}/info", s.infoAnexo)
 	mux.HandleFunc("DELETE /v1/anexos/{id}", s.removerAnexo)
 }
 
@@ -54,15 +57,17 @@ func (s *Servidor) anexarNoPerfil(w http.ResponseWriter, r *http.Request) {
 	s.anexar(w, r, id, 0)
 }
 
-// anexar recebe um PNG no corpo (até 8 MB). origem: captura, colagem ou
-// mensagem; agente (opcional): de qual terminal veio a captura.
+// anexar recebe um PNG ou um JPEG no corpo (até 8 MB). origem: captura,
+// colagem, mensagem ou arquivo; agente (opcional): de qual terminal veio a
+// captura; nome (opcional): o nome do arquivo de origem, sem a pasta.
 func (s *Servidor) anexar(w http.ResponseWriter, r *http.Request, perfil, tarefa int64) {
-	if r.Header.Get("Content-Type") != "image/png" {
-		responderErro(w, dados.ErrInvalido{Motivo: "envie a imagem como image/png"})
+	tipo := r.Header.Get("Content-Type")
+	if tipo != "image/png" && tipo != "image/jpeg" {
+		responderErro(w, dados.ErrInvalido{Motivo: "envie a imagem como image/png ou image/jpeg"})
 		return
 	}
 	q := r.URL.Query()
-	novo := dados.NovoAnexo{Perfil: perfil, Tarefa: tarefa, Origem: q.Get("origem"), Legenda: q.Get("legenda")}
+	novo := dados.NovoAnexo{Perfil: perfil, Tarefa: tarefa, Origem: q.Get("origem"), Legenda: q.Get("legenda"), Nome: q.Get("nome")}
 	if v := q.Get("agente"); v != "" {
 		agente, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || agente <= 0 || tarefa == 0 {
@@ -76,8 +81,8 @@ func (s *Servidor) anexar(w http.ResponseWriter, r *http.Request, perfil, tarefa
 		responderErro(w, err)
 		return
 	}
-	imagem, err := anexos.Gravar(s.pastaAnexos(perfil), r.Body)
-	if errors.Is(err, anexos.ErrGrande) || errors.Is(err, anexos.ErrDimensoes) || errors.Is(err, anexos.ErrNaoPNG) {
+	imagem, err := anexos.GravarImagem(s.pastaAnexos(perfil), r.Body, tipo)
+	if errors.Is(err, anexos.ErrGrande) || errors.Is(err, anexos.ErrDimensoes) || errors.Is(err, anexos.ErrNaoPNG) || errors.Is(err, anexos.ErrNaoJPEG) {
 		responderErro(w, dados.ErrInvalido{Motivo: err.Error()})
 		return
 	}
@@ -117,7 +122,11 @@ func (s *Servidor) lerAnexo(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	caminho, err := anexos.Caminho(s.pastaAnexos(anexo.PerfilID), anexo.Sha256)
+	if anexo.Tipo != "imagem" {
+		responderErro(w, dados.ErrInvalido{Motivo: "este anexo é um vídeo: abra no reprodutor do sistema"})
+		return
+	}
+	caminho, err := anexos.Caminho(s.pastaAnexos(anexo.PerfilID), anexo.Sha256, anexo.Formato)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -146,9 +155,81 @@ func (s *Servidor) removerAnexo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !emUso {
-		if caminho, err := anexos.Caminho(s.pastaAnexos(anexo.PerfilID), anexo.Sha256); err == nil {
+		if caminho, err := anexos.Caminho(s.pastaAnexos(anexo.PerfilID), anexo.Sha256, anexo.Formato); err == nil {
 			os.Remove(caminho)
 		}
 	}
 	responderJSON(w, map[string]any{"ok": true})
+}
+
+// anexarVideo recebe um vídeo no corpo (mp4, webm, mkv ou mov, até 512 MB),
+// copiado em fluxo para o disco. nome (opcional): o nome do arquivo de origem.
+func (s *Servidor) anexarVideo(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	_, _, perfil, err := s.Banco.Tarefa(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	tipo := r.Header.Get("Content-Type")
+	if _, ok := anexos.TiposDeVideo[tipo]; !ok {
+		responderErro(w, dados.ErrInvalido{Motivo: "envie o vídeo como video/mp4, video/webm, video/x-matroska ou video/quicktime"})
+		return
+	}
+	if r.ContentLength > anexos.MaxVideo {
+		responderErro(w, dados.ErrInvalido{Motivo: anexos.ErrVideoGrande.Error()})
+		return
+	}
+	nome := r.URL.Query().Get("nome")
+	// Confere o nome antes de gravar o arquivo.
+	if _, err := dados.NomeDeArquivo(nome); err != nil {
+		responderErro(w, err)
+		return
+	}
+	video, err := anexos.GravarVideo(s.pastaAnexos(perfil), r.Body, tipo)
+	if errors.Is(err, anexos.ErrVideoGrande) || errors.Is(err, anexos.ErrNaoVideo) || errors.Is(err, anexos.ErrTipoDeVideo) {
+		responderErro(w, dados.ErrInvalido{Motivo: err.Error()})
+		return
+	}
+	if err != nil {
+		log.Printf("gravando vídeo: %v", err)
+		responderErro(w, dados.ErrInvalido{Motivo: "não consegui gravar o vídeo (o disco está cheio?)"})
+		return
+	}
+	anexo, err := s.Banco.CriarAnexo(r.Context(), dados.NovoAnexo{Perfil: perfil, Tarefa: id, Origem: "arquivo", Sha256: video.Sha256,
+		Bytes: int(video.Bytes), Tipo: "video", Formato: video.Formato, Nome: nome})
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{"id": anexo.ID, "caminho": video.Caminho, "bytes": video.Bytes})
+}
+
+// infoAnexo diz o que é o anexo e onde ele está, para a tela abrir um vídeo
+// no reprodutor do sistema. O caminho é sempre montado aqui, pelo hash.
+func (s *Servidor) infoAnexo(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	anexo, err := s.Banco.Anexo(r.Context(), id)
+	if err == nil && anexo.Removido {
+		err = dados.ErrNaoEncontrado
+	}
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	caminho, err := anexos.Caminho(s.pastaAnexos(anexo.PerfilID), anexo.Sha256, anexo.Formato)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{"tipo": anexo.Tipo, "formato": anexo.Formato, "nome": anexo.Nome, "bytes": anexo.Bytes,
+		"largura": anexo.Largura, "altura": anexo.Altura, "caminho": caminho})
 }

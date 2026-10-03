@@ -21,6 +21,7 @@ var padraoData = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 func (s *Servidor) rotasLinha(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/perfis/{id}/linha-do-tempo", s.linhaDoTempo)
 	mux.HandleFunc("GET /v1/perfis/{id}/resumo", s.resumo)
+	mux.HandleFunc("GET /v1/perfis/{id}/apresentacao", s.apresentacao)
 }
 
 // data lê AAAA-MM-DD no fuso local.
@@ -266,4 +267,79 @@ func responderMarkdown(w http.ResponseWriter, texto string) {
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Write([]byte(texto))
+}
+
+// apresentacao monta o deck da daily (tipo=daily) ou da sprint
+// (tipo=sprint, com o período como no resumo): uma tarefa por slide, com os
+// anexos e as notas de cada uma.
+func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
+	perfil, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if _, err := s.Banco.Perfil(r.Context(), perfil); err != nil {
+		responderErro(w, err)
+		return
+	}
+	projeto, err := projetoDoPedido(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	tipo := r.URL.Query().Get("tipo")
+	if tipo != "daily" && tipo != "sprint" {
+		responderErro(w, dados.ErrInvalido{Motivo: "tipo precisa ser daily ou sprint"})
+		return
+	}
+	c, err := s.contextoDaLinha(r.Context(), perfil, projeto)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var deck linha.Deck
+	if tipo == "daily" {
+		hoje := time.Now()
+		inicio := time.Date(hoje.Year(), hoje.Month(), hoje.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -linha.JanelaDaily)
+		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Desde: inicioDoDia(inicio)})
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		deck = linha.Apresentacao(eventos, time.Time{}, time.Time{}, c, tipo)
+	} else {
+		de, ate, err := periodo(r, true)
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Ate: inicioDoDia(ate.AddDate(0, 0, 1))})
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		deck = linha.Apresentacao(eventos, de, ate, c, tipo)
+	}
+	ids := deck.Tarefas()
+	inicio, _ := time.ParseInLocation("2006-01-02", deck.De, time.Local)
+	fim, _ := time.ParseInLocation("2006-01-02", deck.Ate, time.Local)
+	anexos, err := s.Banco.AnexosDasTarefas(r.Context(), ids, inicioDoDia(inicio), inicioDoDia(fim.AddDate(0, 0, 1)))
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	notas, err := s.Banco.NotasDoPeriodo(r.Context(), ids, tipo, deck.ChaveNota)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var anteriores map[int64]dados.Nota
+	if tipo == "sprint" {
+		if anteriores, err = s.Banco.UltimasNotas(r.Context(), ids, tipo); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	deck.Completar(anexos, notas, anteriores)
+	responderJSON(w, deck)
 }

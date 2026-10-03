@@ -4,7 +4,7 @@ Um app desktop para coordenar vários agentes de IA de código (Claude Code, Cod
 
 ![A abelha-robô da Colmeia nos cinco estados: dormindo, trabalhando, aguardando você, bugado e comemorando](docs/imagens/abelha.gif)
 
-> **Estado atual (0.2.0):** perfis, contas de IA, workspaces, projetos (repositórios git ou pastas de trabalho sem git), tarefas e agentes de verdade. Cada tarefa abre o Claude Code, o Codex, outra ferramenta ou um terminal comum na pasta dela (ou numa cópia isolada do repositório), e retoma conversas do Claude Code começadas em outro lugar. O quadro se atualiza sozinho quando um agente trabalha, espera você ou para, e a linha do tempo monta a daily e a sprint. Roda no Linux; o Windows ainda não (veja [Plataformas](#plataformas)).
+> **Estado atual (0.2.0):** perfis, contas de IA, workspaces, projetos (repositórios git ou pastas de trabalho sem git), tarefas e agentes de verdade. Cada tarefa abre o Claude Code, o Codex, outra ferramenta ou um terminal comum na pasta dela (ou numa cópia isolada do repositório), e retoma conversas do Claude Code começadas em outro lugar. O quadro se atualiza sozinho quando um agente trabalha, espera você ou para; a linha do tempo, a daily e a sprint mostram o trabalho por tarefa, e o modo apresentação passa a daily inteira em tela cheia, com notas, fotos e vídeos. Roda no Linux; o Windows ainda não (veja [Plataformas](#plataformas)).
 
 ## Por que existe
 
@@ -72,6 +72,10 @@ Depois disso: o perfil se troca pelo seletor no topo da barra lateral; "+ Novo p
 
 Na caixa de mensagem do painel da tarefa, **Enter quebra a linha**, **Ctrl+Enter envia** e **Ctrl+V cola imagens**: o núcleo guarda a imagem (em `~/.local/share/colmeia/anexos/`, anexada à tarefa) e o caminho vai junto na mensagem, que é como o Claude Code e o Codex recebem imagens.
 
+**↑ traz as mensagens anteriores**, como no terminal: com o cursor na primeira linha, a seta para cima mostra o que você já mandou ao agente em foco (e continua andando em qualquer linha), a seta para baixo volta, e depois da mais nova (ou com Esc) volta o rascunho que você estava escrevendo. O histórico fica no núcleo, então sobrevive a fechar a Colmeia, com até 200 mensagens por agente.
+
+> **Privacidade do histórico.** O núcleo não guarda uma mensagem que pareça ter senha, token ou chave (`sk-…`, `ghp_…`, `senha: …`, chave privada) e avisa no rodapé da caixa; a mensagem é enviada mesmo assim. O filtro é uma leitura, não uma garantia: se um segredo escapar, "Limpar histórico de mensagens" no menu "⋯" do agente apaga tudo. O histórico fica fora do registro imutável de eventos justamente para poder ser apagado ([decisão 0006](docs/decisoes/0006-apresentacao-e-historico.md)).
+
 ## Em tempo real
 
 O núcleo avisa a tela na hora quando algo muda, por evento (nada de consulta periódica). Cada agente aparece com um estado, com a mesma cor e o mesmo texto no cartão, no painel, na abelha e na linha do tempo:
@@ -90,15 +94,39 @@ O núcleo avisa a tela na hora quando algo muda, por evento (nada de consulta pe
 - **Quando algo precisa de você** e não está na tela, aparece um aviso no rodapé com "Abrir". Com a janela em segundo plano, o título vira "Colmeia · 2 esperando você" e ela pede atenção ao sistema.
 - **Sem o núcleo**, a tela mostra a faixa "Núcleo desconectado", continua mostrando o quadro e tenta reconectar sozinha (em 1, 2, 4… até 30 s). As tentativas sozinhas só reconectam; quem inicia o núcleo de novo é o botão "Tentar agora", para não ressuscitar um núcleo encerrado de propósito.
 
-## Daily e sprint
+## Linha do tempo, daily e sprint
 
-![Linha do tempo de um perfil de exemplo, com o painel da daily aberto](docs/imagens/linha-do-tempo.png)
+![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
 
-A troca **Quadro | Linha do tempo** fica acima do quadro. A linha do tempo mostra o que aconteceu dia a dia, no escopo da barra lateral (o perfil inteiro ou um projeto): tarefas criadas, movidas e concluídas, quanto tempo cada agente trabalhou e esperou você, erros e capturas. O clique num item abre a tarefa.
+As páginas **Quadro · Linha do tempo · Daily · Sprint** ficam na barra de cima e seguem o escopo da barra lateral (o perfil inteiro ou um projeto).
 
-- **Daily** (Ctrl+Shift+D): o texto vem pronto ("Na sexta (25/09): concluí X; avancei Y (agentes trabalharam 2h10). Hoje: sigo em Y; Z está esperando minha resposta."). Dá para editar antes de copiar; nada é gravado.
-- **Sprint:** 7 ou 14 dias, este mês ou as datas que você escolher (até 92 dias). Copiar texto, Copiar em Markdown, ou Salvar: o `.md` e as capturas numa pasta `capturas/` ao lado, onde você escolher.
-- **Capturar terminal** (Ctrl+Shift+S, ou "⋯" no agente): a imagem do terminal em foco fica anexada à tarefa e aparece na linha do tempo e na sprint. Na primeira vez a Colmeia avisa: a captura guarda o que está visível, inclusive senhas ou chaves.
+- **Linha do tempo:** um cabeçalho por dia, que fica preso no topo ao rolar, com as conclusões, os erros e o tempo de agente do dia. Dentro do dia, um cartão por tarefa, com o estado atual e os eventos dela em lista (as repetições viram uma linha só, como "Anotou na daily (2 vezes)"); as capturas aparecem como miniaturas no cartão. Filtros: Só conclusões, Só erros e Com capturas. O título do cartão abre a tarefa.
+- **Daily** (Ctrl+Shift+D): os números do período ("ontem" é o último dia com atividade, até 7 dias atrás, e hoje) e um cartão por tarefa, agrupado como nos slides: concluídas, em revisão, aguardando você, trabalhando e com erro. Os números têm os nomes dos grupos e são os mesmos na Sprint e na capa; "Erros" conta as sessões que pararam com erro e "tarefas novas", todas as criadas no período. O texto pronto para falar fica em "Texto da daily", recolhido; "Copiar texto" na barra copia sem abrir.
+- **Sprint:** 7 ou 14 dias, este mês ou as datas que você escolher (até 92 dias), com o tempo de agente por ferramenta, as tarefas por projeto e a galeria das capturas. No "⋯": Copiar em Markdown e Salvar… (o `.md` e as capturas numa pasta `capturas/` ao lado).
+- **Capturar terminal** (Ctrl+Shift+S, ou "⋯" no agente): a imagem do terminal em foco fica anexada à tarefa. Na primeira vez a Colmeia avisa: a captura guarda o que está visível, inclusive senhas ou chaves.
+
+![A linha do tempo: o cabeçalho do dia com os números e um cartão por tarefa, com as miniaturas](docs/imagens/linha-do-tempo.png)
+
+### Modo apresentação
+
+**Apresentar** (ou F5) passa a daily ou a sprint inteira em tela cheia, sem sair da Colmeia: uma capa com o resumo do período e um slide por tarefa, com o projeto, o estado, o que foi feito, os números, as fotos e vídeos e a nota. Clicar num cartão da Daily ou da Sprint abre a apresentação em janela, no slide daquela tarefa, para preparar; F11 alterna entre os dois. Durante a apresentação não aparece aviso nenhum (a tela está sendo compartilhada): os avisos guardados aparecem ao sair.
+
+- **Notas:** N (ou o clique) edita a nota da tarefa, que aparece no slide para quem está vendo. Ela é salva ao sair do campo (Esc ou clique fora), ao trocar de slide e ao sair, nunca por tempo. Cada daily tem as próprias notas; na sprint, se o período mudou, a última nota de sprint da tarefa aparece apagada, com o período dela. Uma nota que parece ter senha ou chave não é salva ("Não salvei: …"); o segundo Esc larga a edição e fica a nota anterior.
+- **Fotos e vídeos:** A (ou "Adicionar foto ou vídeo"), arrastar arquivos para a janela ou Ctrl+V com uma imagem copiada anexam ao slide atual: png, jpg, mp4, webm, mkv ou mov. Um vídeo aparece como um cartão com o play, o nome e o tamanho (sem um quadro do vídeo) e abre no reprodutor do sistema; a Colmeia não toca vídeo. O × sobre a imagem tira o anexo, com "Desfazer".
+- **Novidades:** o que acontece no perfil durante a apresentação não mexe nos slides; aparece "Novidades · R atualiza", e o R refaz o deck no mesmo slide.
+
+| Tecla | Na apresentação |
+| --- | --- |
+| → PgDn Espaço Enter / ← PgUp Backspace | Próximo / anterior |
+| Home / End / C | Primeiro / último / capa |
+| N / A | Editar a nota / adicionar foto ou vídeo |
+| H / T | Esconder o slide / tema claro ou escuro (só nesta apresentação) |
+| R / F11 / ? | Atualizar / tela cheia / atalhos |
+| Esc | Fecha o que estiver aberto (imagem, atalhos, nota); senão, sai |
+
+> **Privacidade das fotos.** Toda foto JPEG vira um PNG novo ao ser anexada: o EXIF, com a localização (GPS) e o modelo da câmera, fica para trás. Vídeos são guardados como vieram (até 512 MB), depois de o núcleo conferir que o conteúdo é mesmo do tipo informado.
+
+![A página da daily, com os números do período e os cartões das tarefas](docs/imagens/daily.png)
 
 ## Atalhos
 
@@ -109,6 +137,8 @@ A Colmeia reserva **Ctrl+Shift+letra** para ela: esses atalhos não chegam ao pr
 | Ctrl+Shift+P | Abre o próximo agente que precisa de você (erros primeiro) |
 | Ctrl+Shift+L | Linha do tempo (de novo volta ao quadro) |
 | Ctrl+Shift+D | Daily |
+| F5 / Shift+F5 | Apresenta a daily (ou a sprint, na página da sprint) / retoma do último slide visto |
+| ↑ / ↓ na caixa de mensagem | Mensagens anteriores ao agente em foco |
 | Ctrl+Shift+S | Captura o terminal em foco |
 | Ctrl+Esc | Volta do painel da tarefa ao quadro |
 
@@ -125,6 +155,7 @@ Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com
 | `COLMEIA_EDITOR` | tela | Comando do editor para "Abrir no…" |
 | `COLMEIA_TEMA` | tela | `escuro`, `claro` ou `leitura`, só antes de entrar num perfil |
 | `COLMEIA_SEM_ABELHA=1` | tela | Desliga a abelha |
+| `COLMEIA_TAMANHO` | tela | Tamanho inicial da janela, como `1280x720` (para conferir telas menores) |
 | `COLMEIA_TAREFA`, `COLMEIA_CARTOES`, `COLMEIA_CENARIO=erro` | tela | Só na demonstração: abrir uma tarefa, quantidade de cartões, cenário de erro |
 
 ## Arquitetura

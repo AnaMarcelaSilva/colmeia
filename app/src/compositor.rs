@@ -3,11 +3,114 @@
 //! vai para o núcleo como PNG (a tela não escreve nos dados), fica anexada à
 //! tarefa, e o caminho que o núcleo devolve vai junto na mensagem, que é como
 //! o Claude Code e o Codex recebem imagens.
+//!
+//! A seta para cima traz as mensagens já enviadas ao agente em foco, como no
+//! terminal. O histórico fica no núcleo (sobrevive a fechar a Colmeia) e é
+//! lido uma vez por agente, numa thread; nada é consultado por tempo.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui::{self, ColorImage, CornerRadius, Event, Key, Modifiers, TextureHandle, TextureOptions, vec2};
 
+use crate::api;
 use crate::dados::AgenteTela;
 use crate::tema::{self, cores};
+
+/// Mensagens guardadas por agente (o núcleo guarda o mesmo tanto).
+const MAX_HISTORICO: usize = 200;
+
+/// Navegação pelo histórico de um agente, sem nada de tela (dá para testar).
+/// `itens` vai da mais nova para a mais antiga.
+#[derive(Default, Debug)]
+pub struct Historico {
+    itens: Vec<String>,
+    posicao: Option<usize>,
+    rascunho_guardado: String,
+}
+
+impl Historico {
+    pub fn novo(itens: Vec<String>) -> Self {
+        Historico { itens, ..Default::default() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.itens.len()
+    }
+
+    pub fn navegando(&self) -> bool {
+        self.posicao.is_some()
+    }
+
+    /// "Mensagem 3 de 41": a posição (contando da mais nova) e o total.
+    pub fn onde(&self) -> Option<(usize, usize)> {
+        self.posicao.map(|p| (p + 1, self.itens.len()))
+    }
+
+    /// Seta para cima: a primeira guarda o rascunho e traz a mais nova; as
+    /// outras vão para as mais antigas. Na mais antiga, fica nela (None).
+    pub fn subir(&mut self, atual: &str) -> Option<String> {
+        let proxima = match self.posicao {
+            None if self.itens.is_empty() => return None,
+            None => {
+                self.rascunho_guardado = atual.to_string();
+                0
+            }
+            Some(p) if p + 1 < self.itens.len() => p + 1,
+            Some(_) => return None,
+        };
+        self.posicao = Some(proxima);
+        Some(self.itens[proxima].clone())
+    }
+
+    /// Seta para baixo: volta para as mais novas e, depois da mais nova,
+    /// devolve o rascunho e encerra a navegação.
+    pub fn descer(&mut self) -> Option<String> {
+        match self.posicao? {
+            0 => self.cancelar(),
+            p => {
+                self.posicao = Some(p - 1);
+                Some(self.itens[p - 1].clone())
+            }
+        }
+    }
+
+    /// Esc: devolve o rascunho e encerra a navegação.
+    pub fn cancelar(&mut self) -> Option<String> {
+        self.posicao.take()?;
+        Some(std::mem::take(&mut self.rascunho_guardado))
+    }
+
+    /// O texto foi editado: ele passa a ser o rascunho, sem navegação.
+    pub fn editou(&mut self) {
+        self.posicao = None;
+        self.rascunho_guardado.clear();
+    }
+
+    /// Uma mensagem enviada entra na frente (a repetição seguida não entra).
+    pub fn acrescentar(&mut self, texto: &str) {
+        self.editou();
+        if self.itens.first().is_some_and(|t| t == texto) {
+            return;
+        }
+        self.itens.insert(0, texto.to_string());
+        self.itens.truncate(MAX_HISTORICO);
+    }
+
+    /// Tira a mais nova se for este texto (o núcleo não guardou).
+    pub fn desfazer(&mut self, texto: &str) {
+        if self.itens.first().is_some_and(|t| t == texto) {
+            self.itens.remove(0);
+        }
+    }
+}
+
+/// O que as threads do histórico respondem.
+enum RespostaHistorico {
+    Lido(i64, Result<Vec<String>, String>),
+    /// O núcleo não guardou (parece ter senha ou chave).
+    NaoGuardada(i64, String),
+}
 
 /// Maior imagem aceita (em pixels), para uma colagem acidental não travar a tela.
 const MAIOR_IMAGEM: usize = 40_000_000;
@@ -19,7 +122,6 @@ struct Anexo {
     miniatura: TextureHandle,
 }
 
-#[derive(Default)]
 pub struct Compositor {
     rascunho: String,
     pub para_todos: bool,
@@ -28,6 +130,33 @@ pub struct Compositor {
     aviso: Option<String>,
     /// Quando houve a última colagem de texto, para não tratar o mesmo Ctrl+V como imagem.
     colou_texto_em: f64,
+    /// Histórico de cada agente, lido do núcleo na primeira vez que ele fica em foco.
+    historicos: HashMap<i64, Historico>,
+    lendo: HashSet<i64>,
+    respostas: (Sender<RespostaHistorico>, Receiver<RespostaHistorico>),
+    /// "Não ficou no histórico…": some na próxima edição, não por tempo.
+    aviso_historico: Option<String>,
+    /// A caixa tinha o teclado no quadro anterior (o egui solta o foco no
+    /// Esc antes de a caixa ver a tecla).
+    tinha_foco: bool,
+}
+
+impl Default for Compositor {
+    fn default() -> Self {
+        Compositor {
+            rascunho: String::new(),
+            para_todos: false,
+            focar: false,
+            anexos: Vec::new(),
+            aviso: None,
+            colou_texto_em: 0.0,
+            historicos: HashMap::new(),
+            lendo: HashSet::new(),
+            respostas: mpsc::channel(),
+            aviso_historico: None,
+            tinha_foco: false,
+        }
+    }
 }
 
 /// Altura da linha de dica embaixo da caixa.
@@ -54,6 +183,116 @@ impl Compositor {
         ctx.memory(|m| m.has_focus(egui::Id::new(ID)))
     }
 
+    /// Quantas mensagens do agente estão guardadas (0 se ainda não foi lido).
+    pub fn tamanho_historico(&self, agente: i64) -> usize {
+        self.historicos.get(&agente).map_or(0, Historico::len)
+    }
+
+    /// O agente saiu (ou o histórico dele foi apagado): esquece o que estava aqui.
+    pub fn esquecer(&mut self, agente: i64) {
+        self.historicos.remove(&agente);
+    }
+
+    /// Histórico apagado no núcleo: fica vazio aqui também, sem ler de novo.
+    pub fn historico_limpo(&mut self, agente: i64) {
+        self.historicos.insert(agente, Historico::default());
+    }
+
+    /// Lê o histórico do agente em foco uma vez, numa thread.
+    fn ler_historico(&mut self, ctx: &egui::Context, agente: i64) {
+        if agente == 0 || self.historicos.contains_key(&agente) || !self.lendo.insert(agente) {
+            return;
+        }
+        let envio = self.respostas.0.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let lido = api::mensagens(agente).map(|l| l.into_iter().map(|m| m.texto).collect());
+            let _ = envio.send(RespostaHistorico::Lido(agente, lido));
+            ctx.request_repaint();
+        });
+    }
+
+    fn receber_historicos(&mut self) {
+        while let Ok(r) = self.respostas.1.try_recv() {
+            match r {
+                RespostaHistorico::Lido(agente, resultado) => {
+                    self.lendo.remove(&agente);
+                    match resultado {
+                        Ok(itens) => {
+                            self.historicos.entry(agente).or_insert_with(|| Historico::novo(itens));
+                        }
+                        // O histórico é conveniência: um erro fica só no log.
+                        Err(e) => eprintln!("histórico de mensagens do agente {agente}: {e}"),
+                    }
+                }
+                RespostaHistorico::NaoGuardada(agente, texto) => {
+                    if let Some(h) = self.historicos.get_mut(&agente) {
+                        h.desfazer(&texto);
+                    }
+                    self.aviso_historico = Some("Enviada. Não ficou no histórico porque parece ter uma senha ou chave.".into());
+                }
+            }
+        }
+    }
+
+    /// Guarda o texto enviado no histórico de cada destino: aqui na hora, no núcleo numa thread.
+    fn guardar_no_historico(&mut self, ctx: &egui::Context, destinos: &[i64], texto: &str) {
+        if texto.trim().is_empty() {
+            return;
+        }
+        for &agente in destinos {
+            if let Some(h) = self.historicos.get_mut(&agente) {
+                h.acrescentar(texto);
+            }
+            let envio = self.respostas.0.clone();
+            let (ctx, texto) = (ctx.clone(), texto.to_string());
+            std::thread::spawn(move || match api::guardar_mensagem(agente, &texto) {
+                Ok(false) => {
+                    let _ = envio.send(RespostaHistorico::NaoGuardada(agente, texto));
+                    ctx.request_repaint();
+                }
+                Ok(true) => {}
+                Err(e) => eprintln!("guardando a mensagem do agente {agente}: {e}"),
+            });
+        }
+    }
+
+    /// Setas e Esc do histórico, tiradas da fila antes de o campo ver. A seta
+    /// para cima só entra na navegação com o cursor na primeira linha; já
+    /// navegando, as duas setas andam em qualquer linha (um item antigo de
+    /// várias linhas não prende a navegação). Com Shift, Ctrl ou Alt, nunca.
+    fn teclas_do_historico(&mut self, ui: &egui::Ui, id: egui::Id, agente: i64) {
+        let Some(historico) = self.historicos.get_mut(&agente) else { return };
+        let ctx = ui.ctx();
+        let sem_modificador = ui.input(|i| i.modifiers.is_none());
+        if !sem_modificador {
+            return;
+        }
+        let cursor = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range()).map_or(self.rascunho.chars().count(), |r| r.primary.index.into());
+        let antes: String = self.rascunho.chars().take(cursor).collect();
+        let primeira_linha = !antes.contains('\n');
+        let navegando = historico.navegando();
+        let mut novo = None;
+        let tecla = |k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        if (navegando || (primeira_linha && historico.len() > 0)) && tecla(Key::ArrowUp) {
+            novo = historico.subir(&self.rascunho);
+        } else if navegando && tecla(Key::ArrowDown) {
+            novo = historico.descer();
+        } else if navegando && tecla(Key::Escape) {
+            novo = historico.cancelar();
+            // O Esc já tirou o foco da caixa; ele volta para continuar o rascunho.
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+        if let Some(texto) = novo {
+            self.rascunho = texto;
+            // Cursor no fim do texto trazido.
+            let mut estado = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+            let fim = egui::text::CCursor::new(self.rascunho.chars().count());
+            estado.cursor.set_char_range(Some(egui::text::CCursorRange::one(fim)));
+            estado.store(ctx, id);
+        }
+    }
+
     pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64) -> Option<Envio> {
         let p = cores();
         let id = egui::Id::new(ID);
@@ -61,6 +300,14 @@ impl Compositor {
             ui.memory_mut(|m| m.request_focus(id));
         }
         let com_foco = ui.memory(|m| m.has_focus(id));
+        self.receber_historicos();
+        self.ler_historico(ui.ctx(), foco);
+        let navegando_antes = self.historicos.get(&foco).is_some_and(Historico::navegando);
+        if com_foco || (self.tinha_foco && navegando_antes) {
+            self.teclas_do_historico(ui, id, foco);
+        }
+        self.tinha_foco = ui.memory(|m| m.has_focus(id));
+        let navegando = self.historicos.get(&foco).and_then(Historico::onde);
         // Ctrl+Enter envia; é retirado da fila antes de o campo ver, para não virar quebra de linha.
         let mut enviar = com_foco && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
         // O egui só avisa um Ctrl+V quando há texto para colar. Sem texto (só uma
@@ -80,7 +327,12 @@ impl Compositor {
         }
 
         let caixa = egui::Rect::from_min_size(area.min, vec2(area.width(), area.height() - ALTURA_DICA));
-        let contorno = if com_foco { egui::Stroke::new(1.5, p.destaque) } else { egui::Stroke::new(1.0, p.borda) };
+        // Navegando no histórico, a borda é a do foco, mais leve: o texto é um item antigo.
+        let contorno = match (navegando, com_foco) {
+            (Some(_), _) => egui::Stroke::new(1.5, p.destaque.gamma_multiply(0.55)),
+            (None, true) => egui::Stroke::new(1.5, p.destaque),
+            (None, false) => egui::Stroke::new(1.0, p.borda),
+        };
         ui.painter().rect(caixa, CornerRadius::same(18), p.superficie_alta, contorno, egui::StrokeKind::Inside);
 
         let mut interno = caixa.shrink2(vec2(10.0, 10.0));
@@ -125,7 +377,13 @@ impl Compositor {
                 .desired_width(ui.available_width())
                 .font(egui::FontId::proportional(14.0))
                 .hint_text(dica);
-            ui.add(campo);
+            if ui.add(campo).changed() {
+                // Qualquer edição encerra a navegação: o texto vira o rascunho.
+                if let Some(h) = self.historicos.get_mut(&foco) {
+                    h.editou();
+                }
+                self.aviso_historico = None;
+            }
         });
 
         let parou = if self.para_todos {
@@ -133,10 +391,16 @@ impl Compositor {
         } else {
             "O agente parou. Inicie de novo para mandar mensagens."
         };
-        let (texto_dica, cor_dica) = match &self.aviso {
-            Some(aviso) => (aviso.as_str(), p.erro),
-            None if destinos.is_empty() => (parou, p.alerta),
-            None => ("Ctrl+Enter envia · Enter quebra a linha · Ctrl+V cola imagens · clique no terminal para digitar direto nele", p.suave),
+        let tem_historico = self.tamanho_historico(foco) > 0;
+        let (texto_dica, cor_dica) = match (&self.aviso, navegando, &self.aviso_historico) {
+            (Some(aviso), _, _) => (aviso.clone(), p.erro),
+            (None, _, _) if destinos.is_empty() => (parou.to_string(), p.alerta),
+            (None, Some((n, total)), _) => (format!("Mensagem {n} de {total} · ↓ mais nova · Esc volta ao rascunho"), p.suave),
+            (None, None, Some(aviso)) => (aviso.clone(), p.alerta),
+            (None, None, None) if tem_historico => {
+                ("Ctrl+Enter envia · ↑ mensagens anteriores · Enter quebra a linha · Ctrl+V cola imagens".to_string(), p.suave)
+            }
+            (None, None, None) => ("Ctrl+Enter envia · Enter quebra a linha · Ctrl+V cola imagens".to_string(), p.suave),
         };
         ui.painter().text(
             egui::pos2(caixa.left() + 14.0, caixa.bottom() + 12.0),
@@ -150,6 +414,9 @@ impl Compositor {
             return None;
         }
         let mut texto = self.rascunho.trim().to_string();
+        // Só o que foi digitado entra no histórico (o caminho de uma imagem antiga não serve de novo).
+        self.guardar_no_historico(ui.ctx(), &destinos, &texto);
+        self.aviso_historico = None;
         if !self.anexos.is_empty() {
             let caminhos: Vec<String> = self.anexos.iter().map(|a| a.caminho.clone()).collect();
             let rotulo = if caminhos.len() == 1 { "Imagem anexada:" } else { "Imagens anexadas:" };
@@ -221,4 +488,78 @@ fn codificar_png(imagem: &arboard::ImageData) -> Result<Vec<u8>, String> {
     escritor.write_image_data(&imagem.bytes).map_err(|e| e.to_string())?;
     escritor.finish().map_err(|e| e.to_string())?;
     Ok(png)
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    fn historico() -> Historico {
+        Historico::novo(vec!["terceira".into(), "segunda\ncom duas linhas".into(), "primeira".into()])
+    }
+
+    #[test]
+    fn sobe_e_desce_guardando_o_rascunho() {
+        let mut h = historico();
+        assert_eq!(h.subir("meu rascunho").as_deref(), Some("terceira"));
+        assert_eq!(h.onde(), Some((1, 3)));
+        assert_eq!(h.subir("terceira").as_deref(), Some("segunda\ncom duas linhas"));
+        assert_eq!(h.subir("x").as_deref(), Some("primeira"));
+        // Na mais antiga, fica nela.
+        assert_eq!(h.subir("primeira"), None);
+        assert_eq!(h.onde(), Some((3, 3)));
+        assert_eq!(h.descer().as_deref(), Some("segunda\ncom duas linhas"));
+        assert_eq!(h.descer().as_deref(), Some("terceira"));
+        // Depois da mais nova, volta o rascunho e a navegação acaba.
+        assert_eq!(h.descer().as_deref(), Some("meu rascunho"));
+        assert!(!h.navegando());
+        assert_eq!(h.descer(), None);
+    }
+
+    #[test]
+    fn esc_devolve_o_rascunho() {
+        let mut h = historico();
+        h.subir("rascunho");
+        h.subir("terceira");
+        assert_eq!(h.cancelar().as_deref(), Some("rascunho"));
+        assert!(!h.navegando());
+        assert_eq!(h.cancelar(), None);
+    }
+
+    #[test]
+    fn editar_encerra_a_navegacao() {
+        let mut h = historico();
+        h.subir("rascunho");
+        h.editou();
+        assert!(!h.navegando());
+        // A próxima seta para cima guarda o texto editado como rascunho.
+        assert_eq!(h.subir("terceira editada").as_deref(), Some("terceira"));
+        assert_eq!(h.cancelar().as_deref(), Some("terceira editada"));
+    }
+
+    #[test]
+    fn lista_vazia_nao_navega() {
+        let mut h = Historico::default();
+        assert_eq!(h.subir("x"), None);
+        assert!(!h.navegando());
+        assert_eq!(h.descer(), None);
+    }
+
+    #[test]
+    fn enviada_entra_na_frente_sem_repetir() {
+        let mut h = historico();
+        h.subir("x");
+        h.acrescentar("nova");
+        assert!(!h.navegando());
+        h.acrescentar("nova");
+        assert_eq!(h.len(), 4);
+        assert_eq!(h.subir("").as_deref(), Some("nova"));
+        h.desfazer("outra");
+        assert_eq!(h.len(), 4);
+        h.desfazer("nova");
+        assert_eq!(h.len(), 3);
+        let mut cheio = Historico::novo((0..MAX_HISTORICO).map(|i| i.to_string()).collect());
+        cheio.acrescentar("mais uma");
+        assert_eq!(cheio.len(), MAX_HISTORICO);
+    }
 }

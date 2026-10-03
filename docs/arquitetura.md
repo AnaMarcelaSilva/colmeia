@@ -43,9 +43,14 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=`, `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
 | `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto}`; aceita `projeto=` |
 | `GET /v1/perfis/{id}/resumo?tipo=sprint` | Sprint de `de` a `ate` (até 92 dias), ou `ultimos=N`, ou `mes=atual`; `formato=markdown` devolve `text/markdown` |
-| `POST /v1/tarefas/{id}/anexos` | Anexa um PNG (corpo `image/png`, até 8 MB) à tarefa; `origem=captura\|colagem\|mensagem`, `agente=` e `legenda=` opcionais; devolve `{id, caminho, largura, altura}` |
-| `POST /v1/perfis/{id}/anexos` | O mesmo, sem tarefa |
-| `GET` / `DELETE /v1/anexos/{id}` | O PNG (imutável, `nosniff`) ou remover (o arquivo sai, o evento fica) |
+| `GET /v1/perfis/{id}/apresentacao?tipo=daily\|sprint` | O deck da apresentação: capa (números com os nomes dos grupos: `concluidas`, `revisao`, `aguardando`, `trabalhando`, `erros` de sessão e `novas`; destaques; partes; tarefas novas) e um slide por tarefa (o que foi feito, números, anexos e a nota); aceita os mesmos parâmetros do resumo (`projeto=`, `de=`/`ate=`, `ultimos=`, `mes=`). Até 60 slides; o resto vira `mais` |
+| `POST /v1/tarefas/{id}/anexos` | Anexa uma imagem à tarefa (corpo `image/png` ou `image/jpeg`, até 8 MB; a foto vira PNG, sem EXIF, e é reduzida acima de 3840 px); `origem=captura\|colagem\|mensagem\|arquivo`, `agente=`, `legenda=` e `nome=` opcionais; devolve `{id, caminho, largura, altura}` |
+| `POST /v1/tarefas/{id}/videos` | Anexa um vídeo (`video/mp4`, `video/webm`, `video/x-matroska` ou `video/quicktime`, até 512 MB), copiado em fluxo para o disco; os primeiros bytes precisam bater com o tipo; `nome=` opcional |
+| `POST /v1/perfis/{id}/anexos` | O mesmo que o das imagens, sem tarefa |
+| `GET` / `DELETE /v1/anexos/{id}` | A imagem (PNG imutável, `nosniff`; um vídeo responde 400) ou remover (o arquivo sai, o evento fica) |
+| `GET /v1/anexos/{id}/info` | `{tipo, formato, nome, bytes, largura, altura, caminho}`: a tela abre um vídeo no reprodutor do sistema pelo caminho, sempre montado pelo núcleo |
+| `PUT /v1/tarefas/{id}/notas` | Nota da tarefa numa daily (`{"tipo":"daily","periodo":"AAAA-MM-DD"}`) ou numa sprint (`"periodo":"AAAA-MM-DD..AAAA-MM-DD"`), até 4.000 caracteres; texto vazio apaga; a que parece ter senha ou chave é recusada (400) |
+| `GET` / `POST` / `DELETE /v1/agentes/{id}/mensagens` | Histórico do que você mandou ao agente (da mais nova à mais antiga, até 200), guardar uma mensagem (`{"texto"}`, responde `{"guardada": bool}`: não guarda o que parece senha ou chave) e apagar tudo |
 | `POST /v1/encerrar` | Desliga o núcleo (responde 202 antes); é o que `colmeia-nucleo --encerrar` chama |
 | `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
 | `GET` / `POST /v1/perfis/{id}/workspaces` | Listar e criar workspaces |
@@ -81,6 +86,7 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação` ou `esperando resposta`), `desde`, `desde_hora` |
 | `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `hora`, `texto`) |
 | `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` |
+| `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento) |
 
 Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). Para não perder nada: a tela abre o WebSocket, pede o `/quadro` (que traz o `seq` já incluído nele) e aplica só as mensagens com `seq` maior. Quem publica nunca espera: cada tela tem uma fila de 256 mensagens e, se ela encher, recebe um único `recarregar`. Tipos desconhecidos são ignorados pela tela.
 
@@ -119,12 +125,15 @@ SQLite em `~/.local/share/colmeia/colmeia.db` (modo WAL, diretório 0700). Tabel
 eventos (id, momento, tipo, dados, hash_anterior, hash,
          perfil_id, projeto_id, tarefa_id, agente_id)   -- colunas derivadas, fora do hash
 anexos  (id, perfil_id, tarefa_id, sha256, largura, altura, bytes,
-         origem, legenda, criado_em, removido)
+         origem, legenda, criado_em, removido,
+         tipo, formato, nome)                          -- imagem ou vídeo; png, mp4, webm, mkv, mov
+mensagens (id, agente_id, texto, enviada_em)           -- histórico da caixa de mensagem, até 200 por agente
+notas   (tarefa_id, tipo, periodo, texto, atualizada_em)   -- daily ou sprint, por período
 ```
 
 O hash cobre `anterior|momento|tipo|dados`. Os dados de cada evento começam com `"_escopo":{perfil, projeto, tarefa, agente}`, coberto pelo hash; as colunas derivadas repetem esse escopo para a linha do tempo de um perfil não ler o histórico inteiro, e a verificação confere que batem. Os eventos gravados antes delas foram ligados aos perfis uma única vez (`PRAGMA user_version = 2`), seguindo o próprio histórico: é a única exceção ao "só acréscimo", mexe só nas colunas derivadas e o que não dá para ligar fica sem perfil. As mudanças de tarefa guardam a tarefa inteira (com o título) e o nome do projeto: a linha do tempo não depende de a tarefa ainda existir.
 
-Os anexos ficam em `anexos/<perfil>/<sha256>.png` (`0600`); a linha da tabela sobrevive à tarefa, como o evento. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
+Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens e as notas ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
 
 ## Regras de desempenho
 
@@ -139,7 +148,7 @@ Os anexos ficam em `anexos/<perfil>/<sha256>.png` (`0600`); a linha da tabela so
 
 ## Fases
 
-1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint (feito no Linux; falta o Windows).
+1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente (feito no Linux; falta o Windows).
 2. **Orquestração:** núcleo como servidor MCP para os agentes, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
 3. **Integrações:** servidores MCP de GitHub, Docker por branch e banco, tarefa a partir de link, tela de provedores.
 4. **Expansão:** servidores de terceiros, "entender projeto", busca e replay, custos, acesso remoto e celular.

@@ -82,12 +82,55 @@ mod unix {
             corpo.len()
         );
         fluxo.write_all(cabecalho.as_bytes()).and_then(|_| fluxo.write_all(corpo)).map_err(|e| e.to_string())?;
+        // Em HTTP/1.0 o servidor não divide a resposta em blocos: o corpo é o resto.
+        ler_resposta(&mut fluxo)
+    }
+
+    /// Envia um arquivo como corpo, direto do disco e em partes (um vídeo de
+    /// centenas de MB não passa pela memória). `progresso` recebe os bytes já
+    /// enviados e o total. Devolve o status e o corpo da resposta.
+    pub fn pedir_arquivo(
+        metodo: &str,
+        caminho: &str,
+        tipo: &str,
+        arquivo: &std::path::Path,
+        mut progresso: impl FnMut(u64, u64),
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut origem = std::fs::File::open(arquivo).map_err(|e| format!("não consegui abrir o arquivo: {e}"))?;
+        let total = origem.metadata().map_err(|e| e.to_string())?.len();
+        let mut fluxo = conectar().map_err(|e| format!("núcleo indisponível: {e}"))?;
+        let token = ler_token().map_err(|e| format!("sem token do núcleo: {e}"))?;
+        // O núcleo só responde depois de gravar tudo: espera mais que nos outros pedidos.
+        fluxo.set_read_timeout(Some(Duration::from_secs(120))).ok();
+        let cabecalho = format!(
+            "{metodo} {caminho} HTTP/1.0\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Type: {tipo}\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+        );
+        fluxo.write_all(cabecalho.as_bytes()).map_err(|e| e.to_string())?;
+        let mut parte = vec![0u8; 256 << 10];
+        let mut enviados = 0u64;
+        progresso(0, total);
+        while enviados < total {
+            let n = origem.read(&mut parte).map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("o arquivo mudou durante o envio".into());
+            }
+            let n = n.min((total - enviados) as usize);
+            if let Err(e) = fluxo.write_all(&parte[..n]) {
+                // O núcleo recusou no meio (tipo errado, grande demais): a resposta explica.
+                return ler_resposta(&mut fluxo).map_err(|_| e.to_string());
+            }
+            enviados += n as u64;
+            progresso(enviados, total);
+        }
+        ler_resposta(&mut fluxo)
+    }
+
+    fn ler_resposta(fluxo: &mut UnixStream) -> Result<(u16, Vec<u8>), String> {
         let mut resposta = Vec::new();
         fluxo.read_to_end(&mut resposta).map_err(|e| e.to_string())?;
         let fim = resposta.windows(4).position(|j| j == b"\r\n\r\n").ok_or("resposta inválida do núcleo")?;
         let cabecalho = String::from_utf8_lossy(&resposta[..fim]);
         let status = cabecalho.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or("resposta inválida do núcleo")?;
-        // Em HTTP/1.0 o servidor não divide a resposta em blocos: o corpo é o resto.
         Ok((status, resposta[fim + 4..].to_vec()))
     }
 
@@ -163,6 +206,9 @@ mod outros {
         Err(AVISO.into())
     }
     pub fn pedir_bytes(_: &str, _: &str, _: &str, _: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        Err(AVISO.into())
+    }
+    pub fn pedir_arquivo(_: &str, _: &str, _: &str, _: &std::path::Path, _: impl FnMut(u64, u64)) -> Result<(u16, Vec<u8>), String> {
         Err(AVISO.into())
     }
     pub fn garantir_nucleo() -> Result<(), String> {
