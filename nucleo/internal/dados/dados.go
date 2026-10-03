@@ -109,7 +109,9 @@ CREATE TABLE IF NOT EXISTS notas (
 `
 
 // colunasAnexos é a definição da tabela anexos desde a versão 3 do banco
-// (fotos e vídeos). A migração para ela está em migrarAnexos.
+// (fotos e vídeos), com na_lousa da versão 4: uma imagem ou um vídeo posto
+// numa lousa, que não aparece na linha do tempo nem nos slides. A migração
+// para ela está em migrarAnexos (e na lista de colunas de migrar).
 const colunasAnexos = `
 	id INTEGER PRIMARY KEY,
 	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
@@ -124,7 +126,8 @@ const colunasAnexos = `
 	removido INTEGER NOT NULL DEFAULT 0,
 	tipo TEXT NOT NULL DEFAULT 'imagem' CHECK (tipo IN ('imagem', 'video')),
 	formato TEXT NOT NULL DEFAULT 'png',
-	nome TEXT NOT NULL DEFAULT ''
+	nome TEXT NOT NULL DEFAULT '',
+	na_lousa INTEGER NOT NULL DEFAULT 0
 `
 
 type Banco struct {
@@ -188,7 +191,7 @@ func Abrir(dir string) (*Banco, error) {
 	// Uma conexão só: o SQLite serializa as escritas de qualquer forma, e assim
 	// o encadeamento dos eventos nunca disputa com outra transação.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(esquema + esquemaPedidos); err != nil {
+	if _, err := db.Exec(esquema + esquemaPedidos + esquemaLousas); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("aplicando o esquema: %w", err)
 	}
@@ -223,6 +226,8 @@ func migrar(db *sql.DB) error {
 		{"eventos", "projeto_id", "INTEGER"},
 		{"eventos", "tarefa_id", "INTEGER"},
 		{"eventos", "agente_id", "INTEGER"},
+		// Imagem ou vídeo de uma lousa (versão 4): fora da linha do tempo e dos slides.
+		{"anexos", "na_lousa", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range colunas {
 		existe := false
@@ -267,6 +272,12 @@ func migrar(db *sql.DB) error {
 	if versao < 3 {
 		if err := migrarAnexos(db); err != nil {
 			return fmt.Errorf("preparando os anexos para fotos e vídeos: %w", err)
+		}
+	}
+	// Versão 4: as lousas (tabelas criadas pelo esquema) e anexos.na_lousa.
+	if versao < 4 {
+		if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+			return err
 		}
 	}
 	return nil

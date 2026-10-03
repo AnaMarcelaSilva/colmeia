@@ -23,6 +23,14 @@ func TestParece(t *testing.T) {
 		{"token = abcdef123456", true},
 		{`"api_key": "abc123def456"`, true},
 		{"client_secret=zzzzzzzz", true},
+		{"db_password=hunter2222", true},
+		{"SENHA_DB=hunter2222", true},
+		{"minhasenha: hunter2222", true},
+		{"mnosenha: hunter2222", true},
+		{"a senha do banco é hunter2222", true},
+		{"A senha é: s3gr3d0!", true},
+		{"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG", true},
+		{"export GITHUB_TOKEN=abc123def456", true},
 
 		// Falsos positivos comuns.
 		{"o token de acesso expirou, renova pra mim?", false},
@@ -32,6 +40,11 @@ func TestParece(t *testing.T) {
 		{"uma operação risk-free, sem medo", false},
 		{"o campo password precisa de validação", false},
 		{"rode git log --oneline e me diga o que mudou", false},
+		{"a senha é obrigatória no cadastro", false},
+		{"a senha do usuário é validada no servidor", false},
+		{"chave_primaria: id", false},
+		{"token_expira_em: amanhã", false},
+		{"| senha | texto |", false},
 		{"", false},
 	}
 	for _, c := range casos {

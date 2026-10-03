@@ -37,6 +37,8 @@ func (s *Servidor) rotasAgente(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agente/navegador", s.doAgente(s.agenteAbrirNavegador))
 	mux.HandleFunc("POST /v1/agente/navegador/captura", s.doAgente(s.agenteCapturar))
 	mux.HandleFunc("POST /v1/agente/pedidos/{id}/concluir", s.doAgente(s.agenteConcluirPedido))
+	mux.HandleFunc("GET /v1/agente/lousa", s.doAgente(s.agenteLerLousa))
+	mux.HandleFunc("POST /v1/agente/lousa/elementos", s.doAgente(s.agenteAcrescentarALousa))
 }
 
 // quemAgente é o agente que pediu, com a tarefa dele.
@@ -341,6 +343,60 @@ func (s *Servidor) agenteConcluirPedido(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	responderJSON(w, p)
+}
+
+// elementoParaOAgente: o que o agente lê de cada item da lousa.
+type elementoParaOAgente struct {
+	ID        int64   `json:"id"`
+	Tipo      string  `json:"tipo"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Largura   float64 `json:"largura"`
+	Altura    float64 `json:"altura"`
+	Cor       string  `json:"cor,omitempty"`
+	Titulo    string  `json:"titulo,omitempty"`
+	Texto     string  `json:"texto,omitempty"`
+	De        int64   `json:"de,omitempty"`
+	Para      int64   `json:"para,omitempty"`
+	TarefaRef int64   `json:"tarefa_ref,omitempty"`
+	Autor     string  `json:"autor"`
+}
+
+// agenteLerLousa: a lousa da tarefa do agente (sai do token, nunca da URL).
+func (s *Servidor) agenteLerLousa(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	l, elementos, err := s.Banco.AbrirLousa(r.Context(), dados.DonoLousa{TarefaID: q.tarefa.ID})
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	lista := make([]elementoParaOAgente, len(elementos))
+	for i, e := range elementos {
+		lista[i] = elementoParaOAgente{ID: e.ID, Tipo: e.Tipo, X: e.X, Y: e.Y, Largura: e.Largura, Altura: e.Altura, Cor: e.Cor, Titulo: e.Titulo,
+			Texto: e.Texto, De: e.De, Para: e.Para, TarefaRef: e.TarefaRef, Autor: e.Autor}
+	}
+	responderJSON(w, map[string]any{"lousa": l.ID, "tarefa": q.tarefa.Titulo, "elementos": lista})
+}
+
+// agenteAcrescentarALousa: o agente só acrescenta (não move nem apaga), por
+// isso não há conflito de versão com a tela.
+func (s *Servidor) agenteAcrescentarALousa(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	var pedido struct {
+		Elementos []dados.NovoDoAgente `json:"elementos"`
+	}
+	if err := lerAte(r, &pedido, limiteLoteLousa); err != nil {
+		responderErro(w, err)
+		return
+	}
+	resultado, err := s.Banco.AcrescentarDoAgente(r.Context(), q.tarefa.ID, q.ctx.ID, pedido.Elementos)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	ids := make([]int64, len(resultado.Elementos))
+	for i, e := range resultado.Elementos {
+		ids[i] = e.ID
+	}
+	responderJSON(w, map[string]any{"lousa": resultado.Lousa.ID, "ids": ids, "refs": resultado.Refs})
 }
 
 // MCP dos agentes do Claude Code

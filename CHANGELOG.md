@@ -6,6 +6,11 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Novo
 
+- **Lousa (quadro livre)** por workspace (na barra lateral) e por tarefa (chip "Lousa", Ctrl+Shift+Q, por cima do terminal sem mudar o tamanho dele): notas em markdown, texto solto, trechos de código, imagens (Ctrl+V, arrastar ou escolher), vídeos, cartões de tarefa ao vivo e ligações tracejadas com rótulo. Clique duplo cria uma nota em edição, a altura cresce com o texto, puxar a borda liga itens (soltar no vazio cria uma nota ligada), seleção por caixa e Shift, duplicar, copiar e colar entre lousas, cores, desfazer e refazer, zoom por níveis com Ctrl+rodinha e mover a vista pelo fundo, espaço ou botão do meio. Gravação em lotes (texto 800 ms depois da última tecla), conflito por versão como na nota da daily ("Mudou em outra tela; atualizei") e texto que parece senha ou chave recusado.
+- **O agente na lousa da tarefa:** ferramentas MCP `ler_lousa` e `acrescentar_a_lousa` (só acrescenta; posiciona sozinho), com o item novo marcado e "Claude Code acrescentou 6 itens · Ver" quando cai fora da vista; na linha do tempo, "Claude Code (dev) acrescentou 6 itens à lousa", que abre a tarefa com a lousa enquadrada.
+- **Lousa na apresentação:** aba "Lousa" no slide da tarefa (L alterna com os anexos), só leitura e ajustada para caber; o clique (ou F5 na lousa) abre o palco, em tela cheia, de cartão em cartão seguindo as ligações, com visão geral (O) e o vídeo abrindo no reprodutor (clique no play ou Enter).
+- API: `/v1/workspaces/{id}/lousa`, `/v1/tarefas/{id}/lousa`, `/v1/lousas/{id}` e `/v1/lousas/{id}/operacoes`, `/v1/perfis/{id}/videos` e `lousa=1` nos anexos do perfil, `/v1/agente/lousa` e `/v1/agente/lousa/elementos`; aviso `lousa.mudou`, evento `lousa.agente` e `lousa` em cada slide do deck.
+
 - **Pedir ao agente** pela Daily, pela Sprint e pela apresentação (botão no cartão, menu do botão direito, P no slide): o pedido vai para o Claude Code da tarefa (o ativo, um parado que volta com a conversa ou um novo retomando a última conversa da pasta) e a resposta volta para a nota e para os anexos, sem sair dali. A caixa diz antes para quem vai; a pílula do cartão e a faixa do slide mostram o estado (na fila, aprovar no terminal, com o agente, parou sem responder, respondido, não deu certo). O pedido entra no terminal numa linha só e fica "Respondido" quando o agente chama `concluir_pedido` ou termina a vez; o aviso "O agente respondeu · Ver" fica até ser visto ou fechado.
 - **Ferramentas da Colmeia para o agente (MCP):** o próprio núcleo vira servidor MCP do Claude Code que a Colmeia abre, com um token só dele, restrito à tarefa: ler a tarefa e a nota, complementar ou reescrever a nota, anexar uma imagem da pasta, abrir e capturar o navegador e concluir o pedido.
 - **Navegador da tarefa:** "Navegador" no painel abre um Chrome ou Chromium controlado pela Colmeia ao lado da janela (perfil próprio, controle só pelo pipe, sem porta), com "Capturar navegador" (Ctrl+Shift+B) anexando a captura à tarefa. Só abre `http`, `https` e `file://` de dentro da pasta, sem `.env` nem chaves (também em redirecionamento, iframe ou imagem); um endereço que não abre mostra o erro no campo. Na Daily, na Sprint e na apresentação, a janela aberta pelo agente fica fora da tela.
@@ -21,6 +26,11 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 - API: `/v1/perfis/{id}/apresentacao`, `/v1/tarefas/{id}/notas`, `/v1/tarefas/{id}/videos`, `/v1/anexos/{id}/info` e `/v1/agentes/{id}/mensagens`; evento `nota.atualizada`. A nota que parece ter senha ou chave é recusada, como no histórico de mensagens.
 
 ### Mudou
+
+- O banco vai para a versão 4 (tabelas `lousas` e `lousa_elementos`, coluna `anexos.na_lousa`), migrado sozinho ao abrir.
+- A caixa de mensagem só pega o teclado depois do clique que pediu (antes, um botão que punha texto nela perdia o foco no mesmo quadro).
+- O filtro de segredos (histórico de mensagens, notas da daily e lousa) também pega nomes com senha, password, secret, token ou key em qualquer posição (`db_password=…`, `SENHA_DB=…`) e a frase "a senha … é …", quando o valor tem algarismo ou símbolo.
+- Os chips de alternar ("Arquivos", "Lousa", "Visão geral") têm a mesma largura ligados e desligados.
 
 - A tabela `anexos` aceita vídeos e arquivos (`tipo`, `formato`, `nome`; banco na versão 3, migrado sozinho ao abrir).
 - O texto do dia anterior na linha do tempo leva a data ("Ontem · quinta, 1 de outubro").

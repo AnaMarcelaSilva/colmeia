@@ -88,6 +88,8 @@ type Item struct {
 	aguardando int64
 	erro       bool
 	descartado bool
+	// Itens que o agente acrescentou à lousa (somados numa linha só).
+	quantidade int
 }
 
 // Tipos de item (a tela escolhe o ponto pela tabela de estados).
@@ -118,6 +120,8 @@ const (
 	// Navegador da tarefa.
 	TipoNavegador        = "navegador"
 	TipoNavegadorFechado = "navegador_fechado"
+	// O agente acrescentou itens à lousa da tarefa.
+	TipoLousa = "lousa"
 )
 
 type Dia struct {
@@ -167,6 +171,9 @@ type conteudo struct {
 	Descricao    string `json:"descricao"`
 	Navegador    bool   `json:"navegador"`
 	Modo         string `json:"modo"`
+	NaLousa      bool   `json:"na_lousa"`
+	Quantidade   int    `json:"quantidade"`
+	Lousa        int64  `json:"lousa"`
 }
 
 type tarefaNoEvento struct {
@@ -186,6 +193,7 @@ type montador struct {
 	captura  map[int64]int  // tarefa → índice da última captura
 	videos   map[int64]int  // tarefa → índice do último vídeo
 	notas    map[string]int // tarefa e tipo → índice da última nota
+	lousas   map[int64]int  // agente → índice do último acréscimo à lousa
 	abertas  map[int64]int  // agente → índice da sessão sem fim
 	// Todas as mudanças de coluna, inclusive as automáticas (que não viram
 	// item): a sprint refaz por elas onde cada tarefa estava no fim do período.
@@ -204,7 +212,7 @@ func novoMontador(c Contexto) *montador {
 		c.Fuso = time.Local
 	}
 	m := &montador{c: c, titulos: map[int64]string{}, projetos: map[int64]string{}, movendo: map[int64]int{}, captura: map[int64]int{}, abertas: map[int64]int{},
-		videos: map[int64]int{}, notas: map[string]int{}}
+		videos: map[int64]int{}, notas: map[string]int{}, lousas: map[int64]int{}}
 	for id, nome := range c.Projetos {
 		m.projetos[id] = nome
 	}
@@ -340,7 +348,8 @@ func (m *montador) passar(e dados.Evento) {
 		}
 		m.terminou(e, quando, d)
 	case "anexo.adicionado":
-		if m.c.AnexosRemovidos[d.Anexo] {
+		// Imagens e vídeos de uma lousa aparecem nela, não aqui.
+		if m.c.AnexosRemovidos[d.Anexo] || d.NaLousa {
 			return
 		}
 		if d.Titulo != "" {
@@ -410,6 +419,23 @@ func (m *montador) passar(e dados.Evento) {
 			m.titulos[tarefa] = d.Titulo
 		}
 		m.pedido(e, quando, d)
+	case "lousa.agente":
+		if d.Titulo != "" {
+			m.titulos[tarefa] = d.Titulo
+		}
+		// Acréscimos seguidos do mesmo agente viram uma linha, com a soma.
+		agenteDoEvento := e.Escopo.Agente
+		if i, ok := m.lousas[agenteDoEvento]; ok && quando.Sub(m.itens[i].quando) <= juntarMovimentos && !m.itens[i].descartado {
+			item := &m.itens[i]
+			item.quantidade += d.Quantidade
+			item.quando, item.Momento, item.Evento = quando, e.Momento, e.ID
+			item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), item.quantidade, m.cita(tarefa, projeto))
+			return
+		}
+		item := m.novo(e, quando, TipoLousa)
+		item.quantidade = d.Quantidade
+		item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), d.Quantidade, m.cita(tarefa, projeto))
+		m.lousas[agenteDoEvento] = len(m.itens) - 1
 	case "navegador.aberto", "navegador.captura", "navegador.fechado", "navegador.recusado":
 		if d.Titulo != "" {
 			m.titulos[tarefa] = d.Titulo
@@ -480,6 +506,12 @@ func (m *montador) pedido(e dados.Evento, quando time.Time, d conteudo) {
 	}
 	item := m.novo(e, quando, tipo)
 	item.Texto, item.Curto = texto, curto
+}
+
+// textoLousa: "Claude Code (dev) acrescentou 6 itens à lousa de “X”."
+func textoLousa(quem string, n int, cita string) (string, string) {
+	itens := plural(n, "item", "itens")
+	return quem + " acrescentou " + itens + " à lousa de " + cita + ".", quem + " acrescentou " + itens + " à lousa."
 }
 
 func textoCaptura(n int, d conteudo, cita string) string {

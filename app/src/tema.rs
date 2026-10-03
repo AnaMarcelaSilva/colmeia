@@ -670,6 +670,20 @@ pub enum Icone {
     Fechar,
     Anterior,
     Proximo,
+    // Lousa: a barra de ferramentas e o zoom.
+    Nota,
+    Texto,
+    Codigo,
+    Imagem,
+    Video,
+    Tarefa,
+    Ligacao,
+    Menos,
+    MaisZoom,
+    Ajustar,
+    Lousa,
+    Duplicar,
+    Apagar,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -687,14 +701,36 @@ pub fn botao_icone_em(ui: &mut egui::Ui, rect: Rect, id: egui::Id, icone: Icone)
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Botão de ícone que pode ficar inativo: o ícone apagado, sem fundo ao passar o mouse.
+pub fn botao_icone_com(ui: &mut egui::Ui, icone: Icone, lado: f32, ativo: bool) -> Response {
+    if ativo {
+        return botao_icone(ui, icone, lado);
+    }
+    let (rect, resposta) = ui.allocate_exact_size(vec2(lado, lado), Sense::hover());
+    desenhar_icone(ui.painter(), rect.center(), icone, cores().suave.gamma_multiply(0.5));
+    resposta
+}
+
 fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
     let p = cores();
     let pintor = ui.painter();
     if resposta.hovered() {
         pintor.rect_filled(rect, CornerRadius::same(RAIO_CONTROLE), p.realce);
     }
-    let cor = if resposta.hovered() { p.texto } else { p.suave };
-    let c = rect.center();
+    let cor = if resposta.hovered() && icone == Icone::Apagar {
+        p.erro
+    } else if resposta.hovered() {
+        p.texto
+    } else {
+        p.suave
+    };
+    desenhar_icone(pintor, rect.center(), icone, cor);
+}
+
+/// O desenho de um ícone em 16×16 (traço de 1,5), centrado em `c`.
+pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color32) {
+    let traco = Stroke::new(1.5, cor);
+    let caixa = |l: f32, a: f32| Rect::from_center_size(c, vec2(l, a));
     match icone {
         Icone::Mais => {
             for dx in [-5.0, 0.0, 5.0] {
@@ -703,13 +739,90 @@ fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
         }
         Icone::Fechar => {
             let m = 4.5;
-            pintor.line_segment([c + vec2(-m, -m), c + vec2(m, m)], Stroke::new(1.5, cor));
-            pintor.line_segment([c + vec2(-m, m), c + vec2(m, -m)], Stroke::new(1.5, cor));
+            pintor.line_segment([c + vec2(-m, -m), c + vec2(m, m)], traco);
+            pintor.line_segment([c + vec2(-m, m), c + vec2(m, -m)], traco);
         }
         Icone::Anterior | Icone::Proximo => {
             let lado = if icone == Icone::Anterior { 1.0 } else { -1.0 };
             let pontos = vec![c + vec2(2.5 * lado, -5.0), c + vec2(-2.5 * lado, 0.0), c + vec2(2.5 * lado, 5.0)];
             pintor.add(Shape::line(pontos, Stroke::new(1.5, cor)));
+        }
+        Icone::Nota => {
+            // Quadrado com o canto de baixo à direita dobrado.
+            let r = caixa(13.0, 13.0);
+            let dobra = 4.5;
+            let contorno =
+                vec![r.left_top(), r.right_top(), r.right_bottom() - vec2(0.0, dobra), r.right_bottom() - vec2(dobra, 0.0), r.left_bottom(), r.left_top()];
+            pintor.add(Shape::line(contorno, traco));
+            pintor
+                .add(Shape::line(vec![r.right_bottom() - vec2(0.0, dobra), r.right_bottom() - vec2(dobra, dobra), r.right_bottom() - vec2(dobra, 0.0)], traco));
+        }
+        Icone::Texto => {
+            pintor.line_segment([c + vec2(-5.5, -5.5), c + vec2(5.5, -5.5)], traco);
+            pintor.line_segment([c + vec2(0.0, -5.5), c + vec2(0.0, 6.0)], traco);
+        }
+        Icone::Codigo => {
+            pintor.add(Shape::line(vec![c + vec2(-2.5, -5.0), c + vec2(-6.5, 0.0), c + vec2(-2.5, 5.0)], traco));
+            pintor.add(Shape::line(vec![c + vec2(2.5, -5.0), c + vec2(6.5, 0.0), c + vec2(2.5, 5.0)], traco));
+        }
+        Icone::Imagem => {
+            let r = caixa(15.0, 12.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.add(Shape::line(
+                vec![r.left_bottom() + vec2(1.5, -2.0), c + vec2(-1.5, 0.5), c + vec2(1.5, 3.0), c + vec2(4.0, 0.5), r.right_bottom() + vec2(-1.5, -2.0)],
+                traco,
+            ));
+            pintor.circle_filled(c + vec2(3.5, -2.5), 1.4, cor);
+        }
+        Icone::Video => {
+            let r = caixa(15.0, 12.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            play(pintor, c, 3.0, cor);
+        }
+        Icone::Tarefa => {
+            let r = caixa(15.0, 11.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.left_top() + vec2(3.0, 3.5), r.right_top() + vec2(-3.0, 3.5)], traco);
+            pintor.circle_filled(r.left_bottom() + vec2(4.0, -3.0), 1.5, cor);
+        }
+        Icone::Ligacao => {
+            let (a, b) = (c + vec2(-6.0, 4.0), c + vec2(5.0, -4.0));
+            pintor.circle_filled(a, 1.8, cor);
+            for forma in Shape::dashed_line(&[a, b - vec2(2.0, -1.5)], traco, 2.5, 2.0) {
+                pintor.add(forma);
+            }
+            let direcao = (b - a).normalized();
+            let normal = vec2(-direcao.y, direcao.x);
+            pintor.add(Shape::convex_polygon(vec![b, b - direcao * 4.5 + normal * 2.5, b - direcao * 4.5 - normal * 2.5], cor, Stroke::NONE));
+        }
+        Icone::Menos => {
+            pintor.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], traco);
+        }
+        Icone::MaisZoom => {
+            pintor.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], traco);
+            pintor.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], traco);
+        }
+        Icone::Ajustar => {
+            let (m, p) = (6.0, 3.0);
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let canto = c + vec2(m * sx, m * sy);
+                pintor.add(Shape::line(vec![canto - vec2(0.0, p * sy), canto, canto - vec2(p * sx, 0.0)], traco));
+            }
+        }
+        Icone::Lousa => {
+            let r = caixa(13.0, 11.0);
+            pintor.rect_stroke(r, CornerRadius::same(3), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.left_top() + vec2(3.0, 4.0), r.left_top() + vec2(8.0, 4.0)], traco);
+            pintor.line_segment([r.left_top() + vec2(3.0, 7.0), r.left_top() + vec2(6.5, 7.0)], traco);
+        }
+        Icone::Duplicar => {
+            pintor.rect_stroke(Rect::from_min_size(c + vec2(-6.0, -6.0), vec2(9.0, 9.0)), CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.rect_stroke(Rect::from_min_size(c + vec2(-3.0, -3.0), vec2(9.0, 9.0)), CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+        }
+        Icone::Apagar => {
+            pintor.line_segment([c + vec2(-6.0, -4.0), c + vec2(6.0, -4.0)], traco);
+            pintor.line_segment([c + vec2(-2.0, -6.0), c + vec2(2.0, -6.0)], traco);
+            pintor.add(Shape::line(vec![c + vec2(-4.5, -4.0), c + vec2(-3.5, 6.0), c + vec2(3.5, 6.0), c + vec2(4.5, -4.0)], traco));
         }
     }
 }
@@ -891,7 +1004,9 @@ pub fn chip_alternar(ui: &mut egui::Ui, rotulo: &str, ativo: bool) -> Response {
     let p = cores();
     let fonte = if ativo { forte(13.0) } else { FontId::proportional(13.0) };
     let galeria = ui.painter().layout_no_wrap(rotulo.to_owned(), fonte, p.texto);
-    let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
+    // A largura é a do texto em negrito nos dois estados: ligar não empurra os vizinhos.
+    let largura = ui.painter().layout_no_wrap(rotulo.to_owned(), forte(13.0), p.texto).size().x;
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura + 28.0, 32.0), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let (fundo, borda) = if ativo {
         (p.destaque.gamma_multiply(if claro() { 0.12 } else { 0.18 }), p.destaque.gamma_multiply(0.6))
@@ -908,7 +1023,10 @@ pub fn chip_alternar(ui: &mut egui::Ui, rotulo: &str, ativo: bool) -> Response {
 /// Uma tecla desenhada (no painel de atalhos e nas dicas).
 pub fn tecla(ui: &mut egui::Ui, texto: &str) -> Response {
     let p = cores();
-    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::monospace(12.5), p.texto);
+    // Uma letra sozinha vai na fonte do texto: o "O" na monoespaçada parece zero.
+    let letra = texto.chars().count() == 1 && texto.chars().all(char::is_alphabetic);
+    let fonte = if letra { forte(12.5) } else { FontId::monospace(12.5) };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), fonte, p.texto);
     let (rect, resposta) = ui.allocate_exact_size(vec2((galeria.size().x + 16.0).max(22.0), 22.0), Sense::hover());
     ui.painter().rect(rect, CornerRadius::same(RAIO_ETIQUETA), p.superficie, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
@@ -1196,6 +1314,104 @@ pub fn sombra(deslocamento: i8, borrao: u8) -> egui::Shadow {
     egui::Shadow { offset: [0, deslocamento], blur: borrao, spread: 0, color: Color32::from_black_alpha(if claro() { 40 } else { 90 }) }
 }
 
+// Lousa: as cores fixas do papel das notas e do bloco de código, e a malha
+// de pontos do quadro infinito.
+
+/// As seis cores da nota: a chave do núcleo, o nome da dica e a base pastel
+/// (no Claro e no Leitura; no Escuro ela se mistura 16% ao fundo, para não
+/// ofuscar a tela escura nem o telão).
+pub const NOTA_BASE: [(&str, &str, u32); 6] = [
+    ("amarelo", "Amarelo", 0xfbefa6),
+    ("azul", "Azul", 0xcfe3fb),
+    ("verde", "Verde", 0xd3efd3),
+    ("rosa", "Rosa", 0xf9d6dc),
+    ("lilas", "Lilás", 0xe3d9f7),
+    ("cinza", "Cinza", 0xe3e6eb),
+];
+
+/// As cores de uma nota: o papel, a tinta (sempre escura), o secundário
+/// (título, marcador, contador), a linha (borda, tabela) e o recuo (faixa do
+/// título, cabeçalho da tabela, código dentro da nota).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoresNota {
+    pub fundo: Color32,
+    pub tinta: Color32,
+    pub secundaria: Color32,
+    pub linha: Color32,
+    pub recuo: Color32,
+}
+
+/// As cores da nota no tema atual.
+pub fn cor_nota(chave: &str) -> CoresNota {
+    cor_nota_em(ATUAL.load(Ordering::Relaxed), chave)
+}
+
+fn cor_nota_em(tema: u8, chave: &str) -> CoresNota {
+    let base = rgb(NOTA_BASE.iter().find(|(c, _, _)| *c == chave).map_or(NOTA_BASE[0].2, |(_, _, v)| *v));
+    let fundo = if tema == 0 { misturar(base, ESCURO.fundo, 0.16) } else { base };
+    let tinta = if tema == 2 { LEITURA.texto } else { CLARO.texto };
+    CoresNota { fundo, tinta, secundaria: misturar(tinta, fundo, 0.26), linha: misturar(fundo, tinta, 0.18), recuo: misturar(fundo, tinta, 0.07) }
+}
+
+/// A borda da bolinha de cor (barra da seleção, menu): a cor da nota puxada
+/// para a tinta, para as bolinhas claras não sumirem no painel dos temas claros.
+pub fn borda_da_bolinha(c: &CoresNota) -> Color32 {
+    misturar(c.fundo, c.tinta, 0.3)
+}
+
+/// O bloco de código da lousa: sempre escuro, a cara de "trecho de terminal".
+pub struct CoresCodigo {
+    pub fundo: Color32,
+    pub texto: Color32,
+    pub suave: Color32,
+    pub borda: Color32,
+}
+
+pub const CODIGO: CoresCodigo = CoresCodigo { fundo: ESCURO.superficie_alta, texto: ESCURO.terminal_texto, suave: ESCURO.suave, borda: ESCURO.realce };
+
+/// A malha de pontos da lousa, presa ao quadro (anda com a vista). Refeita só
+/// quando a câmera, a área ou o tema mudam: parada, não custa nada.
+#[derive(Default)]
+pub struct Grade {
+    feita_para: Option<(Rect, [i32; 3], Color32)>,
+    malha: Option<Arc<Mesh>>,
+}
+
+impl Grade {
+    /// `origem`: o ponto do quadro no canto da área; `zoom`: a escala.
+    pub fn desenhar(&mut self, pintor: &egui::Painter, area: Rect, origem: Pos2, zoom: f32) {
+        let cor = cores().favo;
+        // Pontos a cada 24 do quadro; entre 25% e 50%, a cada 96; abaixo de 25%, nenhum.
+        let passo = if zoom >= 0.5 {
+            24.0
+        } else if zoom >= 0.25 {
+            96.0
+        } else {
+            return;
+        };
+        let na_tela = passo * zoom;
+        let fase = vec2((-origem.x).rem_euclid(passo) * zoom, (-origem.y).rem_euclid(passo) * zoom);
+        let chave = [(zoom * 1000.0) as i32, (fase.x * 4.0) as i32, (fase.y * 4.0) as i32];
+        if self.feita_para != Some((area, chave, cor)) {
+            let mut malha = Mesh::default();
+            let mut y = area.top() + fase.y;
+            while y <= area.bottom() {
+                let mut x = area.left() + fase.x;
+                while x <= area.right() {
+                    malha.add_colored_rect(Rect::from_center_size(pos2(x, y), vec2(2.0, 2.0)), cor);
+                    x += na_tela;
+                }
+                y += na_tela;
+            }
+            self.malha = Some(Arc::new(malha));
+            self.feita_para = Some((area, chave, cor));
+        }
+        if let Some(malha) = &self.malha {
+            pintor.add(Shape::Mesh(malha.clone()));
+        }
+    }
+}
+
 /// Fundo em favo de mel, calculado uma vez por tamanho e tema e reaproveitado
 /// em todo quadro: desenhar a malha pronta não custa quase nada.
 #[derive(Default)]
@@ -1450,6 +1666,62 @@ mod testes {
         assert_eq!(escuro.spacing.interact_size, claro.spacing.interact_size);
         // Sem piscar: um campo com foco não redesenha a tela parada.
         assert!(!escuro.visuals.text_cursor.blink && !claro.visuals.text_cursor.blink);
+    }
+
+    #[test]
+    fn notas_sao_legiveis_em_todos_os_temas() {
+        for tema in 0..3u8 {
+            for (chave, _, _) in NOTA_BASE {
+                let c = cor_nota_em(tema, chave);
+                let tinta = contraste(c.tinta, c.fundo);
+                let secundaria = contraste(c.secundaria, c.fundo);
+                assert!(tinta >= 7.0, "tinta na nota {chave} no tema {tema}: {tinta:.2}");
+                assert!(secundaria >= 4.5, "secundária na nota {chave} no tema {tema}: {secundaria:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn bolinhas_de_cor_aparecem_nos_temas_claros() {
+        for (tema, p) in [(1u8, &CLARO), (2, &LEITURA)] {
+            for (chave, _, _) in NOTA_BASE {
+                let borda = borda_da_bolinha(&cor_nota_em(tema, chave));
+                for (nome, fundo) in [("superfície", p.superficie), ("superfície alta", p.superficie_alta)] {
+                    let r = contraste(borda, fundo);
+                    assert!(r >= 1.5, "bolinha {chave} no tema {tema} sobre a {nome}: {r:.2}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nota_se_separa_do_fundo() {
+        for (tema, p) in [(1u8, &CLARO), (2, &LEITURA)] {
+            for (chave, _, _) in NOTA_BASE {
+                let r = contraste(cor_nota_em(tema, chave).linha, p.fundo);
+                assert!(r >= 1.35, "borda da nota {chave} no tema {tema}: {r:.2}");
+            }
+        }
+        for (chave, _, _) in NOTA_BASE {
+            let r = contraste(cor_nota_em(0, chave).fundo, ESCURO.fundo);
+            assert!(r >= 7.0, "nota {chave} no escuro: {r:.2}");
+        }
+    }
+
+    #[test]
+    fn codigo_e_legivel_e_aparece_no_escuro() {
+        assert!(contraste(CODIGO.texto, CODIGO.fundo) >= 4.5);
+        assert!(contraste(CODIGO.suave, CODIGO.fundo) >= 4.5);
+        let luz = |c: Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+        assert!((luz(CODIGO.fundo) - luz(ESCURO.fundo)).abs() >= (luz(ESCURO.superficie) - luz(ESCURO.fundo)).abs());
+    }
+
+    #[test]
+    fn selecao_aparece_no_fundo() {
+        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+            let r = contraste(p.destaque, p.fundo);
+            assert!(r >= 3.0, "destaque sobre o fundo no tema {nome}: {r:.2}");
+        }
     }
 
     #[test]

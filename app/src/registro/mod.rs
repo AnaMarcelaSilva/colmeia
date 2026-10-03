@@ -49,6 +49,8 @@ pub enum Acao {
     AbrirTarefa {
         tarefa: i64,
         agente: Option<i64>,
+        /// O agente acabou de mexer na lousa da tarefa: ela abre junto, enquadrada.
+        lousa: bool,
     },
     IrParaQuadro,
     VerTodos,
@@ -74,7 +76,7 @@ fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option
     match clique {
         comum::CliqueCartao::Abrir(tarefa) => Acao::Apresentar { deck: Box::new(deck.clone()), periodo, tarefa: Some(tarefa) },
         comum::CliqueCartao::Pedir(tarefa, botao) => Acao::PedirAoAgente { tarefa, tipo: deck.tipo.clone(), periodo: deck.chave_nota.clone(), botao },
-        comum::CliqueCartao::AbrirTarefa(tarefa) => Acao::AbrirTarefa { tarefa, agente: None },
+        comum::CliqueCartao::AbrirTarefa(tarefa) => Acao::AbrirTarefa { tarefa, agente: None, lousa: false },
     }
 }
 
@@ -578,7 +580,7 @@ impl Registro {
         }
         let (anexo, tarefa) = (visor.anexo, visor.tarefa);
         if abrir {
-            acoes.push(Acao::AbrirTarefa { tarefa, agente: None });
+            acoes.push(Acao::AbrirTarefa { tarefa, agente: None, lousa: false });
             fechar = true;
         }
         if remover {

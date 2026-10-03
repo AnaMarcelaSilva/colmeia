@@ -74,7 +74,7 @@ Na caixa de mensagem do painel da tarefa, **Enter quebra a linha**, **Ctrl+Enter
 
 **↑ traz as mensagens anteriores**, como no terminal: com o cursor na primeira linha, a seta para cima mostra o que você já mandou ao agente em foco (e continua andando em qualquer linha), a seta para baixo volta, e depois da mais nova (ou com Esc) volta o rascunho que você estava escrevendo. O histórico fica no núcleo, então sobrevive a fechar a Colmeia, com até 200 mensagens por agente.
 
-> **Privacidade do histórico.** O núcleo não guarda uma mensagem que pareça ter senha, token ou chave (`sk-…`, `ghp_…`, `senha: …`, chave privada) e avisa no rodapé da caixa; a mensagem é enviada mesmo assim. O filtro é uma leitura, não uma garantia: se um segredo escapar, "Limpar histórico de mensagens" no menu "⋯" do agente apaga tudo. O histórico fica fora do registro imutável de eventos justamente para poder ser apagado ([decisão 0006](docs/decisoes/0006-apresentacao-e-historico.md)).
+> **Privacidade do histórico.** O núcleo não guarda uma mensagem que pareça ter senha, token ou chave (`sk-…`, `ghp_…`, `senha: …`, `db_password=…`, "a senha do banco é …", chave privada) e avisa no rodapé da caixa; a mensagem é enviada mesmo assim. O filtro é uma leitura, não uma garantia: se um segredo escapar, "Limpar histórico de mensagens" no menu "⋯" do agente apaga tudo. O histórico fica fora do registro imutável de eventos justamente para poder ser apagado ([decisão 0006](docs/decisoes/0006-apresentacao-e-historico.md)).
 
 ## Em tempo real
 
@@ -136,6 +136,19 @@ Na Daily, na Sprint (botão "Pedir ao agente" no cartão ou botão direito) e no
 - **A resposta volta para a nota** da daily ou da sprint e as capturas viram anexos da tarefa. A pílula do cartão e a faixa do slide mostram o estado (na fila, com o agente, respondido, parou sem responder), e "O agente respondeu · Ver" avisa quando terminou.
 - **Ferramentas da Colmeia (MCP).** Todo Claude Code que a Colmeia abre recebe o próprio núcleo como servidor MCP (`colmeia-nucleo mcp`), com um token que só vale para a tarefa dele: ler a tarefa e a nota, complementar ou reescrever a nota, anexar uma imagem da pasta, abrir e capturar o navegador da tarefa e concluir o pedido. Tudo aparece na linha do tempo. Um agente que já rodava antes desta versão ganha as ferramentas quando for iniciado de novo; Codex, Gemini e OpenCode ainda não.
 
+## Lousa
+
+![A lousa do workspace: notas em markdown, um trecho de terminal, uma tabela, um cartão de tarefa e as ligações tracejadas entre eles](docs/imagens/lousa.png)
+
+Um quadro livre para pensar, um por workspace ("Lousa", logo abaixo do nome do workspace na barra lateral) e um por tarefa (o chip "Lousa" no painel da tarefa, Ctrl+Shift+Q).
+
+- **Itens:** nota (markdown simples: `#` títulos, **negrito**, *itálico*, `código`, listas, `- [ ]` caixas, tabelas em pipe e blocos de código), texto solto, bloco de código ou trecho de terminal, imagem (Ctrl+V, arrastar o arquivo ou "Inserir imagem…"), vídeo (abre no reprodutor do sistema), cartão de tarefa (mostra a coluna e o agente ao vivo; o clique duplo abre a tarefa, e "‹ Lousa" volta) e ligações tracejadas com rótulo.
+- **Criar:** clique duplo no vazio cria uma nota já em edição; a barra de cima e as teclas N, T, C, I e K criam no lugar do mouse; puxar o círculo da borda de um item até outro liga os dois, e soltar no vazio cria uma nota ligada.
+- **Mexer:** arrastar move (Shift soma à seleção, Shift+arrastar no vazio faz a caixa), as alças redimensionam (a imagem mantém a proporção), o fundo, o espaço ou o botão do meio movem a vista, Ctrl+rodinha dá zoom no mouse. Ctrl+D duplica, Delete apaga (com "Desfazer"), Ctrl+Z e Ctrl+Shift+Z desfazem e refazem, Ctrl+C/X/V copiam itens entre lousas.
+- **A lousa da tarefa cobre o terminal** sem mudar o tamanho dele, com a caixa de mensagem embaixo: "Montar o fluxo desta tarefa" põe o pedido na caixa, e o que o agente acrescenta (ferramentas `ler_lousa` e `acrescentar_a_lousa`) chega na hora, com o contorno de "novo".
+- **Apresentar** (F5 na lousa) leva os cartões ao palco, em tela cheia, seguindo as ligações (sem elas, na ordem de leitura); O mostra a visão geral e Enter (ou o play) abre o vídeo no reprodutor. No slide da daily, a lousa da tarefa aparece na aba "Lousa" (L alterna com os anexos), e o clique abre o palco.
+- Mover e editar não entra na linha do tempo; o que o agente acrescenta entra ("Claude Code (dev) acrescentou 6 itens à lousa"). Texto com cara de senha ou chave é recusado ([decisão 0008](docs/decisoes/0008-lousa-fora-da-corrente.md)).
+
 ## Navegador e arquivos da tarefa
 
 - **Navegador** (no topo do painel da tarefa) abre um Chrome ou Chromium da Colmeia ao lado da janela, com perfil próprio (nunca o seu) e controle só por pipe, sem porta de rede. "Navegador ▾" tem "Ir para endereço…" (`localhost:5173`, `https://…` ou um arquivo da pasta), "Capturar navegador" (Ctrl+Shift+B, anexa à tarefa) e "Fechar navegador". Só abre `http`, `https` e arquivos de dentro da pasta da tarefa, menos `.env` e chaves. Durante a apresentação, a Daily e a Sprint, a janela que o agente abre fica fora da tela, para não aparecer no compartilhamento. Sem Chrome nem Chromium instalado, a Colmeia avisa; `COLMEIA_NAVEGADOR` aponta outro executável.
@@ -155,6 +168,9 @@ A Colmeia reserva **Ctrl+Shift+letra** para ela: esses atalhos não chegam ao pr
 | Ctrl+Shift+S | Captura o terminal em foco |
 | Ctrl+Shift+B | Captura o navegador da tarefa |
 | Ctrl+Shift+E | Arquivos da tarefa |
+| Ctrl+Shift+Q | Lousa da tarefa (por cima do terminal) |
+| F5 / Shift+F5 (na lousa) | Apresenta a lousa / a partir do item selecionado |
+| L (no slide) | Alterna anexos e lousa |
 | P (no slide) | Pedir ao agente da tarefa |
 | Ctrl+Esc | Volta do painel da tarefa ao quadro |
 
@@ -173,6 +189,7 @@ Os dados ficam em `~/.local/share/colmeia/` (ou `COLMEIA_DADOS`), num SQLite com
 | `COLMEIA_TEMA` | tela | `escuro`, `claro` ou `leitura`, só antes de entrar num perfil |
 | `COLMEIA_SEM_ABELHA=1` | tela | Desliga a abelha |
 | `COLMEIA_TAMANHO` | tela | Tamanho inicial da janela, como `1280x720` (para conferir telas menores) |
+| `COLMEIA_FPS=1` | tela | Mostra o contador de quadros no topo e escreve cada quadro no stderr (para medir; parada, a tela não escreve nada) |
 | `COLMEIA_TAREFA`, `COLMEIA_CARTOES`, `COLMEIA_CENARIO=erro` | tela | Só na demonstração: abrir uma tarefa, quantidade de cartões, cenário de erro |
 
 ## Arquitetura

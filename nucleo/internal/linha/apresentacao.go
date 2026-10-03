@@ -121,6 +121,9 @@ type Slide struct {
 	// para não apagar o que o agente complementou enquanto ela editava.
 	NotaVersao   string        `json:"nota_versao"`
 	NotaAnterior *NotaAnterior `json:"nota_anterior,omitempty"`
+	// Lousa da tarefa, quando ela tem itens: a tela busca os itens sob
+	// demanda e mostra só leitura, na aba "Lousa" da coluna da direita.
+	Lousa *dados.ResumoLousa `json:"lousa,omitempty"`
 
 	ultimo  time.Time
 	ultErro bool
@@ -158,7 +161,7 @@ type Deck struct {
 // ou um terminal comum parado não viram slide).
 func trabalho(tipo string) bool {
 	switch tipo {
-	case TipoConcluiu, TipoMoveu, TipoSessao, TipoSessaoAberta, TipoSessaoAguardando, TipoErro, TipoInterrompido, TipoCaptura, TipoNota:
+	case TipoConcluiu, TipoMoveu, TipoSessao, TipoSessaoAberta, TipoSessaoAguardando, TipoErro, TipoInterrompido, TipoCaptura, TipoNota, TipoLousa:
 		return true
 	}
 	return false
@@ -631,6 +634,15 @@ func (d *Deck) Completar(anexos []dados.Anexo, notas, anteriores map[int64]dados
 		s.Nota, s.NotaVersao = notas[s.TarefaID].Texto, notas[s.TarefaID].AtualizadaEm
 		if n, ok := anteriores[s.TarefaID]; ok && s.Nota == "" && n.Periodo != d.ChaveNota && n.Texto != "" {
 			s.NotaAnterior = &NotaAnterior{Texto: n.Texto, Periodo: periodoLegivel(n.Periodo)}
+		}
+	}
+}
+
+// CompletarLousas põe em cada slide a lousa da tarefa que tem itens.
+func (d *Deck) CompletarLousas(lousas map[int64]dados.ResumoLousa) {
+	for i := range d.Slides {
+		if l, ok := lousas[d.Slides[i].TarefaID]; ok && l.Elementos > 0 {
+			d.Slides[i].Lousa = &l
 		}
 	}
 }

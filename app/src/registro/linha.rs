@@ -268,9 +268,11 @@ impl Registro {
                         let cartao = &dia.cartoes[*c];
                         let expandido = self.expandidos.contains(&(dia.dia.dia.clone(), cartao.tarefa));
                         match desenhar_cartao(ui, rect, cartao, expandido, com_projeto, &mut self.miniaturas) {
-                            Some(Clique::Abrir) => {
-                                acoes.push(Acao::AbrirTarefa { tarefa: cartao.tarefa, agente: (cartao.agente != 0).then_some(cartao.agente) })
-                            }
+                            Some(Clique::Abrir) => acoes.push(Acao::AbrirTarefa {
+                                tarefa: cartao.tarefa,
+                                agente: (cartao.agente != 0).then_some(cartao.agente),
+                                lousa: cartao.eventos.first().is_some_and(|e| e.tipo == "lousa"),
+                            }),
                             Some(Clique::VerMais) => expandir = Some((dia.dia.dia.clone(), cartao.tarefa)),
                             Some(Clique::Imagem(i)) => {
                                 let a = &cartao.anexos[i];

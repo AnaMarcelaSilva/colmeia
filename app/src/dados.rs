@@ -47,6 +47,8 @@ impl Coluna {
 pub struct Projeto {
     pub id: i64,
     pub nome: String,
+    /// O workspace: o id (para a lousa dele) e o nome.
+    pub workspace_id: i64,
     pub workspace: String,
     pub caminho: String,
     /// Pasta de trabalho sem git: sem branches nem cópias isoladas.
@@ -56,7 +58,15 @@ pub struct Projeto {
 
 impl From<api::Projeto> for Projeto {
     fn from(p: api::Projeto) -> Self {
-        Projeto { id: p.id, nome: p.nome, workspace: p.workspace, caminho: p.caminho, sem_git: p.tipo == "pasta", branch_padrao: p.branch_padrao }
+        Projeto {
+            id: p.id,
+            nome: p.nome,
+            workspace_id: p.workspace_id,
+            workspace: p.workspace,
+            caminho: p.caminho,
+            sem_git: p.tipo == "pasta",
+            branch_padrao: p.branch_padrao,
+        }
     }
 }
 
@@ -370,6 +380,9 @@ pub enum Evento {
         seq: u64,
         #[serde(default)]
         tarefa_id: i64,
+        /// Imagem ou vídeo de uma lousa: não é novidade da linha do tempo.
+        #[serde(default)]
+        na_lousa: bool,
     },
     #[serde(rename = "anexo.removido")]
     AnexoRemovido {
@@ -395,6 +408,21 @@ pub enum Evento {
     NavegadorFechado { seq: u64, tarefa_id: i64 },
     #[serde(rename = "navegador.captura", alias = "navegador.recusado")]
     NavegadorCaptura { seq: u64 },
+    /// Mudou a lousa de um workspace ou de uma tarefa: os itens inteiros e
+    /// os removidos. `agente_id` diz que foi o agente (e entra na linha do tempo).
+    #[serde(rename = "lousa.mudou")]
+    LousaMudou {
+        seq: u64,
+        lousa_id: i64,
+        #[serde(default)]
+        dono: api::DonoLousa,
+        #[serde(default)]
+        elementos: Vec<api::ElementoLousa>,
+        #[serde(default)]
+        removidos: Vec<i64>,
+        #[serde(default)]
+        agente_id: i64,
+    },
     #[serde(other)]
     Desconhecido,
 }
@@ -420,14 +448,20 @@ impl Evento {
             | Evento::PedidoMudou { seq, .. }
             | Evento::NavegadorAberto { seq, .. }
             | Evento::NavegadorFechado { seq, .. }
-            | Evento::NavegadorCaptura { seq } => *seq,
+            | Evento::NavegadorCaptura { seq }
+            | Evento::LousaMudou { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
 
     /// Muda algo que a linha do tempo mostra (o estado de um agente não muda).
     pub fn entra_na_linha(&self) -> bool {
-        !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido)
+        match self {
+            // Mexer na lousa não entra na linha do tempo; o que o agente acrescenta entra.
+            Evento::LousaMudou { agente_id, .. } => *agente_id != 0,
+            Evento::AnexoAdicionado { na_lousa: true, .. } => false,
+            _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido),
+        }
     }
 }
 
@@ -479,7 +513,9 @@ impl Modelo {
             | Evento::AnexoAdicionado { .. }
             | Evento::AnexoRemovido { .. }
             | Evento::NotaAtualizada { .. }
-            | Evento::NavegadorCaptura { .. } => {}
+            | Evento::NavegadorCaptura { .. }
+            // A lousa aberta aplica (veja lousa::Lousa::aplicar).
+            | Evento::LousaMudou { .. } => {}
             Evento::PedidoMudou { pedido, .. } => {
                 let respondido = pedido.estado == "respondido";
                 let (tarefa, agente) = (pedido.tarefa_id, pedido.agente_id);
@@ -640,6 +676,7 @@ pub fn projetos_demo() -> Vec<Projeto> {
         .map(|(i, nome)| Projeto {
             id: i as i64 + 1,
             nome: nome.into(),
+            workspace_id: 1,
             workspace: "Empresa X".into(),
             caminho: String::new(),
             sem_git: false,
@@ -820,6 +857,22 @@ mod testes {
         a.fim = Some(api::Fim { codigo: 1, erro: false, motivo: "terminou".into(), hora: "10:00".into(), texto: String::new() });
         assert_eq!(a.visual(), EstadoVisual::Terminou);
         assert_eq!(a.texto_estado(), "Terminal encerrado (código 1) às 10:00");
+    }
+
+    #[test]
+    fn lousa_do_agente_entra_na_linha_e_a_sua_nao() {
+        let do_agente = evento(
+            r#"{"tipo":"lousa.mudou","seq":3,"lousa_id":2,"dono":{"tarefa_id":10},"agente_id":7,
+                "elementos":[{"id":5,"tipo":"nota","x":1,"y":2,"largura":240,"altura":120,"texto":"oi","autor":"agente","versao":1}],"removidos":[]}"#,
+        );
+        assert!(do_agente.entra_na_linha());
+        let Evento::LousaMudou { dono, elementos, .. } = &do_agente else { panic!("{do_agente:?}") };
+        assert_eq!((dono.tarefa_id, elementos[0].tipo, elementos[0].do_agente()), (10, api::TipoElemento::Nota, true));
+        let sua = evento(r#"{"tipo":"lousa.mudou","seq":4,"lousa_id":1,"dono":{"workspace_id":1},"elementos":[],"removidos":[5]}"#);
+        assert!(!sua.entra_na_linha());
+        assert!(!evento(r#"{"tipo":"anexo.adicionado","seq":5,"anexo_id":9,"na_lousa":true}"#).entra_na_linha());
+        let mut m = modelo();
+        assert!(m.aplicar(sua).is_empty());
     }
 
     #[test]

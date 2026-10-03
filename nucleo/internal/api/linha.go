@@ -345,5 +345,11 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	deck.Completar(anexos, notas, anteriores)
+	lousas, err := s.Banco.LousasDasTarefas(r.Context(), ids)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	deck.CompletarLousas(lousas)
 	responderJSON(w, deck)
 }

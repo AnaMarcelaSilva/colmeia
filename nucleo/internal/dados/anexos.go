@@ -30,6 +30,8 @@ type Anexo struct {
 	Tipo    string `json:"tipo"`
 	Formato string `json:"formato"`
 	Nome    string `json:"nome,omitempty"`
+	// NaLousa: posto numa lousa (fora da linha do tempo e dos slides).
+	NaLousa bool `json:"na_lousa,omitempty"`
 }
 
 var (
@@ -61,6 +63,8 @@ type NovoAnexo struct {
 	Tipo, Formato, Nome string
 	// Navegador: captura do navegador da tarefa (não do terminal).
 	Navegador bool
+	// NaLousa: imagem ou vídeo de uma lousa, sempre do perfil (sem tarefa).
+	NaLousa bool
 }
 
 func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
@@ -87,7 +91,10 @@ func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
 		n.Legenda = legenda
 	}
 	a := Anexo{PerfilID: n.Perfil, TarefaID: n.Tarefa, Sha256: n.Sha256, Largura: n.Largura, Altura: n.Altura, Bytes: n.Bytes,
-		Origem: n.Origem, Legenda: n.Legenda, CriadoEm: agora(), Tipo: n.Tipo, Formato: n.Formato, Nome: n.Nome}
+		Origem: n.Origem, Legenda: n.Legenda, CriadoEm: agora(), Tipo: n.Tipo, Formato: n.Formato, Nome: n.Nome, NaLousa: n.NaLousa}
+	if n.NaLousa && n.Tarefa != 0 {
+		return Anexo{}, ErrInvalido{"o anexo da lousa é do perfil, não de uma tarefa"}
+	}
 	err = b.emTransacao(ctx, func(tx *transacao) error {
 		escopo := Escopo{Perfil: n.Perfil}
 		conteudo := map[string]any{"sha256": n.Sha256, "origem": n.Origem}
@@ -96,6 +103,9 @@ func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
 		}
 		if n.Navegador {
 			conteudo["navegador"] = true
+		}
+		if n.NaLousa {
+			conteudo["na_lousa"] = true
 		}
 		if n.Tarefa != 0 {
 			var projeto int64
@@ -129,9 +139,9 @@ func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
 			escopo.Agente = n.Agente
 			conteudo["agente"], conteudo["ferramenta"], conteudo["papel"] = n.Agente, ferramenta, papel
 		}
-		r, err := tx.ExecContext(ctx, `INSERT INTO anexos (perfil_id, tarefa_id, sha256, largura, altura, bytes, origem, legenda, criado_em, tipo, formato, nome)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			a.PerfilID, nulo(a.TarefaID), a.Sha256, a.Largura, a.Altura, a.Bytes, a.Origem, a.Legenda, a.CriadoEm, a.Tipo, a.Formato, a.Nome)
+		r, err := tx.ExecContext(ctx, `INSERT INTO anexos (perfil_id, tarefa_id, sha256, largura, altura, bytes, origem, legenda, criado_em, tipo, formato, nome, na_lousa)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.PerfilID, nulo(a.TarefaID), a.Sha256, a.Largura, a.Altura, a.Bytes, a.Origem, a.Legenda, a.CriadoEm, a.Tipo, a.Formato, a.Nome, a.NaLousa)
 		if err != nil {
 			return err
 		}
@@ -142,10 +152,10 @@ func (b *Banco) CriarAnexo(ctx context.Context, n NovoAnexo) (Anexo, error) {
 	return a, err
 }
 
-const colunasAnexo = `id, perfil_id, COALESCE(tarefa_id, 0), sha256, largura, altura, bytes, origem, legenda, criado_em, removido, tipo, formato, nome`
+const colunasAnexo = `id, perfil_id, COALESCE(tarefa_id, 0), sha256, largura, altura, bytes, origem, legenda, criado_em, removido, tipo, formato, nome, na_lousa`
 
 func escanearAnexo(l escaneavel, a *Anexo) error {
-	return l.Scan(&a.ID, &a.PerfilID, &a.TarefaID, &a.Sha256, &a.Largura, &a.Altura, &a.Bytes, &a.Origem, &a.Legenda, &a.CriadoEm, &a.Removido, &a.Tipo, &a.Formato, &a.Nome)
+	return l.Scan(&a.ID, &a.PerfilID, &a.TarefaID, &a.Sha256, &a.Largura, &a.Altura, &a.Bytes, &a.Origem, &a.Legenda, &a.CriadoEm, &a.Removido, &a.Tipo, &a.Formato, &a.Nome, &a.NaLousa)
 }
 
 func (b *Banco) Anexo(ctx context.Context, id int64) (Anexo, error) {
@@ -165,7 +175,7 @@ func (b *Banco) AnexosDasTarefas(ctx context.Context, tarefas []int64, desde, at
 	if len(tarefas) == 0 {
 		return lista, nil
 	}
-	consulta := `SELECT ` + colunasAnexo + ` FROM anexos WHERE removido = 0 AND tarefa_id IN (?` + strings.Repeat(`, ?`, len(tarefas)-1) + `)`
+	consulta := `SELECT ` + colunasAnexo + ` FROM anexos WHERE removido = 0 AND na_lousa = 0 AND tarefa_id IN (?` + strings.Repeat(`, ?`, len(tarefas)-1) + `)`
 	args := make([]any, 0, len(tarefas)+2)
 	for _, t := range tarefas {
 		args = append(args, t)

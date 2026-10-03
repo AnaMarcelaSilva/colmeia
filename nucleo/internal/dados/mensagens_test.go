@@ -177,7 +177,7 @@ func TestNotas(t *testing.T) {
 }
 
 // Um banco da versão 2 (anexos sem tipo, formato e nome, e com o CHECK
-// antigo) abre na versão 3 com as mesmas linhas e ids.
+// antigo) abre na versão atual (4, com as lousas) com as mesmas linhas e ids.
 func TestMigracaoDosAnexos(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dados")
 	b, err := Abrir(dir)
@@ -219,7 +219,7 @@ func TestMigracaoDosAnexos(t *testing.T) {
 	defer b.Fechar()
 	var versao int
 	b.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 3 {
+	if versao != 4 {
 		t.Errorf("versão %d depois de abrir", versao)
 	}
 	a, err := b.Anexo(ctx, 5)

@@ -15,6 +15,7 @@ mod dialogos;
 mod entrada;
 mod eventos;
 mod gaveta;
+mod lousa;
 mod pedido;
 mod quadro;
 mod registro;
@@ -22,7 +23,7 @@ mod sistema;
 mod tema;
 mod terminal;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -70,6 +71,8 @@ enum Tela {
         id: i64,
         foco: i64,
     },
+    /// A lousa (quadro livre) do workspace.
+    Lousa(i64),
 }
 
 /// Como está a ligação com o núcleo.
@@ -93,6 +96,17 @@ enum AcaoAviso {
     VerAbelha,
     /// O agente respondeu: ver o cartão da tarefa na Daily.
     VerPedido(i64),
+    /// Os avisos da lousa: desfazer o que foi apagado, ver o que o agente
+    /// acrescentou e tentar gravar de novo.
+    Lousa(api::DonoLousa, AcaoLousa),
+}
+
+#[derive(Clone, Copy)]
+enum AcaoLousa {
+    /// Desfazer o comando de número dado (a remoção que o aviso anunciou).
+    Desfazer(u64),
+    Ver,
+    Tentar,
 }
 
 /// Aviso passageiro no rodapé. Um por vez: o mais novo substitui o anterior.
@@ -215,6 +229,19 @@ struct Colmeia {
     /// Gaveta de arquivos: a árvore de cada tarefa (em cache) e a tarefa com a gaveta aberta.
     arvores: HashMap<i64, gaveta::Arvore>,
     gaveta: Option<i64>,
+    /// Lousas abertas nesta sessão (a câmera de cada uma fica lembrada), as
+    /// tarefas com a lousa cobrindo o terminal, as que o agente mexeu sem
+    /// você ver (o ponto no chip) e o workspace para onde o "‹ Lousa" volta.
+    lousas: HashMap<api::DonoLousa, lousa::Lousa>,
+    lousa_na_tarefa: HashSet<i64>,
+    novidade_na_lousa: HashSet<i64>,
+    voltar_para_lousa: Option<i64>,
+    /// A lousa que acabou de abrir pela barra lateral: ganha o teclado no primeiro quadro.
+    lousa_ativa_ao_abrir: Option<api::DonoLousa>,
+    /// Onde a lousa da tarefa vai neste quadro (o corpo do terminal em foco).
+    area_lousa: Option<egui::Rect>,
+    /// A lousa apresentada em tela cheia (o palco).
+    palco: Option<(api::DonoLousa, Box<lousa::palco::Palco>)>,
     carga: &'static str,
     bytes: Arc<AtomicU64>,
     quadros: u64,
@@ -224,6 +251,8 @@ struct Colmeia {
     quadros_antes: u64,
     fps: u64,
     vazao: u64,
+    /// COLMEIA_FPS=1 mostra o contador de quadros também fora da demonstração (medição).
+    mostrar_fps: bool,
 }
 
 impl Colmeia {
@@ -283,6 +312,13 @@ impl Colmeia {
             tela_avisada: None,
             arvores: HashMap::new(),
             gaveta: None,
+            lousas: HashMap::new(),
+            lousa_na_tarefa: HashSet::new(),
+            novidade_na_lousa: HashSet::new(),
+            voltar_para_lousa: None,
+            lousa_ativa_ao_abrir: None,
+            area_lousa: None,
+            palco: None,
             carga: "parada",
             bytes: bytes.clone(),
             quadros: 0,
@@ -291,6 +327,7 @@ impl Colmeia {
             quadros_antes: 0,
             fps: 0,
             vazao: 0,
+            mostrar_fps: std::env::var("COLMEIA_FPS").is_ok_and(|v| v == "1"),
         };
 
         app.compositor.focar = true;
@@ -324,6 +361,10 @@ impl Colmeia {
 
     fn medir(&mut self, agora: f64) {
         self.quadros += 1;
+        if self.mostrar_fps {
+            // Cada quadro no log (só com COLMEIA_FPS=1): parada, a tela não escreve nada.
+            eprintln!("quadro {agora:.3}");
+        }
         if agora - self.ultimo_segundo >= 1.0 {
             let bytes = self.bytes.load(Ordering::Relaxed);
             self.fps = self.quadros - self.quadros_antes;
@@ -372,6 +413,15 @@ impl Colmeia {
         self.apresentacao = None;
         self.ultimo_slide = None;
         self.escopo = Escopo::Perfil;
+        // As lousas do perfil anterior gravam o que falta antes de sair.
+        for l in self.lousas.values_mut() {
+            l.gravar_ja();
+        }
+        self.lousas.clear();
+        self.lousa_na_tarefa.clear();
+        self.novidade_na_lousa.clear();
+        self.voltar_para_lousa = None;
+        self.palco = None;
         // O retrato do quadro chega pela thread de eventos, fora da thread da tela.
         self.ouvinte = Some(Ouvinte::iniciar(perfil.id, ctx.clone()));
         self.conexao = Conexao::Conectando;
@@ -415,9 +465,15 @@ impl Colmeia {
                     }
                     self.conexao = Conexao::Ligado;
                     linha_mudou = true;
+                    for l in self.lousas.values_mut() {
+                        l.recarregar(ctx);
+                    }
                 }
                 Mensagem::Evento(e) => {
                     linha_mudou |= e.entra_na_linha();
+                    if let dados::Evento::LousaMudou { lousa_id, dono, elementos, removidos, agente_id, .. } = &e {
+                        self.lousa_mudou(*lousa_id, *dono, elementos.clone(), removidos, *agente_id, agora);
+                    }
                     // Nota e anexos que a própria apresentação mudou não são novidade;
                     // os que vieram de fora (outra tela, a API) são.
                     if let (dados::Evento::NotaAtualizada { tarefa_id, agente_id, .. }, Some(a)) = (&e, self.apresentacao.as_mut())
@@ -467,7 +523,11 @@ impl Colmeia {
                                 if self.respondeu_em.get(&agente).is_some_and(|t| agora - t < 30.0)
                                     || self.modelo.pedidos.iter().any(|p| p.agente_id == agente && p.estado == "fila") => {}
                             Efeito::Atencao { tarefa, agente, texto, erro } => atencoes.push((tarefa, agente, texto, erro)),
-                            Efeito::Recarregar => {}
+                            Efeito::Recarregar => {
+                                for l in self.lousas.values_mut() {
+                                    l.recarregar(ctx);
+                                }
+                            }
                             Efeito::PedidoRespondido { tarefa, agente, titulo } => {
                                 self.respondeu_em.insert(agente, agora);
                                 match self.apresentacao.as_mut() {
@@ -683,6 +743,7 @@ impl Colmeia {
 
     fn mudar_escopo(&mut self, escopo: Escopo) {
         self.escopo = escopo;
+        self.voltar_para_lousa = None;
         // O registro acompanha o escopo; o painel da tarefa volta ao quadro.
         if !matches!(self.tela, Tela::Registro(_)) {
             self.tela = Tela::Quadro;
@@ -703,6 +764,8 @@ impl Colmeia {
     /// quem só aparece como última linha num cartão.
     fn ajustar_ritmos(&self) {
         let (foco, tarefa) = match self.tela {
+            // Com a lousa por cima, o terminal em foco não aparece: ritmo de fundo.
+            Tela::Tarefa { id, .. } if self.lousa_na_tarefa.contains(&id) => (None, None),
             Tela::Tarefa { id, foco } => (Some(foco), self.modelo.tarefas.iter().find(|t| t.id == id)),
             _ => (None, None),
         };
@@ -732,6 +795,7 @@ impl Colmeia {
         self.tela = Tela::Tarefa { id, foco };
         self.abelha.resumo_aberto = false;
         self.compositor.focar = true;
+        self.voltar_para_lousa = None;
     }
 
     /// Ctrl+Shift+P: primeiro os erros que você não viu, depois quem espera
@@ -900,7 +964,16 @@ impl Colmeia {
             (_, Some(_)) => ("", p.erro),
             _ => return,
         };
-        let texto = if texto.is_empty() { self.problema_nucleo.clone().unwrap_or_default() } else { texto.to_string() };
+        let mut texto = if texto.is_empty() { self.problema_nucleo.clone().unwrap_or_default() } else { texto.to_string() };
+        // Com uma lousa na tela, a faixa dela não aparece: o aviso vem aqui.
+        let lousa_na_tela = match self.tela {
+            Tela::Lousa(_) => true,
+            Tela::Tarefa { id, .. } => self.lousa_na_tarefa.contains(&id),
+            _ => false,
+        };
+        if self.conexao == Conexao::Fora && lousa_na_tela {
+            texto.push_str(" · a lousa está só para leitura");
+        }
         // Opaco: uma cor translúcida aqui se misturaria com o preto da janela.
         let fundo = tema::fundo_tingido(p, cor, tema::claro());
         let mut tentar = false;
@@ -935,6 +1008,22 @@ impl Colmeia {
         ui.horizontal(|ui| {
             ui.set_height(34.0);
             let perfil = self.perfil.as_ref().map(|p| p.nome.clone()).unwrap_or_default();
+            let workspace_da_lousa = match self.tela {
+                Tela::Lousa(ws) => self.modelo.projetos.iter().find(|p| p.workspace_id == ws).map(|p| p.workspace.clone()),
+                _ => None,
+            };
+            let fps = format!("{} FPS", self.fps);
+            let medir = |ui: &mut egui::Ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(RichText::new(&fps).color(p.suave).size(11.5)));
+            };
+            if let Some(ws) = workspace_da_lousa {
+                ui.label(RichText::new(format!("{perfil}  ›  {ws}  ›")).color(p.suave));
+                ui.label(texto_forte("Lousa", 15.0).color(p.texto));
+                if self.mostrar_fps {
+                    medir(ui);
+                }
+                return;
+            }
             match self.projeto_em_foco() {
                 None => {
                     ui.label(texto_forte(&perfil, 15.0).color(p.texto));
@@ -946,6 +1035,9 @@ impl Colmeia {
                 }
             }
             if !self.demo {
+                if self.mostrar_fps {
+                    medir(ui);
+                }
                 return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1202,25 +1294,39 @@ impl Colmeia {
         }
         ui.add_space(14.0);
 
-        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil, None, false).0.clicked() {
+        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_)), None, false, None).0.clicked() {
             self.mudar_escopo(Escopo::Perfil);
         }
         ui.add_space(8.0);
         let mut workspace_anterior = String::new();
         let mut mudar = None;
         let mut remover = None;
+        let mut abrir_lousa = None;
         let pode = self.pode_mudar();
+        let lousa_aberta = if let Tela::Lousa(ws) = self.tela { Some(ws) } else { None };
         for projeto in &self.modelo.projetos {
             if projeto.workspace != workspace_anterior {
                 ui.add_space(6.0);
                 ui.label(RichText::new(&projeto.workspace).color(p.suave).size(11.5));
                 workspace_anterior = projeto.workspace.clone();
+                // A lousa do workspace, antes dos projetos (fora da demonstração).
+                if !self.demo && projeto.workspace_id != 0 {
+                    ui.add_space(2.0);
+                    let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", projeto.workspace);
+                    if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa))
+                        .0
+                        .on_hover_text(dica)
+                        .clicked()
+                    {
+                        abrir_lousa = Some(projeto.workspace_id);
+                    }
+                }
             }
-            let ativo = self.escopo == Escopo::Projeto(projeto.id);
+            let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none();
             let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
             let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
             let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
-            let (resposta, mais) = item_lateral(ui, &projeto.nome, ativo, abelha::cor_ponto(estado, tem_erro, concluiu), !self.demo);
+            let (resposta, mais) = item_lateral(ui, &projeto.nome, ativo, abelha::cor_ponto(estado, tem_erro, concluiu), !self.demo, None);
             let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
             if resposta.clicked() {
                 mudar = Some(projeto.id);
@@ -1243,13 +1349,16 @@ impl Colmeia {
         if let Some(id) = mudar {
             self.mudar_escopo(Escopo::Projeto(id));
         }
+        if let Some(ws) = abrir_lousa {
+            self.abrir_lousa_do_workspace(ws);
+        }
         if let Some((id, nome)) = remover {
             self.dialogo = Some(Dialogo::RemoverProjeto { id, nome, erro: None });
         }
         ui.add_space(6.0);
         if !self.demo
             && pode
-            && item_lateral(ui, "+ Novo projeto", false, None, false).0.clicked()
+            && item_lateral(ui, "+ Novo projeto", false, None, false, None).0.clicked()
             && let Some(perfil) = &self.perfil
         {
             self.dialogo = Some(Dialogo::NovoProjeto(dialogos::NovoProjeto::new(perfil.id)));
@@ -1293,10 +1402,18 @@ impl Colmeia {
         let pode = self.pode_mudar();
         let (mut voltar, mut novo_agente, mut abrir_editor) = (false, false, false);
         let (mut alternar_gaveta, mut clique_navegador, mut menu_navegador) = (false, None, None);
+        let mut alternar_lousa = false;
         let gaveta_aberta = self.gaveta == Some(id);
+        let lousa_aberta = self.lousa_na_tarefa.contains(&id);
+        let novidade_na_lousa = self.novidade_na_lousa.contains(&id);
         let navegador_aberto = self.modelo.navegadores.contains(&id);
+        let volta_para_lousa = self.voltar_para_lousa;
         ui.horizontal(|ui| {
-            voltar = tema::botao_secundario(ui, "‹ Quadro").on_hover_text("Voltar ao quadro (Ctrl+Esc)").clicked();
+            voltar = if volta_para_lousa.is_some() {
+                tema::botao_secundario(ui, "‹ Lousa").on_hover_text("Voltar à lousa (Ctrl+Esc)").clicked()
+            } else {
+                tema::botao_secundario(ui, "‹ Quadro").on_hover_text("Voltar ao quadro (Ctrl+Esc)").clicked()
+            };
             ui.add_space(8.0);
             // O título é o que se corta: os botões da direita, o número, a
             // branch e a etiqueta de estado nunca. O título inteiro fica na dica.
@@ -1315,8 +1432,9 @@ impl Colmeia {
                     reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
                 }
                 reservado += tema::largura_botao_dividido(&pintor, "Navegador") + 6.0 + espaco;
-                let fonte_arquivos = if gaveta_aberta { tema::forte(13.0) } else { egui::FontId::proportional(13.0) };
-                reservado += medir("Arquivos", fonte_arquivos) + 28.0 + espaco;
+                // Os chips medem sempre em negrito (a largura não muda ao ligar).
+                reservado += medir("Arquivos", tema::forte(13.0)) + 28.0 + espaco;
+                reservado += medir("Lousa", tema::forte(13.0)) + 28.0 + 6.0 + espaco;
                 if let Some((nome, _)) = self.editor {
                     reservado_editor = medir(&format!("Abrir no {nome}"), egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
                 }
@@ -1389,6 +1507,15 @@ impl Colmeia {
                 });
                 ui.add_space(6.0);
                 alternar_gaveta = tema::chip_alternar(ui, "Arquivos", gaveta_aberta).on_hover_text("Arquivos da pasta da tarefa (Ctrl+Shift+E)").clicked();
+                ui.add_space(6.0);
+                let chip = tema::chip_alternar(ui, "Lousa", lousa_aberta);
+                if novidade_na_lousa {
+                    // O agente acrescentou itens desde a última vez que você viu a lousa.
+                    let centro = chip.rect.right_top() + egui::vec2(-7.0, 7.0);
+                    ui.painter().circle(centro, 3.5, p.destaque, Stroke::new(1.5, p.superficie_alta));
+                }
+                let dica = if novidade_na_lousa { "Lousa da tarefa (Ctrl+Shift+Q) · o agente acrescentou itens" } else { "Lousa da tarefa (Ctrl+Shift+Q)" };
+                alternar_lousa = chip.on_hover_text(dica).clicked();
                 if let Some((nome, _)) = self.editor {
                     ui.add_space(6.0);
                     let rotulo = if editor_curto { nome.to_string() } else { format!("Abrir no {nome}") };
@@ -1405,6 +1532,9 @@ impl Colmeia {
         }
         if alternar_gaveta {
             self.alternar_gaveta(id, ui.ctx());
+        }
+        if alternar_lousa {
+            self.alternar_lousa_da_tarefa(id);
         }
         if let Some(botao) = clique_navegador {
             self.clique_navegador(id, botao, ui.ctx(), agora);
@@ -1426,7 +1556,21 @@ impl Colmeia {
             self.adicionar_agente(id, false);
         }
         if voltar || ui.input(|i| i.key_pressed(Key::Escape) && i.modifiers.ctrl) {
-            self.tela = Tela::Quadro;
+            self.tela = match self.voltar_para_lousa.take() {
+                Some(ws) => Tela::Lousa(ws),
+                None => Tela::Quadro,
+            };
+            return;
+        }
+        let dono = api::DonoLousa { workspace_id: 0, tarefa_id: id };
+        if agentes.is_empty() && self.lousa_na_tarefa.contains(&id) {
+            // Sem agente, a lousa ocupa a área toda abaixo do cabeçalho.
+            let area = ui.available_rect_before_wrap();
+            let acoes = self.mostrar_lousa(ui, area, dono, agora);
+            self.tratar_lousa(dono, acoes, ui.ctx(), agora);
+            if self.gaveta == Some(id) {
+                self.mostrar_gaveta(ui.ctx(), id, area, area.width(), &pasta, None, agora);
+            }
             return;
         }
         if agentes.is_empty() {
@@ -1453,6 +1597,12 @@ impl Colmeia {
         // O aviso do rodapé fica sobre o terminal, sem cobrir a caixa de mensagem.
         self.ancora_aviso = Some(principal.center_bottom() - egui::vec2(0.0, 16.0));
         let mut pedidos = vec![self.caixa_terminal(ui, principal, &em_foco, id, true, 13.0, agora)];
+        // A lousa cobre o corpo do terminal em foco (abaixo do cabeçalho do
+        // agente), sem mudar o tamanho dele: a caixa de mensagem continua.
+        if let Some(area) = self.area_lousa.take() {
+            let acoes = self.mostrar_lousa(ui, area, dono, agora);
+            self.tratar_lousa(dono, acoes, ui.ctx(), agora);
+        }
         // A gaveta de arquivos fica por cima do terminal em foco, sem mudar o tamanho dele.
         if self.gaveta == Some(id) {
             // 2 px para dentro: a borda de foco do terminal continua inteira.
@@ -1580,7 +1730,7 @@ impl Colmeia {
                             let mais = tema::botao_icone(ui, tema::Icone::Mais, 24.0).on_hover_text("Ações do agente");
                             egui::Popup::menu(&mais).show(|ui| {
                                 ui.set_min_width(240.0);
-                                let pode_capturar = focado && pode;
+                                let pode_capturar = focado && pode && !self.lousa_na_tarefa.contains(&tarefa);
                                 let item = tema::opcao_menu_com(ui, "Capturar terminal", Some("Ctrl+Shift+S"), pode_capturar);
                                 if !focado {
                                     ui.label(RichText::new("Foque o terminal para capturar").color(p.suave).size(11.5));
@@ -1617,7 +1767,15 @@ impl Colmeia {
                         }
                     });
                 }
+                let lousa_por_cima = focado && self.lousa_na_tarefa.contains(&tarefa);
                 match self.terminais.get_mut(&agente.id) {
+                    // A lousa cobre o terminal: ele não é desenhado (nem recebe o teclado).
+                    _ if lousa_por_cima => {
+                        let (r, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                        // A linha de 1 px em cima separa a lousa do cabeçalho do agente.
+                        ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, p.borda));
+                        self.area_lousa = Some(egui::Rect::from_min_max(r.min + egui::vec2(0.0, 1.0), r.max));
+                    }
                     Some(t) => {
                         if t.mostrar(ui, fonte, focado).clicked() && !focado {
                             pedido = Some(Pedido::Focar(agente.id));
@@ -1632,7 +1790,7 @@ impl Colmeia {
                 }
                 // Com a gaveta de arquivos por cima, o cartão de fim sairia em
                 // tirinha ao lado dela: fica escondido até a gaveta fechar.
-                if parado && !(focado && self.gaveta == Some(tarefa)) {
+                if parado && !(focado && (self.gaveta == Some(tarefa) || lousa_por_cima)) {
                     let centro = ui.min_rect().center();
                     if let Some(p) = cartao_de_fim(ui, centro, agente, focado, pode) {
                         pedido = Some(p);
@@ -1693,6 +1851,19 @@ impl Colmeia {
                 Err(e) => self.erro(format!("Não consegui desfazer a captura: {e}"), agora),
             },
             AcaoAviso::Abrir { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
+            AcaoAviso::Lousa(dono, acao) => {
+                let mut nao_desfez = false;
+                if let Some(l) = self.lousas.get_mut(&dono) {
+                    match acao {
+                        AcaoLousa::Desfazer(numero) => nao_desfez = !l.desfazer_comando(ctx, numero),
+                        AcaoLousa::Ver => l.ver_novos(),
+                        AcaoLousa::Tentar => l.tentar_de_novo(ctx),
+                    }
+                }
+                if nao_desfez {
+                    self.avisar(TipoAviso::Alerta, "Não dá mais para desfazer", agora);
+                }
+            }
             AcaoAviso::VerAbelha => self.abelha.resumo_aberto = true,
             AcaoAviso::VerPedido(tarefa) => {
                 let aba = match self.tela {
@@ -1714,20 +1885,36 @@ impl Colmeia {
     /// Atalhos da Colmeia: Ctrl+Shift+letra, tirados da fila antes de o
     /// terminal ler (como nos terminais do GNOME).
     fn atalhos(&mut self, ctx: &egui::Context) {
-        if self.dialogo.is_some() || self.demo || self.apresentacao.is_some() {
+        if self.dialogo.is_some() || self.demo || self.apresentacao.is_some() || self.palco.is_some() {
             return;
         }
         let atalho = |tecla| ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, tecla));
         if atalho(Key::L) {
+            // Da lousa do workspace, a linha do tempo de todos os projetos (não
+            // a do projeto que estava escolhido antes de abrir a lousa).
+            if matches!(self.tela, Tela::Lousa(_)) {
+                self.escopo = Escopo::Perfil;
+                self.registro.marcar_suja();
+            }
             self.tela = if matches!(self.tela, Tela::Registro(registro::Aba::Linha)) { Tela::Quadro } else { Tela::Registro(registro::Aba::Linha) };
         }
         if atalho(Key::D) {
             self.tela = Tela::Registro(registro::Aba::Daily);
             self.registro.abrir_daily();
         }
+        // Na lousa do workspace, F5 apresenta a lousa (Shift+F5: do item selecionado).
+        if let Tela::Lousa(ws) = self.tela {
+            let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
+            let desde = self.lousas.get(&dono).and_then(|l| l.selecao.first().copied());
+            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F5)) {
+                self.apresentar_lousa(dono, desde, ctx);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
+                self.apresentar_lousa(dono, None, ctx);
+            }
+        }
         // F5 apresenta a daily ou a sprint (no quadro e na linha do tempo, a
         // daily); Shift+F5 retoma do último slide visto. Fora do terminal em foco.
-        if !matches!(self.tela, Tela::Tarefa { .. }) {
+        if !matches!(self.tela, Tela::Tarefa { .. } | Tela::Lousa(_)) {
             if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F5)) {
                 self.apresentar(ctx, Inicio::Retomar, true);
             } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
@@ -1746,10 +1933,19 @@ impl Colmeia {
             && let Tela::Tarefa { id, foco } = self.tela
             && foco != 0
         {
-            self.capturar(foco, id);
+            if self.lousa_na_tarefa.contains(&id) {
+                // A captura sairia com a lousa por cima.
+                let agora = ctx.input(|i| i.time);
+                self.avisar(TipoAviso::Alerta, "Feche a lousa para capturar o terminal", agora);
+            } else {
+                self.capturar(foco, id);
+            }
         }
         // Ctrl+Shift+E: a gaveta de arquivos; Ctrl+Shift+B: capturar o navegador.
         if let Tela::Tarefa { id, .. } = self.tela {
+            if atalho(Key::Q) {
+                self.alternar_lousa_da_tarefa(id);
+            }
             if atalho(Key::E) {
                 self.alternar_gaveta(id, ctx);
             }
@@ -1819,6 +2015,145 @@ impl Colmeia {
         }
         self.registro.marcar_suja();
         ctx.request_repaint();
+    }
+
+    // Lousa
+
+    /// Uma mudança de lousa chegou: a lousa aberta aplica; a da tarefa fora
+    /// da tela ganha o ponto no chip; o slide da apresentação busca de novo.
+    fn lousa_mudou(&mut self, lousa: i64, dono: api::DonoLousa, elementos: Vec<api::ElementoLousa>, removidos: &[i64], agente: i64, agora: f64) {
+        let novos = match self.lousas.get_mut(&dono) {
+            Some(l) => l.aplicar_evento(lousa, elementos, removidos, agente),
+            None if agente != 0 => elementos.len(),
+            None => 0,
+        };
+        if dono.tarefa_id != 0
+            && let Some(a) = &mut self.apresentacao
+        {
+            a.lousa_mudou(dono.tarefa_id);
+        }
+        if novos == 0 {
+            return;
+        }
+        let visivel = match self.tela {
+            Tela::Lousa(ws) => dono.workspace_id == ws,
+            Tela::Tarefa { id, .. } => dono.tarefa_id == id && self.lousa_na_tarefa.contains(&id),
+            _ => false,
+        };
+        if !visivel {
+            if dono.tarefa_id != 0 {
+                self.novidade_na_lousa.insert(dono.tarefa_id);
+            }
+            return;
+        }
+        if self.lousas.get(&dono).is_some_and(|l| l.novos_fora_da_vista()) {
+            let quem = self.modelo.tarefas.iter().flat_map(|t| &t.agentes).find(|a| a.id == agente).map_or("O agente".to_string(), |a| a.nome());
+            let itens = if novos == 1 { "1 item".to_string() } else { format!("{novos} itens") };
+            self.avisar_com(TipoAviso::Neutro, format!("{quem} acrescentou {itens}"), "Ver", AcaoAviso::Lousa(dono, AcaoLousa::Ver), agora);
+        }
+    }
+
+    fn abrir_lousa_do_workspace(&mut self, workspace: i64) {
+        self.tela = Tela::Lousa(workspace);
+        // Aberta, a lousa já tem o teclado (colar um print logo de cara);
+        // uma vez só, sem pedir foco a cada quadro.
+        let dono = api::DonoLousa { workspace_id: workspace, tarefa_id: 0 };
+        self.lousa_ativa_ao_abrir = Some(dono);
+        self.voltar_para_lousa = None;
+        self.abelha.resumo_aberto = false;
+        self.filtro = None;
+    }
+
+    /// Abre ou fecha a lousa por cima do terminal da tarefa (Ctrl+Shift+Q).
+    fn alternar_lousa_da_tarefa(&mut self, tarefa: i64) {
+        if self.lousa_na_tarefa.insert(tarefa) {
+            self.novidade_na_lousa.remove(&tarefa);
+            return;
+        }
+        self.lousa_na_tarefa.remove(&tarefa);
+        // A lousa fechou: o teclado volta ao terminal.
+        if let Tela::Tarefa { foco, .. } = self.tela
+            && let Some(t) = self.terminais.get(&foco)
+        {
+            t.focar();
+        }
+    }
+
+    /// Desenha a lousa do dono na área e devolve o que ela pediu.
+    fn mostrar_lousa(&mut self, ui: &mut egui::Ui, area: egui::Rect, dono: api::DonoLousa, agora: f64) -> Vec<lousa::Acao> {
+        let ctx = ui.ctx().clone();
+        let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+        let pode_mudar = self.pode_mudar();
+        let (preferidos, tem_agente) = if dono.workspace_id != 0 {
+            (self.modelo.projetos.iter().filter(|p| p.workspace_id == dono.workspace_id).map(|p| p.id).collect(), false)
+        } else {
+            let t = self.modelo.tarefas.iter().find(|t| t.id == dono.tarefa_id);
+            (t.map(|t| vec![t.projeto_id]).unwrap_or_default(), t.is_some_and(|t| t.agentes.iter().any(|a| a.ferramenta != "shell")))
+        };
+        let l = self.lousas.entry(dono).or_insert_with(|| lousa::Lousa::nova(&ctx, dono, agora));
+        if self.lousa_ativa_ao_abrir == Some(dono) {
+            self.lousa_ativa_ao_abrir = None;
+            l.ativa = true;
+        }
+        let faixa_global = !self.demo && matches!(self.conexao, Conexao::Fora | Conexao::Antigo);
+        let c = lousa::Contexto { perfil, pode_mudar, faixa_global, modelo: &self.modelo, preferidos, tem_agente, agora };
+        l.mostrar(ui, area, &c)
+    }
+
+    /// O que a lousa pediu: abrir tarefa, avisos, apresentar, pedir ao agente.
+    fn tratar_lousa(&mut self, dono: api::DonoLousa, acoes: Vec<lousa::Acao>, ctx: &egui::Context, agora: f64) {
+        for acao in acoes {
+            match acao {
+                lousa::Acao::AbrirTarefa(tarefa) => {
+                    self.abrir_tarefa(tarefa, None);
+                    // Aberta pelo cartão da lousa do workspace: o "‹ Lousa" volta para lá.
+                    self.voltar_para_lousa = (dono.workspace_id != 0).then_some(dono.workspace_id);
+                }
+                lousa::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
+                lousa::Acao::AvisarDesfazer(texto, numero) => {
+                    self.avisar_com(TipoAviso::Neutro, texto, "Desfazer", AcaoAviso::Lousa(dono, AcaoLousa::Desfazer(numero)), agora)
+                }
+                lousa::Acao::AvisarTentar(texto) => self.avisar_com(TipoAviso::Erro, texto, "Tentar de novo", AcaoAviso::Lousa(dono, AcaoLousa::Tentar), agora),
+                lousa::Acao::Apresentar(desde) => self.apresentar_lousa(dono, desde, ctx),
+                lousa::Acao::PedirAoAgente(texto) => self.compositor.citar(&texto),
+            }
+        }
+    }
+
+    /// As lousas recebem as respostas e gravam o pendente, mesmo fora da tela.
+    fn andar_lousas(&mut self, ctx: &egui::Context, agora: f64) {
+        let pode = self.pode_mudar();
+        let donos: Vec<api::DonoLousa> = self.lousas.keys().copied().collect();
+        for dono in donos {
+            let acoes = self.lousas.get_mut(&dono).map(|l| l.fundo(ctx, agora, pode)).unwrap_or_default();
+            self.tratar_lousa(dono, acoes, ctx, agora);
+        }
+    }
+
+    /// Apresenta a lousa no palco, em tela cheia (do item dado, ou do começo).
+    fn apresentar_lousa(&mut self, dono: api::DonoLousa, desde: Option<i64>, ctx: &egui::Context) {
+        let Some(l) = self.lousas.get(&dono) else { return };
+        if l.cartoes() == 0 || self.palco.is_some() {
+            return;
+        }
+        let palco = lousa::palco::Palco::novo(l.modelo.elementos.clone(), desde, self.tema);
+        self.tela_cheia_antes = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !self.tela_cheia_antes {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+        self.abelha.resumo_aberto = false;
+        self.palco = Some((dono, Box::new(palco)));
+    }
+
+    fn sair_do_palco(&mut self, ctx: &egui::Context) {
+        if let Some((_, mut palco)) = self.palco.take() {
+            palco.encerrar(ctx);
+            if !self.tela_cheia_antes {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+            self.tema.aplicar(ctx);
+            ctx.request_repaint();
+        }
     }
 
     // Gaveta de arquivos
@@ -1921,7 +2256,9 @@ impl Colmeia {
         if self.demo || self.conexao != Conexao::Ligado {
             return;
         }
-        let compartilhavel = self.apresentacao.is_some() || matches!(self.tela, Tela::Registro(registro::Aba::Daily) | Tela::Registro(registro::Aba::Sprint));
+        let compartilhavel = self.apresentacao.is_some()
+            || self.palco.is_some()
+            || matches!(self.tela, Tela::Registro(registro::Aba::Daily) | Tela::Registro(registro::Aba::Sprint));
         let geometria = ctx.input(|i| gaveta::geometria_ao_lado(i.viewport().outer_rect, i.viewport().monitor_size, i.pixels_per_point, None));
         if self.tela_avisada == Some((perfil, compartilhavel, geometria)) {
             return;
@@ -2112,6 +2449,12 @@ impl Colmeia {
 
     /// Fechar a janela não para os agentes: com algum rodando, a Colmeia pergunta.
     fn ao_fechar(&mut self, ctx: &egui::Context) {
+        // Fechar a janela grava a lousa na hora (esperando a resposta).
+        if ctx.input(|i| i.viewport().close_requested()) {
+            for l in self.lousas.values_mut() {
+                l.gravar_ja();
+            }
+        }
         if self.pode_fechar || self.demo || !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
@@ -2179,7 +2522,14 @@ fn cartao_de_fim(ui: &mut egui::Ui, centro: egui::Pos2, agente: &AgenteTela, foc
 /// Item da barra lateral: linha inteira clicável, fundo ao passar o mouse e um
 /// ponto opcional na cor do estado do projeto. Com `menu`, o "⋯" aparece ao
 /// passar o mouse no lugar do ponto (que vai um pouco para a esquerda).
-fn item_lateral(ui: &mut egui::Ui, texto: &str, ativo: bool, ponto: Option<Color32>, menu: bool) -> (egui::Response, Option<egui::Response>) {
+fn item_lateral(
+    ui: &mut egui::Ui,
+    texto: &str,
+    ativo: bool,
+    ponto: Option<Color32>,
+    menu: bool,
+    icone: Option<tema::Icone>,
+) -> (egui::Response, Option<egui::Response>) {
     let p = cores();
     let (rect, resposta) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -2188,7 +2538,16 @@ fn item_lateral(ui: &mut egui::Ui, texto: &str, ativo: bool, ponto: Option<Color
         ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), if ativo { p.realce } else { p.realce.gamma_multiply(0.6) });
     }
     let fonte = if ativo { tema::forte(13.5) } else { egui::FontId::proportional(13.5) };
-    ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, texto, fonte, if ativo { p.texto } else { p.suave });
+    let cor = if ativo { p.texto } else { p.suave };
+    // Com ícone (a lousa do workspace), o texto vai a 32 da esquerda.
+    let x = match icone {
+        Some(i) => {
+            tema::desenhar_icone(ui.painter(), rect.left_center() + egui::vec2(17.0, 0.0), i, cor);
+            32.0
+        }
+        None => 10.0,
+    };
+    ui.painter().text(rect.left_center() + egui::vec2(x, 0.0), egui::Align2::LEFT_CENTER, texto, fonte, cor);
     let mostrar_menu = menu && em_cima;
     if let Some(cor) = ponto {
         let x = if mostrar_menu { 40.0 } else { 14.0 };
@@ -2241,6 +2600,8 @@ impl eframe::App for Colmeia {
         self.medir(agora);
         let p = cores();
         let ctx = ui.ctx().clone();
+        // Mede o atlas das letras antes de qualquer texto do quadro (o cache da lousa depende dele).
+        lousa::desenho::geracao_das_fontes(&ctx);
 
         // Sem perfil: só a tela de entrada, sobre o favo.
         if let Tela::Entrada(entrada) = &mut self.tela {
@@ -2270,7 +2631,7 @@ impl eframe::App for Colmeia {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
                 if let Some(a) = &mut self.apresentacao {
                     a.pedidos = pedido::resumir(&self.modelo);
-                    pedido = a.mostrar(ui, &mut self.favo, agora);
+                    pedido = a.mostrar(ui, &mut self.favo, &self.modelo, agora);
                 }
             });
             match pedido {
@@ -2281,6 +2642,30 @@ impl eframe::App for Colmeia {
                 }
                 None => {}
             }
+            self.andar_lousas(&ctx, agora);
+            self.atualizar_titulo(&ctx);
+            return;
+        }
+
+        // O palco da lousa também ocupa a janela inteira.
+        if self.palco.is_some() {
+            let mut pedido = None;
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
+                if let Some((_, palco)) = &mut self.palco {
+                    pedido = palco.mostrar(ui, &self.modelo, agora);
+                }
+            });
+            match pedido {
+                Some(lousa::palco::PedidoPalco::Sair) => self.sair_do_palco(&ctx),
+                Some(lousa::palco::PedidoPalco::AbrirTarefa(tarefa)) => {
+                    let dono = self.palco.as_ref().map(|(d, _)| *d);
+                    self.sair_do_palco(&ctx);
+                    self.abrir_tarefa(tarefa, None);
+                    self.voltar_para_lousa = dono.filter(|d| d.workspace_id != 0).map(|d| d.workspace_id);
+                }
+                None => {}
+            }
+            self.andar_lousas(&ctx, agora);
             self.atualizar_titulo(&ctx);
             return;
         }
@@ -2320,6 +2705,7 @@ impl eframe::App for Colmeia {
 
         let mut acoes = Vec::new();
         let mut acoes_linha = Vec::new();
+        let mut acoes_lousa = None;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 16 })).show(
             ui,
             |ui| {
@@ -2347,6 +2733,15 @@ impl eframe::App for Colmeia {
                         acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.projeto(), &projetos);
                     }
                     Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
+                    Tela::Lousa(ws) => {
+                        // A lousa ocupa o painel inteiro, sem as margens.
+                        let m = ui.max_rect();
+                        let area = egui::Rect::from_min_max(m.min - egui::vec2(20.0, 6.0), m.max + egui::vec2(20.0, 16.0));
+                        let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
+                        // Os avisos da lousa ficam centrados nela, como na da tarefa.
+                        self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
+                        acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
+                    }
                     Tela::Entrada(_) => {}
                 }
             },
@@ -2365,7 +2760,16 @@ impl eframe::App for Colmeia {
         }
         for acao in acoes_linha {
             match acao {
-                registro::Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, agente),
+                registro::Acao::AbrirTarefa { tarefa, agente, lousa } => {
+                    self.abrir_tarefa(tarefa, agente);
+                    if lousa {
+                        // O agente mexeu na lousa: ela abre junto, enquadrada no que ele pôs.
+                        self.lousa_na_tarefa.insert(tarefa);
+                        self.novidade_na_lousa.remove(&tarefa);
+                        let dono = api::DonoLousa { workspace_id: 0, tarefa_id: tarefa };
+                        self.lousas.entry(dono).or_insert_with(|| lousa::Lousa::nova(&ctx, dono, agora)).enquadrar_agente = true;
+                    }
+                }
                 registro::Acao::IrParaQuadro => self.tela = Tela::Quadro,
                 registro::Acao::VerTodos => self.mudar_escopo(Escopo::Perfil),
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
@@ -2383,6 +2787,9 @@ impl eframe::App for Colmeia {
                     }
                 }
             }
+        }
+        if let Some((dono, acoes)) = acoes_lousa {
+            self.tratar_lousa(dono, acoes, &ctx, agora);
         }
         if matches!(self.tela, Tela::Registro(_)) {
             self.mostrar_caixa_pedido(&ctx, agora);
@@ -2455,6 +2862,7 @@ impl eframe::App for Colmeia {
             }
         }
         self.andar_captura(&ctx);
+        self.andar_lousas(&ctx, agora);
         self.mostrar_aviso(&ctx, agora);
         self.atualizar_titulo(&ctx);
     }

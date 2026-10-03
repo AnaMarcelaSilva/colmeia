@@ -303,7 +303,26 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 	case "anexo.adicionado":
 		var d anexoDados
 		ler(&d)
-		return map[string]any{"tipo": e.Tipo, "anexo_id": d.Anexo, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+		m := map[string]any{"tipo": e.Tipo, "anexo_id": d.Anexo, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+		if d.NaLousa {
+			m["na_lousa"] = true
+		}
+		return m
+	case "lousa.agente":
+		// O evento não tem texto: os elementos (com o texto) são lidos agora.
+		var d struct {
+			Lousa     int64   `json:"lousa"`
+			Elementos []int64 `json:"elementos"`
+		}
+		ler(&d)
+		elementos, err := s.Banco.ElementosPorID(context.Background(), d.Elementos)
+		if err != nil {
+			log.Printf("lousa %d: lendo o que o agente acrescentou: %v", d.Lousa, err)
+			elementos = []dados.Elemento{}
+		}
+		m := mensagemLousa(dados.Lousa{ID: d.Lousa, Dono: dados.DonoLousa{TarefaID: e.Escopo.Tarefa}}, elementos, nil)
+		m["agente_id"] = e.Escopo.Agente
+		return m
 	case "anexo.removido":
 		var d anexoDados
 		ler(&d)

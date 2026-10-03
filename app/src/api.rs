@@ -1,6 +1,8 @@
 //! Cliente da API /v1 do núcleo. A tela não guarda regra de negócio: pede ao
 //! núcleo e mostra o que ele responde, inclusive a mensagem de erro.
 
+use std::collections::HashMap;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -46,6 +48,9 @@ pub struct Workspace {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Projeto {
     pub id: i64,
+    /// O workspace (para a lousa dele na barra lateral).
+    #[serde(default)]
+    pub workspace_id: i64,
     pub workspace: String,
     pub nome: String,
     pub caminho: String,
@@ -466,6 +471,17 @@ pub struct Slide {
     pub nota_versao: String,
     #[serde(default)]
     pub nota_anterior: Option<NotaAnterior>,
+    /// A lousa da tarefa, quando tem itens (os itens vêm sob demanda).
+    #[serde(default)]
+    pub lousa: Option<ResumoLousa>,
+}
+
+/// A lousa de uma tarefa no slide: o id e quantos itens ela tem.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+pub struct ResumoLousa {
+    pub id: i64,
+    #[serde(default)]
+    pub elementos: usize,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -486,6 +502,275 @@ pub struct Deck {
     pub mais: usize,
     #[serde(default)]
     pub vazio: bool,
+}
+
+// Lousa (quadro livre) do workspace e da tarefa.
+
+/// De quem é a lousa: um workspace ou uma tarefa.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub struct DonoLousa {
+    #[serde(default, skip_serializing_if = "zero")]
+    pub workspace_id: i64,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub tarefa_id: i64,
+}
+
+fn zero(v: &i64) -> bool {
+    *v == 0
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+pub struct InfoLousa {
+    pub id: i64,
+    #[serde(default)]
+    pub dono: DonoLousa,
+}
+
+/// O tipo de um item da lousa.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum TipoElemento {
+    #[default]
+    Nota,
+    Texto,
+    Codigo,
+    Imagem,
+    Video,
+    Tarefa,
+    Ligacao,
+}
+
+impl TipoElemento {
+    /// Nota, texto e código: os que têm texto editável e trocam de tipo entre si.
+    pub fn de_texto(self) -> bool {
+        matches!(self, TipoElemento::Nota | TipoElemento::Texto | TipoElemento::Codigo)
+    }
+}
+
+/// O que a tela precisa do anexo de uma imagem ou de um vídeo.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AnexoDoElemento {
+    #[serde(default)]
+    pub nome: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub largura: u32,
+    #[serde(default)]
+    pub altura: u32,
+}
+
+/// Um item da lousa, em unidades do quadro (1 = 1 px a 100%).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ElementoLousa {
+    pub id: i64,
+    #[serde(default)]
+    pub lousa_id: i64,
+    pub tipo: TipoElemento,
+    pub x: f32,
+    pub y: f32,
+    pub largura: f32,
+    pub altura: f32,
+    #[serde(default)]
+    pub z: i64,
+    #[serde(default)]
+    pub cor: String,
+    #[serde(default)]
+    pub titulo: String,
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub anexo_id: i64,
+    #[serde(default)]
+    pub anexo: Option<AnexoDoElemento>,
+    #[serde(default)]
+    pub tarefa_ref: i64,
+    #[serde(default)]
+    pub de: i64,
+    #[serde(default)]
+    pub para: i64,
+    /// "voce" ou "agente".
+    #[serde(default)]
+    pub autor: String,
+    #[serde(default)]
+    pub agente_id: i64,
+    #[serde(default)]
+    pub versao: i64,
+    #[serde(default)]
+    pub atualizado_em: String,
+    /// Revisão local: muda a cada mudança (sua ou do núcleo) e invalida o
+    /// cache de desenho do item. Não vai para o núcleo.
+    #[serde(skip)]
+    pub rev: u64,
+}
+
+impl ElementoLousa {
+    pub fn do_agente(&self) -> bool {
+        self.autor == "agente"
+    }
+}
+
+/// A lousa aberta e os itens dela.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LousaAberta {
+    pub lousa: InfoLousa,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub elementos: Vec<ElementoLousa>,
+}
+
+/// Uma ponta de ligação num lote: o id de um item ou o ref de um criado no mesmo lote.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Ponta {
+    Id(i64),
+    Ref(String),
+}
+
+/// Um item a criar.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct NovoElemento {
+    pub tipo: TipoElemento,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub largura: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altura: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z: Option<i64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cor: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub titulo: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub texto: String,
+    #[serde(skip_serializing_if = "zero")]
+    pub anexo_id: i64,
+    #[serde(skip_serializing_if = "zero")]
+    pub tarefa_ref: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub de: Option<Ponta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para: Option<Ponta>,
+}
+
+/// Só os campos que mudaram.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CamposElemento {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub largura: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altura: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub titulo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texto: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tipo: Option<TipoElemento>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub de: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para: Option<i64>,
+}
+
+/// Uma operação de um lote da lousa.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum Operacao {
+    Criar { r#ref: String, elemento: NovoElemento },
+    Alterar { id: i64, versao: i64, campos: CamposElemento },
+    Remover { id: i64, versao: i64 },
+}
+
+/// O que o núcleo respondeu a um lote.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoteGravado {
+    /// Gravou: os itens como ficaram, os removidos (inclusive as ligações
+    /// levadas junto) e o id de cada ref criado.
+    Ok { elementos: Vec<ElementoLousa>, removidos: Vec<i64>, refs: HashMap<String, i64> },
+    /// Alguma versão não bateu: nada foi gravado; o estado atual do que mudou.
+    Mudou { elementos: Vec<ElementoLousa>, removidos: Vec<i64> },
+}
+
+#[derive(Deserialize)]
+struct RespostaLote {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    elementos: Vec<ElementoLousa>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    removidos: Vec<i64>,
+    #[serde(default)]
+    refs: HashMap<String, i64>,
+}
+
+pub fn abrir_lousa(dono: DonoLousa) -> Result<LousaAberta, String> {
+    let caminho = if dono.workspace_id != 0 { format!("/v1/workspaces/{}/lousa", dono.workspace_id) } else { format!("/v1/tarefas/{}/lousa", dono.tarefa_id) };
+    chamar("POST", &caminho, None)
+}
+
+pub fn ler_lousa(id: i64) -> Result<LousaAberta, String> {
+    chamar("GET", &format!("/v1/lousas/{id}"), None)
+}
+
+/// Grava um lote (tudo ou nada).
+pub fn gravar_lousa(id: i64, operacoes: &[Operacao]) -> Result<LoteGravado, String> {
+    let corpo = json!({ "operacoes": operacoes }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/lousas/{id}/operacoes"), Some(&corpo))?;
+    let ler = |r: &str| serde_json::from_str::<RespostaLote>(r).map_err(|e| inesperada("/v1/lousas/operacoes", e));
+    match status {
+        200 => ler(&resposta).map(|r| LoteGravado::Ok { elementos: r.elementos, removidos: r.removidos, refs: r.refs }),
+        409 => ler(&resposta).map(|r| LoteGravado::Mudou { elementos: r.elementos, removidos: r.removidos }),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+    }
+}
+
+/// O anexo de uma lousa que acabou de chegar ao núcleo.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AnexoLousa {
+    pub id: i64,
+    #[serde(default)]
+    pub largura: u32,
+    #[serde(default)]
+    pub altura: u32,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// Uma imagem já em PNG (colada) para a lousa: anexo do perfil, fora da linha do tempo.
+pub fn anexar_png_na_lousa(perfil: i64, png: &[u8]) -> Result<AnexoLousa, String> {
+    let (status, corpo) = canal::pedir_bytes("POST", &format!("/v1/perfis/{perfil}/anexos?origem=colagem&lousa=1"), "image/png", png)?;
+    resposta_anexo_lousa(status, &corpo)
+}
+
+/// Uma foto ou um vídeo do disco para a lousa.
+pub fn anexar_arquivo_na_lousa(perfil: i64, arquivo: &std::path::Path) -> Result<AnexoLousa, String> {
+    let (tipo, video) = tipo_do_arquivo(arquivo).ok_or("formato não aceito")?;
+    let nome = arquivo.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let nome = codificar_url(&nome.chars().take(200).collect::<String>());
+    let caminho = if video {
+        format!("/v1/perfis/{perfil}/videos?lousa=1&nome={nome}")
+    } else {
+        format!("/v1/perfis/{perfil}/anexos?origem=arquivo&lousa=1&nome={nome}")
+    };
+    let (status, corpo) = canal::pedir_arquivo("POST", &caminho, tipo, arquivo, |_, _| {})?;
+    resposta_anexo_lousa(status, &corpo)
+}
+
+fn resposta_anexo_lousa(status: u16, corpo: &[u8]) -> Result<AnexoLousa, String> {
+    let corpo = String::from_utf8_lossy(corpo);
+    if !(200..300).contains(&status) {
+        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo")));
+    }
+    serde_json::from_str(&corpo).map_err(|e| inesperada("/v1/perfis/anexos", e))
 }
 
 /// Uma conversa do Claude Code guardada para a pasta da tarefa.

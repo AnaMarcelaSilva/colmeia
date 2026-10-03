@@ -290,3 +290,43 @@ func TestPedidosENavegadorNaLinha(t *testing.T) {
 		}
 	}
 }
+
+func TestLousaDoAgenteNaLinhaDoTempo(t *testing.T) {
+	h := &historico{t: t}
+	a := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1, Agente: 7}
+	p := dados.Escopo{Perfil: 1}
+	h.add("2026-09-25 10:00", "tarefa.criada", dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1}, map[string]any{"id": 1, "titulo": "Nova tela de pedidos", "projeto_id": 1, "projeto_nome": "loja-web"})
+	conteudo := map[string]any{"lousa": 3, "tarefa": 1, "titulo": "Nova tela de pedidos", "projeto_nome": "loja-web", "quantidade": 4,
+		"tipos": map[string]int{"nota": 2, "ligacao": 2}, "ferramenta": "claude", "papel": "dev"}
+	h.add("2026-09-25 10:10", "lousa.agente", a, conteudo)
+	conteudo["quantidade"] = 2
+	h.add("2026-09-25 10:12", "lousa.agente", a, conteudo)
+	// Imagem posta numa lousa não aparece na linha do tempo.
+	h.add("2026-09-25 10:15", "anexo.adicionado", p, map[string]any{"anexo": 9, "origem": "colagem", "na_lousa": true})
+	c := Contexto{Agora: em("2026-09-25 18:00"), Fuso: fuso, Tarefas: map[int64]TarefaAtual{1: {ID: 1, Titulo: "Nova tela de pedidos", Coluna: "trabalhando", ProjetoID: 1}}}
+	dias := Montar(h.eventos, c)
+	var textos []string
+	for _, item := range dias[0].Itens {
+		textos = append(textos, item.Texto)
+	}
+	if len(textos) != 2 || textos[0] != "Claude Code (dev) acrescentou 6 itens à lousa de “Nova tela de pedidos”." {
+		t.Errorf("itens: %q", textos)
+	}
+	if curto := dias[0].Itens[0].Curto; curto != "Claude Code (dev) acrescentou 6 itens à lousa." {
+		t.Errorf("curto: %q", curto)
+	}
+	// Na apresentação, a lousa conta como trabalho na tarefa e o slide leva o resumo dela.
+	deck := Apresentacao(h.eventos, em("2026-09-25 00:00"), em("2026-09-25 00:00"), c, "sprint")
+	if len(deck.Slides) != 1 {
+		t.Fatalf("slides: %+v", deck.Slides)
+	}
+	deck.CompletarLousas(map[int64]dados.ResumoLousa{1: {ID: 3, Elementos: 6}})
+	if l := deck.Slides[0].Lousa; l == nil || l.ID != 3 || l.Elementos != 6 {
+		t.Errorf("lousa no slide: %+v", l)
+	}
+	deck.Slides[0].Lousa = nil
+	deck.CompletarLousas(map[int64]dados.ResumoLousa{1: {ID: 3, Elementos: 0}})
+	if deck.Slides[0].Lousa != nil {
+		t.Error("lousa vazia no slide")
+	}
+}

@@ -307,7 +307,11 @@ impl Compositor {
     pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64) -> Option<Envio> {
         let p = cores();
         let id = egui::Id::new(ID);
-        if std::mem::take(&mut self.focar) {
+        // O clique que pediu o foco (um botão da lousa, por exemplo) solta o
+        // botão neste quadro, e o egui tiraria o foco de volta: pede no próximo.
+        if self.focar && ui.input(|i| i.pointer.any_released()) {
+            ui.ctx().request_repaint();
+        } else if std::mem::take(&mut self.focar) {
             ui.memory_mut(|m| m.request_focus(id));
         }
         let com_foco = ui.memory(|m| m.has_focus(id));

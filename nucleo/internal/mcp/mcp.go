@@ -59,7 +59,7 @@ const (
 	erroParametros   = -32602
 	erroInterno      = -32603
 	instrucoesGerais = "Ferramentas da Colmeia para a tarefa em que você trabalha: ler a tarefa e a nota da daily ou da sprint, " +
-		"complementar a nota com o que foi pedido, anexar imagens e abrir e capturar o navegador da tarefa. " +
+		"complementar a nota com o que foi pedido, anexar imagens, abrir e capturar o navegador da tarefa e ler e acrescentar itens à lousa (quadro livre) da tarefa. " +
 		"Quando um pedido da daily chegar no terminal, responda pela nota (complementar_nota com o número do pedido), " +
 		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide."
 )
@@ -425,7 +425,86 @@ var Ferramentas = []Ferramenta{
 			return []any{texto(fmt.Sprintf("Pedido %d respondido.", a.Pedido))}, nil
 		},
 	},
+	{
+		Nome: "ler_lousa", Titulo: "Ler a lousa da tarefa",
+		Descricao: "Lê a lousa (quadro livre) da tarefa: cada item com id, tipo, posição, tamanho, título, texto, as pontas das ligações e quem acrescentou.",
+		Entrada:   objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/lousa", nil)
+			if err != nil {
+				return nil, err
+			}
+			return comoTexto(r), nil
+		},
+	},
+	{
+		Nome: "acrescentar_a_lousa", Titulo: "Acrescentar à lousa da tarefa",
+		Descricao: "Acrescenta itens à lousa (quadro livre) da tarefa, que o usuário vê na hora e apresenta na daily. " +
+			"Prefira notas curtas (markdown simples: # título, **negrito**, listas, tabelas em pipe) e diagramas de fluxo como blocos de código (tipo codigo, com setas em texto), " +
+			"ligados por itens do tipo ligacao (de e para com o ref de itens desta chamada ou o id de itens existentes). " +
+			"Sem x e y, a Colmeia põe os itens numa grade à direita do que já existe. Até 50 itens por chamada. Você só acrescenta: não move nem apaga.",
+		Entrada: objeto(map[string]any{
+			"itens": map[string]any{"type": "array", "items": esquemaItemDaLousa, "minItems": 1, "maxItems": 50, "description": "Os itens, na ordem (as ligações depois dos itens que ligam)."},
+		}, "itens"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Itens []itemDaLousa `json:"itens"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if len(a.Itens) == 0 {
+				return nil, errors.New("informe ao menos um item")
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/lousa/elementos", map[string]any{"elementos": a.Itens})
+			if err != nil {
+				return nil, err
+			}
+			ids, _ := r["ids"].([]any)
+			bruto, _ := json.Marshal(map[string]any{"ids": ids, "refs": r["refs"]})
+			return []any{texto(fmt.Sprintf("Acrescentei %d itens à lousa da tarefa: %s", len(ids), bruto))}, nil
+		},
+	},
 }
+
+// itemDaLousa: um item que o agente acrescenta. De e Para aceitam o id de um
+// item que já existe (número) ou o ref de um item da mesma chamada (texto).
+type itemDaLousa struct {
+	Ref     string          `json:"ref,omitempty"`
+	Tipo    string          `json:"tipo"`
+	Titulo  string          `json:"titulo,omitempty"`
+	Texto   string          `json:"texto,omitempty"`
+	Cor     string          `json:"cor,omitempty"`
+	X       *float64        `json:"x,omitempty"`
+	Y       *float64        `json:"y,omitempty"`
+	Largura *float64        `json:"largura,omitempty"`
+	Altura  *float64        `json:"altura,omitempty"`
+	AnexoID int64           `json:"anexo_id,omitempty"`
+	De      json.RawMessage `json:"de,omitempty"`
+	Para    json.RawMessage `json:"para,omitempty"`
+}
+
+var esquemaItemDaLousa = objeto(map[string]any{
+	"ref": map[string]any{"type": "string", "description": "Nome local do item, para as ligações desta mesma chamada apontarem para ele."},
+	"tipo": map[string]any{"type": "string", "enum": []string{"nota", "texto", "codigo", "ligacao", "imagem"},
+		"description": "nota (cartão com markdown simples), texto (solto, sem cartão), codigo (bloco monoespaçado, bom para diagramas em texto), " +
+			"ligacao (seta tracejada entre dois itens) ou imagem (um anexo desta tarefa)."},
+	"titulo":  map[string]any{"type": "string", "description": "Faixa pequena acima do cartão (até 120 caracteres)."},
+	"texto":   map[string]any{"type": "string", "description": "O conteúdo (até 8.000 caracteres); na ligação, o rótulo (até 120)."},
+	"cor":     map[string]any{"type": "string", "enum": []string{"amarelo", "azul", "verde", "rosa", "lilas", "cinza"}, "description": "Cor da nota (padrão: amarelo)."},
+	"x":       map[string]any{"type": "number", "description": "Posição em unidades do quadro (opcional: sem x e y a Colmeia posiciona)."},
+	"y":       map[string]any{"type": "number"},
+	"largura": map[string]any{"type": "number", "description": "Opcional: sem tamanho, a Colmeia estima pelo texto."},
+	"altura":  map[string]any{"type": "number"},
+	"anexo_id": map[string]any{"type": "integer",
+		"description": "Na imagem: o anexo desta tarefa (de anexar_imagem ou capturar_navegador)."},
+	"de":   map[string]any{"type": []string{"integer", "string"}, "description": "Na ligação: o id de um item existente ou o ref de um item desta chamada."},
+	"para": map[string]any{"type": []string{"integer", "string"}, "description": "Na ligação: o outro item, como em de."},
+}, "tipo")
 
 func gravarNota(ctx context.Context, n Cliente, args json.RawMessage, modo string) ([]any, error) {
 	var a struct {

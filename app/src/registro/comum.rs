@@ -112,7 +112,7 @@ pub fn ponto_do_tipo(tipo: &str) -> EstadoVisual {
         // Pedidos ao agente e o navegador da tarefa.
         "pedido" | "pedido_cancelado" | "navegador" => EstadoVisual::Parado,
         "pedido_entregue" => EstadoVisual::Trabalhando,
-        "pedido_respondido" | "nota_agente" => EstadoVisual::Concluiu,
+        "pedido_respondido" | "nota_agente" | "lousa" => EstadoVisual::Concluiu,
         "pedido_falhou" => EstadoVisual::Erro,
         _ => EstadoVisual::Terminou,
     }

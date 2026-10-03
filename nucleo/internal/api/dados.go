@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -45,6 +43,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasNavegador(mux)
 	s.rotasArquivos(mux)
 	s.rotasAgente(mux)
+	s.rotasLousas(mux)
 }
 
 // responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.
@@ -68,19 +67,7 @@ func responderErro(w http.ResponseWriter, err error) {
 }
 
 func ler(r *http.Request, destino any) error {
-	corpo, err := io.ReadAll(io.LimitReader(r.Body, limiteCorpo+1))
-	if err != nil {
-		return err
-	}
-	if len(corpo) > limiteCorpo {
-		return dados.ErrInvalido{Motivo: "pedido grande demais"}
-	}
-	decodificador := json.NewDecoder(bytes.NewReader(corpo))
-	decodificador.DisallowUnknownFields()
-	if err := decodificador.Decode(destino); err != nil {
-		return dados.ErrInvalido{Motivo: "pedido mal formado"}
-	}
-	return nil
+	return lerAte(r, destino, limiteCorpo)
 }
 
 func idDaRota(r *http.Request) (int64, error) {

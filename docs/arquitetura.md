@@ -48,7 +48,11 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/perfis/{id}/apresentacao?tipo=daily\|sprint` | O deck da apresentação: capa (números com os nomes dos grupos: `concluidas`, `revisao`, `aguardando`, `trabalhando`, `erros` de sessão e `novas`; destaques; partes; tarefas novas) e um slide por tarefa (o que foi feito, números, anexos e a nota); aceita os mesmos parâmetros do resumo (`projeto=`, `de=`/`ate=`, `ultimos=`, `mes=`). Até 60 slides; o resto vira `mais` |
 | `POST /v1/tarefas/{id}/anexos` | Anexa uma imagem à tarefa (corpo `image/png` ou `image/jpeg`, até 8 MB; a foto vira PNG, sem EXIF, e é reduzida acima de 3840 px); `origem=captura\|colagem\|mensagem\|arquivo`, `agente=`, `legenda=` e `nome=` opcionais; devolve `{id, caminho, largura, altura}` |
 | `POST /v1/tarefas/{id}/videos` | Anexa um vídeo (`video/mp4`, `video/webm`, `video/x-matroska` ou `video/quicktime`, até 512 MB), copiado em fluxo para o disco; os primeiros bytes precisam bater com o tipo; `nome=` opcional |
-| `POST /v1/perfis/{id}/anexos` | O mesmo que o das imagens, sem tarefa |
+| `POST /v1/perfis/{id}/anexos` | O mesmo que o das imagens, sem tarefa; `lousa=1` marca o anexo de uma lousa (fora da linha do tempo e dos slides) |
+| `POST /v1/perfis/{id}/videos` | O mesmo que o dos vídeos, sem tarefa; `lousa=1` como acima |
+| `POST /v1/workspaces/{id}/lousa` · `POST /v1/tarefas/{id}/lousa` | Abre a lousa do workspace ou da tarefa, criando-a se ainda não existe (sem evento): `{lousa: {id, dono}, elementos, seq}`, com o `seq` lido antes da consulta |
+| `GET /v1/lousas/{id}` | A mesma resposta, para recarregar |
+| `POST /v1/lousas/{id}/operacoes` | Um lote de até 500 operações, tudo ou nada (corpo até 1 MB, estrito): `criar` (`ref` opcional; `de`/`para` aceitam um id ou o `ref` de um item criado antes no lote), `alterar` (`id`, `versao` e só os campos que mudam; `tipo` só entre nota, texto e código) e `remover` (`id`, `versao`). Responde `{elementos, removidos, refs}` (os removidos incluem as ligações levadas junto); 409 `{erro, elementos, removidos}` se alguma versão não bate, sem gravar nada |
 | `GET` / `DELETE /v1/anexos/{id}` | A imagem (PNG imutável, `nosniff`; um vídeo responde 400) ou remover (o arquivo sai, o evento fica) |
 | `GET /v1/anexos/{id}/info` | `{tipo, formato, nome, bytes, largura, altura, caminho}`: a tela abre um vídeo no reprodutor do sistema pelo caminho, sempre montado pelo núcleo |
 | `PUT /v1/tarefas/{id}/notas` | Nota da tarefa numa daily (`{"tipo":"daily","periodo":"AAAA-MM-DD"}`) ou numa sprint (`"periodo":"AAAA-MM-DD..AAAA-MM-DD"`), até 4.000 caracteres; texto vazio apaga; a que parece ter senha ou chave é recusada (400). Com `versao` (o `atualizada_em` lido, `""` se não havia nota), responde 409 `{erro, texto, versao}` se a nota mudou desde então |
@@ -91,6 +95,8 @@ Rotas dos agentes (`/v1/agente/*`): só aceitam o token de um agente, e o token 
 | `POST /v1/agente/navegador` | `{url}`: http, https ou `file://` de dentro da pasta (sem os arquivos sensíveis); abre sem tomar o foco |
 | `POST /v1/agente/navegador/captura` | `{anexar?, legenda?}`: o PNG reduzido a 1568 px (base64) e o id do anexo |
 | `POST /v1/agente/pedidos/{id}/concluir` | `{resumo?}`: só um pedido da tarefa do token; o resumo, se houver, complementa a nota |
+| `GET /v1/agente/lousa` | A lousa da tarefa do token: cada item com id, tipo, posição, tamanho, cor, título, texto, pontas e autor |
+| `POST /v1/agente/lousa/elementos` | `{elementos: [...]}`: até 50 itens (nota, texto, código, ligação e imagem de um anexo da própria tarefa), com `ref` local para as ligações; sem `x`/`y`, o núcleo põe numa grade à direita do que existe, e sem tamanho estima pelo texto. Só acrescenta; grava `lousa.agente` |
 
 Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
 
@@ -113,6 +119,7 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |
 | `pedido.criado` / `pedido.entregue` / `pedido.respondido` / `pedido.cancelado` / `pedido.falhou` | `pedido_id`, `tarefa_id`, `agente_id` e `pedido` (o objeto, lido na hora; no histórico só fica o tamanho do texto) |
 | `navegador.aberto` / `navegador.fechado` / `navegador.captura` / `navegador.recusado` | `tarefa_id`, `agente_id` (0 é você), `descricao` (esquema, host e caminho, nunca a query) |
+| `lousa.mudou` | `lousa_id`, `dono` (`workspace_id` ou `tarefa_id`), `elementos` (os itens inteiros, com o texto) e `removidos`; com `agente_id` e `evento` quando foi o agente (o evento `lousa.agente` no histórico não tem texto). Mudanças da tela não ficam no histórico ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)) |
 
 Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). Para não perder nada: a tela abre o WebSocket, pede o `/quadro` (que traz o `seq` já incluído nele) e aplica só as mensagens com `seq` maior. Quem publica nunca espera: cada tela tem uma fila de 256 mensagens e, se ela encher, recebe um único `recarregar`. Tipos desconhecidos são ignorados pela tela.
 
@@ -149,7 +156,11 @@ Pela daily, pela sprint ou pela apresentação, você pede algo a mais ao agente
 
 Cada agente do Claude Code que a Colmeia abre ganha um token próprio (32 bytes aleatórios, guardado só em memória pelo sha256) e um `--mcp-config` com o servidor `colmeia`: o próprio `colmeia-nucleo mcp --socket … --token-arquivo …`, por stdio. O token fica num arquivo `0600` em `<canal>/agentes/` (tmpfs), nunca em argumento ou variável de ambiente, e é revogado quando o agente termina, é removido ou o núcleo encerra. A Colmeia passa também `--allowedTools mcp__colmeia`: tudo nelas já está confinado à tarefa. Os outros servidores MCP do usuário continuam valendo (sem `--strict-mcp-config`). Agentes que já rodavam antes desta versão ganham o MCP quando forem iniciados de novo.
 
-Ferramentas: `ler_tarefa`, `ler_nota`, `complementar_nota`, `escrever_nota`, `anexar_imagem`, `abrir_navegador`, `capturar_navegador` e `concluir_pedido`. Os argumentos são estritos (campo desconhecido é erro) e cada linha tem até 1 MB.
+Ferramentas: `ler_tarefa`, `ler_nota`, `complementar_nota`, `escrever_nota`, `anexar_imagem`, `abrir_navegador`, `capturar_navegador`, `concluir_pedido`, `ler_lousa` e `acrescentar_a_lousa`. Os argumentos são estritos (campo desconhecido é erro) e cada linha tem até 1 MB.
+
+### Lousa
+
+O quadro livre de cada workspace e de cada tarefa. A tela desenha só o que aparece, com o layout dos textos em cache por item e zoom; abaixo de 6 px na tela, o texto vira barra. O zoom anda em níveis fixos (10% a 400%). As mudanças vão ao núcleo em lotes, um por vez: mover, redimensionar e cor ao soltar o mouse; o texto 800 ms depois da última tecla, com um único pedido de redesenho. Trocar de tela grava na hora e fechar a janela grava esperando a resposta. Itens criados têm um id negativo até o núcleo responder. O desfazer fica na tela, um comando por gesto (um arrasto, uma sessão de edição). A lousa da tarefa cobre o corpo do terminal em foco, sem mudar o tamanho dele; enquanto isso, o terminal não é desenhado nem recebe o teclado e cai para o ritmo de fundo. No slide da daily, a lousa da tarefa aparece só leitura, ajustada para caber, e o clique abre o palco (tela cheia, de cartão em cartão, na ordem de leitura).
 
 ### Navegador da tarefa
 
@@ -166,16 +177,20 @@ eventos (id, momento, tipo, dados, hash_anterior, hash,
          perfil_id, projeto_id, tarefa_id, agente_id)   -- colunas derivadas, fora do hash
 anexos  (id, perfil_id, tarefa_id, sha256, largura, altura, bytes,
          origem, legenda, criado_em, removido,
-         tipo, formato, nome)                          -- imagem ou vídeo; png, mp4, webm, mkv, mov
+         tipo, formato, nome, na_lousa)                -- imagem ou vídeo; png, mp4, webm, mkv, mov
 mensagens (id, agente_id, texto, enviada_em)           -- histórico da caixa de mensagem, até 200 por agente
 notas   (tarefa_id, tipo, periodo, texto, atualizada_em)   -- daily ou sprint, por período
 pedidos (id, tarefa_id, agente_id, tipo, periodo, texto,
          estado, motivo, criado_em, entregue_em, respondido_em)  -- fila, entregue, respondido, cancelado, falhou
+lousas  (id, perfil_id, workspace_id, tarefa_id, criada_em)    -- um dono só (CHECK); some com a tarefa
+lousa_elementos (id, lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto,
+         anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, versao, atualizado_em)
+         -- nota, texto, codigo, imagem, video, tarefa, ligacao; em unidades do quadro
 ```
 
 O hash cobre `anterior|momento|tipo|dados`. Os dados de cada evento começam com `"_escopo":{perfil, projeto, tarefa, agente}`, coberto pelo hash; as colunas derivadas repetem esse escopo para a linha do tempo de um perfil não ler o histórico inteiro, e a verificação confere que batem. Os eventos gravados antes delas foram ligados aos perfis uma única vez (`PRAGMA user_version = 2`), seguindo o próprio histórico: é a única exceção ao "só acréscimo", mexe só nas colunas derivadas e o que não dá para ligar fica sem perfil. As mudanças de tarefa guardam a tarefa inteira (com o título) e o nome do projeto: a linha do tempo não depende de a tarefa ainda existir.
 
-Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens, as notas e os pedidos ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
+Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens, as notas e os pedidos ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A lousa também fica fora ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)): até 2.000 itens por lousa, texto de até 8.000 caracteres (título e rótulo até 120), sem caracteres de controle nem nada que pareça senha ou chave; apagar um item leva as ligações dele, e o cartão de uma tarefa apagada fica sem a tarefa ("Tarefa removida"). A versão 4 do banco (`PRAGMA user_version = 4`) criou as tabelas da lousa e a coluna `anexos.na_lousa`. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
 
 ## Regras de desempenho
 
@@ -190,7 +205,7 @@ Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); 
 
 ## Fases
 
-1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa (feito no Linux; falta o Windows).
+1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa, lousa do workspace e da tarefa (feito no Linux; falta o Windows).
 2. **Orquestração:** MCP para Codex, Gemini e OpenCode, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
 3. **Integrações:** servidores MCP de GitHub, Docker por branch e banco, tarefa a partir de link, tela de provedores.
 4. **Expansão:** servidores de terceiros, "entender projeto", busca e replay, custos, acesso remoto e celular.

@@ -15,6 +15,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, CornerRadius, Event, FontId, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 use crate::api;
+use crate::dados;
+use crate::lousa;
 use crate::pedido;
 use crate::registro::{self, CacheImagens, Miniatura};
 use crate::sistema;
@@ -54,8 +56,8 @@ pub struct Regioes {
     pub conteudo: Rect,
     pub esquerda: Rect,
     pub direita: Rect,
-    /// Seletor da coluna da direita: altura 0 enquanto houver uma aba só
-    /// (Anexos). A entrega F acrescenta o Quadro aqui.
+    /// Seletor da coluna da direita ("Anexos | Lousa"): altura 0 quando há
+    /// uma aba só (só anexos, ou só a lousa).
     pub seletor_direita: Rect,
     pub acoes: Rect,
     /// Faixa central do rodapé, entre a navegação e os botões: avisos, o
@@ -80,7 +82,8 @@ pub fn escala(tamanho: Vec2) -> f32 {
 }
 
 /// Calcula as regiões. `com_anexos` falso: a esquerda ocupa a largura toda.
-pub fn regioes(tamanho: Vec2, com_anexos: bool) -> Regioes {
+/// `com_abas`: a coluna da direita tem anexos e lousa (o seletor aparece).
+pub fn regioes(tamanho: Vec2, com_anexos: bool, com_abas: bool) -> Regioes {
     let s = escala(tamanho);
     let px = |v: f32| (v * s).round();
     let margem = px(64.0);
@@ -102,7 +105,8 @@ pub fn regioes(tamanho: Vec2, com_anexos: bool) -> Regioes {
     } else {
         (conteudo, Rect::from_min_size(conteudo.right_top(), vec2(0.0, conteudo.height())))
     };
-    let seletor_direita = Rect::from_min_size(direita.min, vec2(direita.width(), 0.0));
+    // O seletor é de 34 px fixos, como o rodapé (não escala); a coluna começa 12 abaixo.
+    let seletor_direita = Rect::from_min_size(direita.min, vec2(direita.width(), if com_abas && com_anexos { 34.0 } else { 0.0 }));
     let lado = px(32.0).max(28.0);
     let fechar = Rect::from_min_size(pos2(tamanho.x - margem - lado, acoes.center().y - lado / 2.0), vec2(lado, lado));
     // Largura fixa, como o resto do rodapé: o botão "Pedir ao agente (P)" não escala.
@@ -200,6 +204,14 @@ enum Mensagem {
     VideoFalhou(String),
     Grande { anexo: i64, resultado: Result<egui::ColorImage, String> },
     RemocaoFalhou(i64),
+    Lousa { tarefa: i64, resultado: Result<api::LousaAberta, String> },
+}
+
+/// A lousa de uma tarefa no slide: buscada sob demanda, em cache por tarefa.
+enum LousaDoSlide {
+    Carregando,
+    Pronta(Vec<api::ElementoLousa>),
+    Erro(String),
 }
 
 const ALTURA_IMAGEM: u32 = 1080;
@@ -309,6 +321,13 @@ pub struct Apresentacao {
     /// do agente chegam em rajada: uma busca por vez).
     buscando: bool,
     buscar_de_novo: bool,
+    // Lousa da tarefa no slide
+    /// A aba escolhida fica para os próximos slides que têm lousa (L troca).
+    aba_lousa: bool,
+    lousas: HashMap<i64, LousaDoSlide>,
+    desenho_lousa: lousa::desenho::Desenho,
+    /// O palco da lousa do slide, por cima da apresentação (Esc volta ao slide).
+    palco: Option<Box<lousa::palco::Palco>>,
 }
 
 /// A nota mudou enquanto você editava e não dá para juntar sozinho (o agente
@@ -405,6 +424,10 @@ impl Apresentacao {
             respondido: None,
             buscando: false,
             buscar_de_novo: false,
+            aba_lousa: false,
+            lousas: HashMap::new(),
+            desenho_lousa: lousa::desenho::Desenho::novo("slide-lousa"),
+            palco: None,
         };
         match deck {
             Some(d) => a.trocar_deck(d, None),
@@ -467,6 +490,25 @@ impl Apresentacao {
         }
         let atual = self.tarefa_atual();
         self.pedir_deck(ctx, atual);
+    }
+
+    /// A lousa da tarefa mudou: o slide busca de novo quando aparecer.
+    pub fn lousa_mudou(&mut self, tarefa: i64) {
+        self.lousas.remove(&tarefa);
+    }
+
+    /// Pede a lousa da tarefa (uma vez; o cache vale até ela mudar).
+    fn pedir_lousa(&mut self, ctx: &egui::Context, tarefa: i64, id: i64) {
+        if self.lousas.contains_key(&tarefa) {
+            return;
+        }
+        self.lousas.insert(tarefa, LousaDoSlide::Carregando);
+        registro::em_segundo_plano(&self.canal.0, ctx, move || Mensagem::Lousa { tarefa, resultado: api::ler_lousa(id) });
+    }
+
+    /// O slide mostra a lousa na coluna da direita (a aba dela, ou só ela).
+    fn mostra_lousa(&self, slide: &api::Slide) -> bool {
+        slide.lousa.is_some() && (slide.anexos.is_empty() || self.aba_lousa)
     }
 
     /// O agente mexeu na nota da tarefa: se você está editando, o rodapé avisa
@@ -704,6 +746,13 @@ impl Apresentacao {
                 Mensagem::VideoFalhou(e) => {
                     self.abrindo_video = None;
                     self.erro_video = Some(e);
+                }
+                Mensagem::Lousa { tarefa, resultado } => {
+                    let estado = match resultado {
+                        Ok(aberta) => LousaDoSlide::Pronta(aberta.elementos),
+                        Err(e) => LousaDoSlide::Erro(e),
+                    };
+                    self.lousas.insert(tarefa, estado);
                 }
                 Mensagem::Grande { anexo, resultado } => {
                     if let Some(v) = self.visor.as_mut().filter(|v| v.anexo == anexo) {
@@ -950,6 +999,11 @@ impl Apresentacao {
             self.focar_nota = self.slide().is_some();
         } else if tecla(Key::P) {
             self.abrir_caixa(ctx);
+        } else if tecla(Key::L) {
+            // Anexos ou lousa: a escolha vale para os próximos slides.
+            if self.slide().is_some_and(|s| s.lousa.is_some() && !s.anexos.is_empty()) {
+                self.aba_lousa = !self.aba_lousa;
+            }
         } else if tecla(Key::A) {
             self.escolher_arquivos(ctx);
         } else if tecla(Key::R) {
@@ -1013,9 +1067,22 @@ impl Apresentacao {
     // Desenho
 
     /// Desenha a apresentação na janela inteira e devolve o que ela pede.
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, favo: &mut tema::Favo, agora: f64) -> Option<Pedido> {
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, favo: &mut tema::Favo, modelo: &dados::Modelo, agora: f64) -> Option<Pedido> {
         let ctx = ui.ctx().clone();
         self.receber(&ctx);
+        self.desenho_lousa.receber(&ctx);
+        // O palco da lousa do slide, por cima: Esc volta ao mesmo slide.
+        if let Some(palco) = &mut self.palco {
+            match palco.mostrar(ui, modelo, agora) {
+                Some(lousa::palco::PedidoPalco::Sair) => {
+                    self.palco = None;
+                    ctx.request_repaint();
+                }
+                Some(lousa::palco::PedidoPalco::AbrirTarefa(t)) => return Some(Pedido::AbrirTarefa(t)),
+                None => {}
+            }
+            return None;
+        }
         if let Some(arquivos) = ctx.data_mut(|d| d.remove_temp::<Vec<PathBuf>>(Id::new("arquivos-escolhidos"))) {
             self.anexar(&ctx, arquivos);
         }
@@ -1032,7 +1099,8 @@ impl Apresentacao {
         let p = cores();
         let tela = ui.max_rect();
         ui.painter().rect_filled(tela, 0, p.fundo);
-        let r = regioes(tela.size(), self.slide().is_some_and(|s| !s.anexos.is_empty()));
+        let (direita, abas) = self.slide().map_or((false, false), |s| (!s.anexos.is_empty() || s.lousa.is_some(), !s.anexos.is_empty() && s.lousa.is_some()));
+        let r = regioes(tela.size(), direita, abas);
         let deslocar = |rect: Rect| rect.translate(tela.min.to_vec2());
         let r = Regioes {
             cabecalho: deslocar(r.cabecalho),
@@ -1063,7 +1131,7 @@ impl Apresentacao {
                         favo.desenhar(ui.painter(), tela);
                         self.capa(ui, &r, tela);
                     }
-                    Pagina::Tarefa(i) => self.slide_tarefa(ui, &r, i, agora),
+                    Pagina::Tarefa(i) => self.slide_tarefa(ui, &r, i, modelo, agora),
                     Pagina::Divisor(secao, n) => {
                         favo.desenhar(ui.painter(), tela);
                         self.divisor(ui, tela, &secao, n, r.escala);
@@ -1094,10 +1162,14 @@ impl Apresentacao {
     fn preparar_vizinhos(&mut self, ctx: &egui::Context) {
         let Some(deck) = &self.deck else { return };
         let mut ids = Vec::new();
+        let mut lousas = Vec::new();
         for passo in [-1isize, 1] {
             let i = navegar(self.atual, self.paginas.len(), passo);
             if let Some(Pagina::Tarefa(s)) = self.paginas.get(i) {
                 let slide = &deck.slides[*s];
+                if let Some(l) = slide.lousa {
+                    lousas.push((slide.tarefa_id, l.id));
+                }
                 if let Some(a) = slide.anexos.get(self.principal.get(&slide.tarefa_id).copied().unwrap_or(0))
                     && !a.video()
                 {
@@ -1107,6 +1179,9 @@ impl Apresentacao {
         }
         for id in ids {
             self.imagens.pedir(ctx, id);
+        }
+        for (tarefa, id) in lousas {
+            self.pedir_lousa(ctx, tarefa, id);
         }
     }
 
@@ -1250,7 +1325,7 @@ impl Apresentacao {
 
     /// O slide de uma tarefa: cabeçalho, título, o que foi feito, números,
     /// nota (à esquerda) e anexos (à direita).
-    fn slide_tarefa(&mut self, ui: &mut egui::Ui, r: &Regioes, i: usize, agora: f64) {
+    fn slide_tarefa(&mut self, ui: &mut egui::Ui, r: &Regioes, i: usize, modelo: &dados::Modelo, agora: f64) {
         let p = cores();
         let Some(slide) = self.deck.as_ref().map(|d| d.slides[i].clone()) else { return };
         let s = r.escala;
@@ -1298,8 +1373,63 @@ impl Apresentacao {
         let r = Regioes { esquerda: subir(r.esquerda), direita: subir(r.direita), seletor_direita: r.seletor_direita.translate(vec2(0.0, -sobra)), ..*r };
 
         self.coluna_esquerda(ui, &r, &slide);
-        if !slide.anexos.is_empty() {
+        // "Anexos | Lousa" quando a tarefa tem os dois.
+        if !slide.anexos.is_empty() && slide.lousa.is_some() {
+            let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(r.seletor_direita).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            if let Some(i) = tema::segmentado(&mut filho, &["Anexos", "Lousa"], self.aba_lousa as usize) {
+                self.aba_lousa = i == 1;
+            }
+        }
+        if self.mostra_lousa(&slide) {
+            self.lousa_do_slide(ui, &r, &slide, modelo);
+        } else if !slide.anexos.is_empty() {
             self.coluna_direita(ui, &r, &slide, agora);
+        }
+    }
+
+    /// A lousa da tarefa na coluna da direita: só leitura, ajustada para
+    /// caber (no máximo 100%). O clique abre o palco dela.
+    fn lousa_do_slide(&mut self, ui: &mut egui::Ui, r: &Regioes, slide: &api::Slide, modelo: &dados::Modelo) {
+        let p = cores();
+        let ctx = ui.ctx().clone();
+        let s = r.escala;
+        let px = |v: f32| (v * s).round();
+        let topo = if r.seletor_direita.height() > 0.0 { r.seletor_direita.bottom() + px(12.0) } else { r.direita.top() };
+        let area = Rect::from_min_max(pos2(r.direita.left(), topo), r.direita.max);
+        let Some(resumo) = slide.lousa else { return };
+        self.pedir_lousa(&ctx, slide.tarefa_id, resumo.id);
+        let resposta = ui.interact(area, Id::new(("lousa-slide", slide.tarefa_id)), Sense::click());
+        ui.painter().rect_filled(area, CornerRadius::same(tema::RAIO_SUPERFICIE), p.superficie);
+        let dentro = area.shrink(px(16.0));
+        match self.lousas.get(&slide.tarefa_id) {
+            Some(LousaDoSlide::Pronta(elementos)) => {
+                let caixas = elementos.iter().filter(|e| e.tipo != api::TipoElemento::Ligacao).map(lousa::desenho::caixa_quadro);
+                if let Some(caixa) = lousa::camera::envolver(caixas) {
+                    let camera = lousa::camera::Camera::enquadrar(dentro, caixa, 0.0, 1.0, false);
+                    let tarefas = |id: i64| lousa::info_tarefa(modelo, id);
+                    let marcas = lousa::desenho::Marcas { limpo: true, ..Default::default() };
+                    self.desenho_lousa.desenhar(ui, dentro, &camera, elementos, &tarefas, &marcas);
+                }
+                if resposta.hovered() {
+                    ui.painter().rect_stroke(
+                        area,
+                        CornerRadius::same(tema::RAIO_SUPERFICIE),
+                        Stroke::new(1.0, p.destaque.gamma_multiply(0.55)),
+                        StrokeKind::Inside,
+                    );
+                    let pilula = Pilula::neutra("Ampliar");
+                    let largura = pilula.largura(ui.painter());
+                    pilula.pintar(ui.painter(), area.right_bottom() - vec2(12.0 + largura, 12.0 + 22.0));
+                }
+                if resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    let tema_base = self.tema_sessao.unwrap_or(self.tema_base);
+                    self.palco = Some(Box::new(lousa::palco::Palco::novo(elementos.clone(), None, tema_base)));
+                }
+            }
+            Some(LousaDoSlide::Erro(e)) => {
+                ui.painter().text(area.center(), egui::Align2::CENTER_CENTER, format!("Não consegui ler a lousa: {e}"), FontId::proportional(14.0), p.suave);
+            }
+            _ => {}
         }
     }
 
@@ -1559,7 +1689,8 @@ impl Apresentacao {
         let ctx = ui.ctx().clone();
         let s = r.escala;
         let px = |v: f32| (v * s).round();
-        let area = Rect::from_min_max(pos2(r.direita.left(), r.seletor_direita.bottom()), r.direita.max);
+        let topo = if r.seletor_direita.height() > 0.0 { r.seletor_direita.bottom() + px(12.0) } else { r.direita.top() };
+        let area = Rect::from_min_max(pos2(r.direita.left(), topo), r.direita.max);
         let tarefa = slide.tarefa_id;
         let n = slide.anexos.len();
         let indice = self.principal.get(&tarefa).copied().unwrap_or(0).min(n - 1);
@@ -2066,6 +2197,7 @@ const ATALHOS: &[(&str, &[&str])] = &[
     ("Primeiro / último", &["Home", "End"]),
     ("Ir à capa", &["C"]),
     ("Pedir ao agente", &["P"]),
+    ("Anexos ou lousa", &["L"]),
     ("Editar a nota", &["N"]),
     ("Adicionar foto ou vídeo", &["A"]),
     ("Esconder o slide (só agora)", &["H"]),
@@ -2102,6 +2234,12 @@ mod testes {
         let mut regioes = vec![("cabecalho", r.cabecalho), ("titulo", r.titulo), ("esquerda", r.esquerda), ("acoes", r.acoes)];
         if com_anexos {
             regioes.push(("direita", r.direita));
+        }
+        // O seletor "Anexos | Lousa" fica dentro da coluna da direita, no topo dela.
+        if r.seletor_direita.height() > 0.0 {
+            assert!(r.direita.contains_rect(r.seletor_direita), "seletor fora da coluna em {tela:?}");
+            assert!(!r.seletor_direita.intersects(r.esquerda) && r.seletor_direita.top() == r.direita.top());
+            assert!(r.seletor_direita.height() == 34.0 && r.direita.height() - 34.0 - 12.0 >= 200.0, "sobra pouco abaixo do seletor em {tela:?}");
         }
         let janela = Rect::from_min_size(Pos2::ZERO, tela);
         for (i, (a, ra)) in regioes.iter().enumerate() {
@@ -2148,9 +2286,10 @@ mod testes {
     #[test]
     fn regioes_em_1600x900_e_1280x720() {
         for tela in [vec2(1600.0, 900.0), vec2(1280.0, 720.0), vec2(1920.0, 1080.0), vec2(1024.0, 640.0)] {
-            for com_anexos in [true, false] {
-                let r = regioes(tela, com_anexos);
+            for (com_anexos, com_abas) in [(true, false), (false, false), (true, true)] {
+                let r = regioes(tela, com_anexos, com_abas);
                 sem_sobreposicao(&r, tela, com_anexos);
+                assert_eq!(r.seletor_direita.height() > 0.0, com_abas, "seletor em {tela:?}");
                 if com_anexos {
                     let proporcao = r.esquerda.width() / (r.esquerda.width() + r.direita.width());
                     assert!((0.55..=0.62).contains(&proporcao), "proporção {proporcao} em {tela:?}");
@@ -2159,13 +2298,13 @@ mod testes {
                 }
             }
         }
-        let r = regioes(vec2(1600.0, 900.0), true);
+        let r = regioes(vec2(1600.0, 900.0), true, false);
         assert_eq!((r.escala, r.cabecalho.left(), r.cabecalho.top()), (1.0, 64.0, 40.0));
         assert_eq!((r.esquerda.width(), r.direita.left(), r.direita.width()), (832.0, 944.0, 592.0));
         assert_eq!(r.acoes, Rect::from_min_size(pos2(0.0, 836.0), vec2(1600.0, 64.0)));
         assert_eq!(r.fechar, Rect::from_min_size(pos2(1504.0, 852.0), vec2(32.0, 32.0)));
         // Em 1280×720 o título ainda cabe em duas linhas de 34 px.
-        let pequeno = regioes(vec2(1280.0, 720.0), true);
+        let pequeno = regioes(vec2(1280.0, 720.0), true, false);
         assert!((pequeno.escala - 0.8).abs() < 1e-6 && pequeno.titulo.height() >= 84.0);
     }
 

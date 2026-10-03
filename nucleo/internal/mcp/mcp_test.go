@@ -31,6 +31,10 @@ func (n *nucleoFalso) Pedir(_ context.Context, metodo, caminho string, corpo any
 		return 200, []byte(`{"png":"iVBORw0KGgo=","anexo":9}`), nil
 	case caminho == "/v1/agente/navegador":
 		return 400, []byte(`{"erro":"Só endereços http, https ou arquivos desta pasta"}`), nil
+	case caminho == "/v1/agente/lousa":
+		return 200, []byte(`{"lousa":3,"elementos":[{"id":1,"tipo":"nota","texto":"Fluxo da tela"}]}`), nil
+	case caminho == "/v1/agente/lousa/elementos":
+		return 200, []byte(`{"lousa":3,"ids":[7,8,9],"refs":{"a":7,"b":8}}`), nil
 	}
 	return 404, []byte(`{"erro":"não encontrado"}`), nil
 }
@@ -123,7 +127,7 @@ func TestServidorMCP(t *testing.T) {
 	for _, f := range ferramentas {
 		nomes = append(nomes, f.(map[string]any)["name"].(string))
 	}
-	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido" {
+	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa" {
 		t.Errorf("ferramentas: %v", nomes)
 	}
 
@@ -155,6 +159,37 @@ func TestServidorMCP(t *testing.T) {
 	}
 	if corpo := nucleo.corpos[len(nucleo.corpos)-1].(map[string]any); corpo["anexar"] != true {
 		t.Errorf("captura anexa por padrão: %v", corpo)
+	}
+
+	// A lousa da tarefa: ler e acrescentar (com refs e ligações).
+	if texto, erro := resultado(t, c.chamar(20, "ler_lousa", `{}`)); erro || !strings.Contains(texto, "Fluxo da tela") {
+		t.Errorf("ler_lousa: %q %v", texto, erro)
+	}
+	itens := `{"itens":[{"ref":"a","tipo":"nota","texto":"# Tela"},{"ref":"b","tipo":"codigo","texto":"tela -> api"},{"tipo":"ligacao","de":"a","para":"b","texto":"chama"}]}`
+	if texto, erro := resultado(t, c.chamar(21, "acrescentar_a_lousa", itens)); erro || !strings.Contains(texto, "Acrescentei 3 itens") {
+		t.Errorf("acrescentar_a_lousa: %q %v", texto, erro)
+	}
+	corpo, _ := json.Marshal(nucleo.corpos[len(nucleo.corpos)-1])
+	if !strings.Contains(string(corpo), `"de":"a"`) || !strings.Contains(string(corpo), `"elementos":[`) {
+		t.Errorf("corpo levado ao núcleo: %s", corpo)
+	}
+	antes = len(nucleo.pedidos)
+	for _, ruim := range []string{`{"itens":[]}`, `{"itens":[{"tipo":"nota","mover":true}]}`, `{"itens":[{"tipo":"nota"}],"tarefa":2}`} {
+		if texto, erro := resultado(t, c.chamar(22, "acrescentar_a_lousa", ruim)); !erro {
+			t.Errorf("argumentos ruins aceitos (%s): %q", ruim, texto)
+		}
+	}
+	if len(nucleo.pedidos) != antes {
+		t.Errorf("argumentos ruins da lousa chegaram ao núcleo")
+	}
+	for _, f := range ferramentas {
+		if f := f.(map[string]any); f["name"] == "acrescentar_a_lousa" {
+			props := f["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			item := props["itens"].(map[string]any)["items"].(map[string]any)
+			if item["additionalProperties"] != false || item["properties"].(map[string]any)["tipo"] == nil {
+				t.Errorf("esquema do item da lousa: %v", item)
+			}
+		}
 	}
 
 	// Ferramenta inexistente e método desconhecido: erros do protocolo.
