@@ -55,6 +55,31 @@ func TestAbrirCriaCanalFechadoParaOutros(t *testing.T) {
 	}
 }
 
+// Um núcleo que encerra depois de outro já ter subido no mesmo canal não
+// apaga o socket nem o token do novo.
+func TestFecharNaoApagaOCanalDeOutroNucleo(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "colmeia")
+	t.Setenv("COLMEIA_DIR", dir)
+	l1, _, fechar1, err := Abrir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// O antigo para de atender (está encerrando) e o novo sobe.
+	l1.Close()
+	_, token2, fechar2, err := Abrir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fechar2()
+	fechar1()
+	if _, err := os.Stat(filepath.Join(dir, NomeSocket)); err != nil {
+		t.Fatalf("o socket do núcleo novo sumiu: %v", err)
+	}
+	if lido, _ := os.ReadFile(filepath.Join(dir, NomeToken)); string(lido) != token2 {
+		t.Fatal("o token do núcleo novo sumiu")
+	}
+}
+
 func TestAbrirRecusaDiretorioAbertoParaOutros(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "colmeia")
 	if err := os.Mkdir(dir, 0o755); err != nil {

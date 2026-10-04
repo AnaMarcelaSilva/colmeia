@@ -50,6 +50,10 @@ type atividade struct {
 	ultimaEntrada atomic.Int64
 	armado        atomic.Bool
 	bel           atomic.Bool
+	// segurado: quantos pedidos de aprovação do agente esperam você na tela
+	// (uma consulta ao banco). Enquanto houver, o estado fica em aguardando,
+	// mesmo com o spinner do agente escrevendo.
+	segurado atomic.Int32
 	// congelado: a Colmeia mandou o programa fechar. O que ele escreve ao
 	// sair (o SIGHUP faz o Claude Code redesenhar) não é trabalho e não pode
 	// mover o cartão antes de o fim ser gravado.
@@ -94,6 +98,10 @@ func (a *atividade) saida(b []byte) {
 		return
 	}
 	agora := time.Now().UnixNano()
+	if a.segurado.Load() > 0 {
+		a.ultimaSaida.Store(agora)
+		return
+	}
 	if bel {
 		a.bel.Store(true)
 	}
@@ -170,7 +178,7 @@ func (a *atividade) disparou() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.armado.Store(false)
-	if a.parado || a.estado.Load() != codTrabalhando {
+	if a.parado || a.estado.Load() != codTrabalhando || a.segurado.Load() > 0 {
 		return
 	}
 	quieto := time.Duration(time.Now().UnixNano() - a.ultimaSaida.Load())
@@ -195,6 +203,33 @@ func (a *atividade) disparou() {
 		return
 	}
 	a.mudar(codOcioso, "")
+}
+
+// Motivo do estado aguardando enquanto um pedido do agente espera a sua
+// aprovação na tela.
+const AprovarConsulta = "aprovar consulta"
+
+// segurar põe o agente em aguardando (motivo fixo) até soltar. Pedidos
+// seguidos se somam: o estado só volta quando o último for resolvido.
+func (a *atividade) segurar(motivo string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.segurado.Add(1)
+	a.mudar(codAguardando, motivo)
+}
+
+// soltar devolve o agente a trabalhando (ele recebe a resposta e segue) e
+// volta a acompanhar o silêncio.
+func (a *atividade) soltar() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.segurado.Add(-1) > 0 {
+		return
+	}
+	a.segurado.Store(0)
+	a.ultimaSaida.Store(time.Now().UnixNano())
+	a.mudar(codTrabalhando, "")
+	a.armarComTrava(a.tempos.Silencio)
 }
 
 // congelar mantém o estado atual até o fim: chamado antes de a Colmeia

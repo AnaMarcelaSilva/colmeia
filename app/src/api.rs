@@ -125,6 +125,9 @@ pub struct Quadro {
     /// Tarefas com o navegador da Colmeia aberto.
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub navegadores: Vec<i64>,
+    /// Pedidos de consulta dos agentes esperando você.
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub aprovacoes: Vec<Aprovacao>,
 }
 
 /// Algo a mais pedido ao agente da tarefa pela daily, pela sprint ou pela
@@ -240,6 +243,8 @@ pub struct Previa {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ItemLinha {
+    #[serde(default)]
+    pub evento: i64,
     pub hora: String,
     pub tipo: String,
     pub texto: String,
@@ -264,6 +269,9 @@ pub struct ItemLinha {
     pub titulo: String,
     #[serde(default)]
     pub coluna: String,
+    /// O item é de uma conexão de banco (o clique abre ela).
+    #[serde(default)]
+    pub conexao_id: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1210,6 +1218,418 @@ pub fn encerrar_nucleo() -> Result<(), String> {
     }
 }
 
+// Bancos de dados
+
+/// Uma conexão de banco do perfil (a senha nunca vem: só onde ela está).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ConexaoBanco {
+    pub id: i64,
+    #[serde(default)]
+    pub pasta: String,
+    pub nome: String,
+    /// "postgres", "mysql", "sqlserver" ou "sqlite".
+    pub tipo: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub porta: u16,
+    #[serde(default)]
+    pub usuario: String,
+    #[serde(default)]
+    pub banco: String,
+    #[serde(default)]
+    pub arquivo: String,
+    /// "desligado", "preferir", "exigir" ou "verificar".
+    #[serde(default)]
+    pub ssl: String,
+    #[serde(default)]
+    pub ssl_ca: String,
+    #[serde(default)]
+    pub escrita: bool,
+    #[serde(default)]
+    pub agentes: bool,
+    /// Onde a senha está: "chaveiro", "memoria" ou "nenhuma".
+    #[serde(default)]
+    pub senha: String,
+    /// A senha está à mão agora (sem ela, a tela pergunta ao conectar).
+    #[serde(default)]
+    pub senha_disponivel: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ListaConexoes {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub conexoes: Vec<ConexaoBanco>,
+    #[serde(default)]
+    pub chaveiro_disponivel: bool,
+}
+
+/// Os campos do diálogo de conexão.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct CamposConexao {
+    pub pasta: String,
+    pub nome: String,
+    pub tipo: String,
+    pub host: String,
+    pub porta: u16,
+    pub usuario: String,
+    pub banco: String,
+    pub arquivo: String,
+    pub ssl: String,
+    pub ssl_ca: String,
+    pub escrita: bool,
+    pub agentes: bool,
+}
+
+/// O resultado do "Testar".
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Teste {
+    pub ok: bool,
+    #[serde(default)]
+    pub ms: i64,
+    #[serde(default)]
+    pub servidor: String,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default)]
+    pub erro: String,
+    #[serde(default)]
+    pub detalhe: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ColunaResultado {
+    pub nome: String,
+    #[serde(default)]
+    pub tipo: String,
+    #[serde(default)]
+    pub numero: bool,
+}
+
+/// Uma página de resultado: cada célula é texto ou NULL.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Resultado {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub colunas: Vec<ColunaResultado>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub linhas: Vec<Vec<Option<String>>>,
+    #[serde(default)]
+    pub mais: bool,
+    #[serde(default)]
+    pub ms: i64,
+    #[serde(default)]
+    pub afetadas: Option<i64>,
+    #[serde(default)]
+    pub verbo: String,
+    #[serde(default)]
+    pub altera: bool,
+}
+
+/// O que deu errado numa chamada ao banco, já do jeito que a tela mostra.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ErroBanco {
+    /// A conexão precisa da senha (sem chaveiro ou esquecida).
+    Senha,
+    /// A alteração precisa da sua confirmação: a instrução e o nonce.
+    Confirmar(Confirmacao),
+    Falhou(FalhaBanco),
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Confirmacao {
+    pub verbo: String,
+    pub sql: String,
+    #[serde(default)]
+    pub banco: String,
+    #[serde(default)]
+    pub sem_where: bool,
+    pub confirmacao: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct FalhaBanco {
+    #[serde(default)]
+    pub erro: String,
+    #[serde(default)]
+    pub detalhe: String,
+    #[serde(default)]
+    pub linha: usize,
+    #[serde(default)]
+    pub tempo_esgotado: bool,
+    #[serde(default)]
+    pub cancelada: bool,
+    #[serde(default)]
+    pub somente_leitura: bool,
+    #[serde(default)]
+    pub varias: bool,
+    #[serde(default)]
+    pub fechada: bool,
+    /// O servidor recusou usuário ou senha (senha trocada lá, ou conexão
+    /// salva sem senha): a tela oferece trocar a senha.
+    #[serde(default)]
+    pub senha_recusada: bool,
+    /// A mensagem é a do servidor de banco (a tela mostra em mono).
+    #[serde(default)]
+    pub do_servidor: bool,
+}
+
+impl ErroBanco {
+    fn de(texto: String) -> ErroBanco {
+        ErroBanco::Falhou(FalhaBanco { erro: texto, ..Default::default() })
+    }
+
+    /// O texto principal do erro.
+    pub fn texto(&self) -> String {
+        match self {
+            ErroBanco::Senha => "Digite a senha da conexão.".into(),
+            ErroBanco::Confirmar(c) => format!("{} precisa de confirmação.", c.verbo),
+            ErroBanco::Falhou(f) => f.erro.clone(),
+        }
+    }
+}
+
+/// Chamada às rotas de banco: a resposta de erro vira `ErroBanco`.
+fn chamar_banco<T: DeserializeOwned>(metodo: &str, caminho: &str, corpo: Option<serde_json::Value>, espera: u64) -> Result<T, ErroBanco> {
+    let corpo = corpo.map(|c| c.to_string());
+    let (status, resposta) = canal::pedir_com_corpo_ate(metodo, caminho, corpo.as_deref(), std::time::Duration::from_secs(espera)).map_err(ErroBanco::de)?;
+    if (200..300).contains(&status) {
+        return serde_json::from_str(&resposta).map_err(|e| ErroBanco::de(inesperada(caminho, e)));
+    }
+    let valor: serde_json::Value = serde_json::from_str(&resposta).unwrap_or_default();
+    if status == 428 || valor["precisa_senha"] == true {
+        return Err(ErroBanco::Senha);
+    }
+    if valor["precisa_confirmar"] == true
+        && let Ok(c) = serde_json::from_value::<Confirmacao>(valor.clone())
+    {
+        return Err(ErroBanco::Confirmar(c));
+    }
+    match serde_json::from_value::<FalhaBanco>(valor) {
+        Ok(f) if !f.erro.is_empty() => Err(ErroBanco::Falhou(f)),
+        _ => Err(ErroBanco::de(format!("erro {status} do núcleo"))),
+    }
+}
+
+pub fn conexoes(perfil: i64) -> Result<ListaConexoes, String> {
+    chamar("GET", &format!("/v1/perfis/{perfil}/conexoes"), None)
+}
+
+fn corpo_conexao(campos: &CamposConexao, senha: Option<&str>, guardar: bool) -> serde_json::Value {
+    let mut corpo = serde_json::to_value(campos).unwrap_or_default();
+    if let Some(s) = senha {
+        corpo["senha"] = json!(s);
+    }
+    corpo["guardar"] = json!(guardar);
+    corpo
+}
+
+pub fn criar_conexao(perfil: i64, campos: &CamposConexao, senha: Option<&str>, guardar: bool) -> Result<ConexaoBanco, String> {
+    chamar("POST", &format!("/v1/perfis/{perfil}/conexoes"), Some(corpo_conexao(campos, senha, guardar)))
+}
+
+pub fn editar_conexao(id: i64, campos: &CamposConexao, senha: Option<&str>, guardar: bool) -> Result<ConexaoBanco, String> {
+    chamar("PATCH", &format!("/v1/conexoes/{id}"), Some(corpo_conexao(campos, senha, guardar)))
+}
+
+pub fn remover_conexao(id: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/conexoes/{id}"), None).map(|_| ())
+}
+
+#[derive(Deserialize)]
+struct Onde {
+    senha: String,
+}
+
+/// Guarda a senha (no chaveiro, se pedido e se houver) e diz onde ficou.
+pub fn definir_senha(id: i64, senha: &str, guardar: bool) -> Result<String, String> {
+    chamar::<Onde>("PUT", &format!("/v1/conexoes/{id}/senha"), Some(json!({ "senha": senha, "guardar": guardar }))).map(|o| o.senha)
+}
+
+pub fn esquecer_senha(id: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/conexoes/{id}/senha"), None).map(|_| ())
+}
+
+/// Testa os campos do diálogo (sem senha e com `conexao`, a senha salva).
+pub fn testar_rascunho(perfil: i64, campos: &CamposConexao, senha: &str, conexao: i64) -> Result<Teste, String> {
+    let mut corpo = serde_json::to_value(campos).unwrap_or_default();
+    corpo["senha"] = json!(senha);
+    corpo["conexao_id"] = json!(conexao);
+    chamar_banco("POST", &format!("/v1/perfis/{perfil}/conexoes/testar"), Some(corpo), 40).map_err(|e| e.texto())
+}
+
+pub fn testar_conexao(id: i64) -> Result<Teste, ErroBanco> {
+    chamar_banco("POST", &format!("/v1/conexoes/{id}/testar"), None, 40)
+}
+
+pub fn desconectar(id: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("POST", &format!("/v1/conexoes/{id}/desconectar"), None).map(|_| ())
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Nomes {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub nomes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Objetos {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub tabelas: Vec<String>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub views: Vec<String>,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub cortado: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ColunaTabela {
+    pub nome: String,
+    #[serde(default)]
+    pub tipo: String,
+    #[serde(default)]
+    pub pk: bool,
+    #[serde(default)]
+    pub fk: bool,
+}
+
+#[derive(Deserialize)]
+struct Colunas {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    colunas: Vec<ColunaTabela>,
+}
+
+fn caminho_arvore(id: i64, nivel: &str, banco: &str, esquema: &str, objeto: &str) -> String {
+    format!("/v1/conexoes/{id}/arvore?nivel={nivel}&banco={}&esquema={}&objeto={}", codificar_url(banco), codificar_url(esquema), codificar_url(objeto))
+}
+
+pub fn bancos_do_servidor(id: i64) -> Result<Nomes, ErroBanco> {
+    chamar_banco("GET", &caminho_arvore(id, "bancos", "", "", ""), None, 70)
+}
+
+pub fn esquemas(id: i64, banco: &str) -> Result<Nomes, ErroBanco> {
+    chamar_banco("GET", &caminho_arvore(id, "esquemas", banco, "", ""), None, 70)
+}
+
+pub fn objetos(id: i64, banco: &str, esquema: &str) -> Result<Objetos, ErroBanco> {
+    chamar_banco("GET", &caminho_arvore(id, "objetos", banco, esquema, ""), None, 70)
+}
+
+pub fn colunas_da_tabela(id: i64, banco: &str, esquema: &str, objeto: &str) -> Result<Vec<ColunaTabela>, ErroBanco> {
+    chamar_banco::<Colunas>("GET", &caminho_arvore(id, "colunas", banco, esquema, objeto), None, 70).map(|c| c.colunas)
+}
+
+#[derive(Deserialize)]
+pub struct PreviaTabela {
+    pub resultado: Resultado,
+}
+
+pub fn previa_tabela(id: i64, banco: &str, esquema: &str, objeto: &str) -> Result<PreviaTabela, ErroBanco> {
+    chamar_banco("POST", &format!("/v1/conexoes/{id}/previa"), Some(json!({ "banco": banco, "esquema": esquema, "objeto": objeto })), 45)
+}
+
+/// Uma execução no console: espera até o tempo-limite (mais uma folga).
+pub struct Execucao<'a> {
+    pub ficha: &'a str,
+    pub sql: &'a str,
+    pub banco: &'a str,
+    pub limite: u32,
+    pub tempo_s: u32,
+    pub confirmar: &'a str,
+}
+
+pub fn executar(id: i64, e: &Execucao) -> Result<Resultado, ErroBanco> {
+    let corpo = json!({ "ficha": e.ficha, "sql": e.sql, "banco": e.banco, "limite": e.limite, "tempo_s": e.tempo_s, "confirmar": e.confirmar });
+    chamar_banco("POST", &format!("/v1/conexoes/{id}/execucoes"), Some(corpo), e.tempo_s as u64 + 10)
+}
+
+pub fn carregar_mais(ficha: &str, limite: u32, tempo_s: u32) -> Result<Resultado, ErroBanco> {
+    chamar_banco("GET", &format!("/v1/execucoes/{}/mais?limite={limite}", codificar_url(ficha)), None, tempo_s as u64 + 10)
+}
+
+pub fn cancelar_execucao(ficha: &str) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/execucoes/{}", codificar_url(ficha)), None).map(|_| ())
+}
+
+/// Uma linha do histórico de consultas da conexão.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ConsultaFeita {
+    pub id: i64,
+    pub sql: String,
+    #[serde(default)]
+    pub banco: String,
+    /// "voce" ou "agente".
+    #[serde(default)]
+    pub origem: String,
+    #[serde(default)]
+    pub agente_id: i64,
+    #[serde(default)]
+    pub momento: String,
+    #[serde(default)]
+    pub duracao_ms: i64,
+    #[serde(default)]
+    pub linhas: i64,
+    #[serde(default)]
+    pub erro: bool,
+    #[serde(default)]
+    pub altera: bool,
+    /// Pedido do agente: "aprovada", "recusada", "expirou" ou "cancelada".
+    #[serde(default)]
+    pub resultado: String,
+    /// "14:32" hoje, "02/10" antes.
+    #[serde(default)]
+    pub hora: String,
+}
+
+#[derive(Deserialize)]
+struct Historico {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    consultas: Vec<ConsultaFeita>,
+}
+
+pub fn historico(id: i64) -> Result<Vec<ConsultaFeita>, String> {
+    chamar::<Historico>("GET", &format!("/v1/conexoes/{id}/historico"), None).map(|h| h.consultas)
+}
+
+pub fn limpar_historico(id: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/conexoes/{id}/historico"), None).map(|_| ())
+}
+
+/// Um pedido de consulta de um agente, esperando você.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Aprovacao {
+    pub id: String,
+    pub conexao_id: i64,
+    pub conexao: String,
+    #[serde(default)]
+    pub tipo: String,
+    pub agente_id: i64,
+    pub tarefa_id: i64,
+    /// "Claude Code (dev)".
+    #[serde(default)]
+    pub agente: String,
+    #[serde(default)]
+    pub tarefa: String,
+    pub sql: String,
+    #[serde(default)]
+    pub banco: String,
+    #[serde(default)]
+    pub limite: i64,
+    #[serde(default)]
+    pub criada_hora: String,
+    #[serde(default)]
+    pub expira_hora: String,
+    #[serde(default)]
+    pub precisa_senha: bool,
+}
+
+/// Aprovar (com a senha, se faltar) ou recusar (com um motivo opcional).
+pub fn responder_aprovacao(id: &str, aprovar: bool, motivo: &str, senha: &str, guardar: bool) -> Result<(), String> {
+    let corpo = json!({ "aprovar": aprovar, "motivo": motivo, "senha": senha, "guardar": guardar });
+    chamar::<serde_json::Value>("POST", &format!("/v1/aprovacoes/{}", codificar_url(id)), Some(corpo)).map(|_| ())
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -1247,5 +1667,39 @@ mod testes {
         assert!(erro_de_conexao("núcleo indisponível: No such file or directory (os error 2)"));
         assert!(!erro_de_conexao("O período pode ter no máximo 92 dias."));
         assert!(erro_inesperado(&inesperada("/v1/x?y=1", "invalid type")));
+    }
+}
+
+#[cfg(test)]
+mod testes_bancos {
+    use super::*;
+
+    #[test]
+    fn resultado_com_null_e_afetadas() {
+        let r: Resultado =
+            serde_json::from_str(r#"{"colunas":[{"nome":"id","tipo":"int4","numero":true}],"linhas":[["1"],[null]],"mais":true,"ms":3,"verbo":"SELECT"}"#)
+                .unwrap();
+        assert_eq!(r.linhas[1][0], None);
+        assert!(r.mais && r.colunas[0].numero && r.afetadas.is_none());
+        let r: Resultado = serde_json::from_str(r#"{"colunas":[],"linhas":[],"mais":false,"ms":3,"afetadas":12,"verbo":"UPDATE","altera":true}"#).unwrap();
+        assert_eq!(r.afetadas, Some(12));
+    }
+
+    #[test]
+    fn senha_recusada_vem_marcada() {
+        let f: FalhaBanco = serde_json::from_str(r#"{"erro":"Usuário ou senha recusados.","detalhe":"Error 1045","senha_recusada":true}"#).unwrap();
+        assert!(f.senha_recusada);
+        let f: FalhaBanco = serde_json::from_str(r#"{"erro":"Não conectou.","detalhe":"x"}"#).unwrap();
+        assert!(!f.senha_recusada);
+    }
+
+    #[test]
+    fn campos_vao_no_formato_do_nucleo() {
+        let c = CamposConexao { nome: "loja-web-dev".into(), tipo: "postgres".into(), porta: 5432, ..Default::default() };
+        let v = corpo_conexao(&c, Some("x"), true);
+        assert_eq!(v["nome"], "loja-web-dev");
+        assert_eq!(v["ssl_ca"], "");
+        assert_eq!(v["senha"], "x");
+        assert!(corpo_conexao(&c, None, false).get("senha").is_none());
     }
 }

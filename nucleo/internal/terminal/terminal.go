@@ -136,6 +136,21 @@ func (s *Sessao) avisar(m Mudanca) {
 	}
 }
 
+// Segurar deixa o agente em "aguardando" com o motivo dado (um pedido dele
+// espera a sua aprovação na tela); Soltar devolve. Num terminal sem
+// acompanhamento, não fazem nada.
+func (s *Sessao) Segurar(motivo string) {
+	if s.atividade != nil {
+		s.atividade.segurar(motivo)
+	}
+}
+
+func (s *Sessao) Soltar() {
+	if s.atividade != nil {
+		s.atividade.soltar()
+	}
+}
+
 // Estado diz o que o agente está fazendo agora e desde quando.
 func (s *Sessao) Estado() (estado, motivo string, desde time.Time) {
 	if s.atividade == nil {

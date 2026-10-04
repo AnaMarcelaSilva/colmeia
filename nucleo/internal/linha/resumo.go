@@ -114,7 +114,7 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 	ultimo := ""
 	for _, item := range itens {
 		dia := diaDe(item.quando, fuso)
-		if dia < hoje && dia >= limite && item.Tipo != TipoProjeto && dia > ultimo {
+		if dia < hoje && dia >= limite && item.Tipo != TipoProjeto && !deBanco(item.Tipo) && dia > ultimo {
 			ultimo = dia
 		}
 	}
@@ -535,3 +535,7 @@ func textosSprint(r ResumoSprint) (string, string) {
 	}
 	return strings.TrimRight(t.String(), "\n"), md.String()
 }
+
+// deBanco: suas consultas e alterações no banco não fazem de um dia um dia
+// de trabalho nas tarefas (o pedido do agente, numa tarefa, faz).
+func deBanco(tipo string) bool { return tipo == TipoBanco || tipo == TipoBancoAlteracao }

@@ -281,7 +281,11 @@ impl Registro {
                             None => {}
                         }
                     }
-                    Fileira::Perfil(d) => bloco_perfil(ui.painter(), rect, &dias[*d].perfil),
+                    Fileira::Perfil(d) => {
+                        if let Some(c) = bloco_perfil(ui, rect, &dias[*d].perfil) {
+                            acoes.push(Acao::AbrirBanco(c));
+                        }
+                    }
                     Fileira::Carregando => {
                         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Carregando dias anteriores…", FontId::proportional(12.5), p.suave);
                         pedir_mais = true;
@@ -505,14 +509,30 @@ fn tracejado(pintor: &egui::Painter, r: Rect, cor: egui::Color32) {
 }
 
 /// Eventos sem tarefa (projeto adicionado, perfil): uma linha cada, discreta.
-fn bloco_perfil(pintor: &egui::Painter, rect: Rect, itens: &[&api::ItemLinha]) {
+/// O bloco do que é do perfil (projetos, conexões de banco). Um item de
+/// banco é clicável: abre a tela de bancos nessa conexão.
+fn bloco_perfil(ui: &mut egui::Ui, rect: Rect, itens: &[&api::ItemLinha]) -> Option<i64> {
     let p = cores();
+    let pintor = ui.painter().clone();
     pintor.text(pos2(rect.left() + 2.0, rect.top() + LINHA_PERFIL / 2.0), egui::Align2::LEFT_CENTER, "Perfil e projetos", forte(12.0), p.suave);
+    let mut clicada = None;
     for (i, item) in itens.iter().enumerate() {
         let meio = rect.top() + LINHA_PERFIL * (i as f32 + 1.5) + 6.0;
+        let linha = Rect::from_min_max(pos2(rect.left(), meio - LINHA_PERFIL / 2.0), pos2(rect.right(), meio + LINHA_PERFIL / 2.0));
+        let mut cor = p.suave;
+        if item.conexao_id != 0 {
+            let r = ui.interact(linha, egui::Id::new(("item-perfil", item.evento, i)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if r.hovered() {
+                cor = p.texto;
+            }
+            if r.on_hover_text("Abrir nos bancos de dados").clicked() {
+                clicada = Some(item.conexao_id);
+            }
+        }
         pintor.text(pos2(rect.left() + 2.0, meio), egui::Align2::LEFT_CENTER, &item.hora, FontId::proportional(12.5), p.suave);
-        texto_cortado(pintor, pos2(rect.left() + 50.0, meio), &item.texto, FontId::proportional(12.5), p.suave, rect.width() - 52.0);
+        texto_cortado(&pintor, pos2(rect.left() + 50.0, meio), &item.texto, FontId::proportional(12.5), cor, rect.width() - 52.0);
     }
+    clicada
 }
 
 #[cfg(test)]

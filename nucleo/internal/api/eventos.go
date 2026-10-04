@@ -166,6 +166,10 @@ func (s *Servidor) Encerrar() {
 	if s.parado == nil {
 		return
 	}
+	if s.Bancos != nil {
+		s.cancelarAprovacoes()
+		s.Bancos.FecharTodas()
+	}
 	close(s.parado)
 	<-s.trabalhou
 }
@@ -346,6 +350,20 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 			m["pedido"] = p
 		}
 		return m
+	case "banco.conexao":
+		var d struct {
+			Acao      string `json:"acao"`
+			ConexaoID int64  `json:"conexao_id"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": "conexao.mudou", "acao": d.Acao, "conexao_id": d.ConexaoID}
+	case "banco.consulta", "banco.alteracao":
+		// Sem SQL nem resultado: a tela relê o histórico se estiver nele.
+		var d struct {
+			ConexaoID int64 `json:"conexao_id"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": "banco.consulta", "conexao_id": d.ConexaoID, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
 	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
 		var d struct {
 			Descricao string `json:"descricao"`
@@ -467,7 +485,8 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 			navegadores = append(navegadores, t.ID)
 		}
 	}
-	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores})
+	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores,
+		"aprovacoes": s.aprovacoesPendentes(id)})
 }
 
 // comEstado junta ao agente o que o núcleo sabe dele agora: se roda, em que

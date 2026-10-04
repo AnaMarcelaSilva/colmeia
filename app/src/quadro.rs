@@ -29,7 +29,7 @@ struct Arrastando(i64);
 /// que espera você (na demonstração, onde o motivo é fixo). Com um agente
 /// esperando, a coluna e a linha do agente já contam tudo.
 fn mostra_motivo(t: &Tarefa) -> bool {
-    t.motivo.is_some() && !t.agentes.iter().any(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez))
+    t.motivo.is_some() && !t.agentes.iter().any(|a| a.visual().espera_voce())
 }
 
 fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {

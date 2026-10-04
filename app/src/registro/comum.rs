@@ -114,6 +114,9 @@ pub fn ponto_do_tipo(tipo: &str) -> EstadoVisual {
         "pedido_entregue" => EstadoVisual::Trabalhando,
         "pedido_respondido" | "nota_agente" | "lousa" => EstadoVisual::Concluiu,
         "pedido_falhou" => EstadoVisual::Erro,
+        // Bancos de dados: a alteração em alerta; o pedido do agente como o pedido à daily.
+        "banco_alteracao" => EstadoVisual::Interrompido,
+        "banco_agente" => EstadoVisual::Concluiu,
         _ => EstadoVisual::Terminou,
     }
 }

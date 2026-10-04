@@ -43,7 +43,7 @@ pub fn estado_base<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, agentes_rodand
     let (mut erro, mut aguardando, mut trabalhando) = (false, false, false);
     for t in tarefas {
         erro |= t.erro.is_some() && !t.erro_visto;
-        aguardando |= t.coluna == Coluna::AguardandoVoce || t.agentes.iter().any(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez));
+        aguardando |= t.coluna == Coluna::AguardandoVoce || t.agentes.iter().any(|a| a.visual().espera_voce());
         trabalhando |= agentes_rodando && t.agentes.iter().any(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando);
     }
     if erro {
@@ -155,7 +155,7 @@ pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tar
             plural(n.max(1), "erro", "erros")
         }
         Estado::Aguardando => {
-            let n = agentes().filter(|a| matches!(a.visual(), EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez)).count();
+            let n = agentes().filter(|a| a.visual().espera_voce()).count();
             let n = n.max(tarefas.clone().filter(|t| t.coluna == Coluna::AguardandoVoce).count());
             plural(n, "esperando você", "esperando você")
         }
@@ -263,9 +263,9 @@ pub fn resumo(
                 let mut algum = false;
                 for a in &t.agentes {
                     let estado = a.visual();
-                    if matches!(estado, EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez) {
+                    if estado.espera_voce() {
                         algum = true;
-                        let acao = if estado == EstadoVisual::PedeAprovacao { "pede aprovação" } else { "espera sua resposta" };
+                        let acao = crate::dados::acao_de_espera(&a.motivo);
                         let desde = if a.desde.is_empty() { String::new() } else { format!(" · desde {}", a.desde) };
                         linha(
                             ui,

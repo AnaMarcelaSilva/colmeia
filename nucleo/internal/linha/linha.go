@@ -70,6 +70,8 @@ type Item struct {
 	Anexos    []int64 `json:"anexos,omitempty"`
 	// Videos são os anexos (de Anexos) que são vídeos: a tela não pede imagem deles.
 	Videos []int64 `json:"videos,omitempty"`
+	// ConexaoID: o item é de uma conexão de banco (o clique abre ela).
+	ConexaoID int64 `json:"conexao_id,omitempty"`
 	// Curto é o texto sem o nome da tarefa, para quando ela já aparece em
 	// volta (o cartão da tarefa na linha do tempo, o slide da apresentação).
 	Curto string `json:"curto,omitempty"`
@@ -122,6 +124,12 @@ const (
 	TipoNavegadorFechado = "navegador_fechado"
 	// O agente acrescentou itens à lousa da tarefa.
 	TipoLousa = "lousa"
+	// Bancos de dados: suas consultas (juntas por conexão e dia), suas
+	// alterações e as conexões criadas ou removidas.
+	TipoBanco          = "banco"
+	TipoBancoAlteracao = "banco_alteracao"
+	// Um pedido de consulta do agente: aprovado, recusado ou expirado.
+	TipoBancoAgente = "banco_agente"
 )
 
 type Dia struct {
@@ -174,6 +182,14 @@ type conteudo struct {
 	NaLousa      bool   `json:"na_lousa"`
 	Quantidade   int    `json:"quantidade"`
 	Lousa        int64  `json:"lousa"`
+	// Bancos de dados.
+	ConexaoID      int64  `json:"conexao_id"`
+	Conexao        string `json:"conexao"`
+	Acao           string `json:"acao"`
+	Verbo          string `json:"verbo"`
+	Linhas         int64  `json:"linhas"`
+	LinhasAfetadas int64  `json:"linhas_afetadas"`
+	Resultado      string `json:"resultado"`
 }
 
 type tarefaNoEvento struct {
@@ -194,6 +210,7 @@ type montador struct {
 	videos   map[int64]int  // tarefa → índice do último vídeo
 	notas    map[string]int // tarefa e tipo → índice da última nota
 	lousas   map[int64]int  // agente → índice do último acréscimo à lousa
+	bancos   map[string]int // conexão e dia → índice das suas consultas
 	abertas  map[int64]int  // agente → índice da sessão sem fim
 	// Todas as mudanças de coluna, inclusive as automáticas (que não viram
 	// item): a sprint refaz por elas onde cada tarefa estava no fim do período.
@@ -212,7 +229,7 @@ func novoMontador(c Contexto) *montador {
 		c.Fuso = time.Local
 	}
 	m := &montador{c: c, titulos: map[int64]string{}, projetos: map[int64]string{}, movendo: map[int64]int{}, captura: map[int64]int{}, abertas: map[int64]int{},
-		videos: map[int64]int{}, notas: map[string]int{}, lousas: map[int64]int{}}
+		videos: map[int64]int{}, notas: map[string]int{}, lousas: map[int64]int{}, bancos: map[string]int{}}
 	for id, nome := range c.Projetos {
 		m.projetos[id] = nome
 	}
@@ -335,6 +352,10 @@ func (m *montador) passar(e dados.Evento) {
 		if desde.IsZero() {
 			desde = quando
 		}
+		// A hora do item é a mesma do texto ("esperando você desde 14:26" às 14:26).
+		if desde.After(item.quando) {
+			item.quando = desde
+		}
 		item.Texto = agente(d.Ferramenta, d.Papel) + agoraFaz + m.cita(tarefa, projeto) + " desde " + desde.In(m.c.Fuso).Format("15:04") + "."
 		item.Curto = agente(d.Ferramenta, d.Papel) + strings.TrimSuffix(agoraFaz, " em ") + " desde " + desde.In(m.c.Fuso).Format("15:04") + "."
 		m.abertas[e.Escopo.Agente] = len(m.itens) - 1
@@ -436,6 +457,8 @@ func (m *montador) passar(e dados.Evento) {
 		item.quantidade = d.Quantidade
 		item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), d.Quantidade, m.cita(tarefa, projeto))
 		m.lousas[agenteDoEvento] = len(m.itens) - 1
+	case "banco.conexao", "banco.consulta", "banco.alteracao":
+		m.banco(e, quando, d)
 	case "navegador.aberto", "navegador.captura", "navegador.fechado", "navegador.recusado":
 		if d.Titulo != "" {
 			m.titulos[tarefa] = d.Titulo
@@ -506,6 +529,74 @@ func (m *montador) pedido(e dados.Evento, quando time.Time, d conteudo) {
 	}
 	item := m.novo(e, quando, tipo)
 	item.Texto, item.Curto = texto, curto
+}
+
+// banco monta as linhas dos bancos de dados (sem SQL nem resultado: o
+// evento não tem). Suas consultas do mesmo dia na mesma conexão viram uma linha.
+func (m *montador) banco(e dados.Evento, quando time.Time, d conteudo) {
+	tarefa, projeto := e.Escopo.Tarefa, e.Escopo.Projeto
+	if d.Titulo != "" && tarefa != 0 {
+		m.titulos[tarefa] = d.Titulo
+	}
+	nome := cmpOr(d.Conexao, d.Nome, "sem nome")
+	switch e.Tipo {
+	case "banco.conexao":
+		var texto string
+		switch d.Acao {
+		case "criada":
+			texto = "Criou a conexão de banco " + nome + "."
+		case "removida":
+			texto = "Removeu a conexão de banco " + nome + "."
+		default:
+			return // editar a conexão é só ajuste
+		}
+		item := m.novo(e, quando, TipoBanco)
+		item.Texto, item.Curto, item.ConexaoID = texto, texto, d.ConexaoID
+	case "banco.alteracao":
+		texto := fmt.Sprintf("Alterou o banco %s: %s, %s.", nome, d.Verbo, plural(int(d.LinhasAfetadas), "linha", "linhas"))
+		if d.Erro {
+			texto = fmt.Sprintf("Tentou alterar o banco %s (%s) e deu erro.", nome, d.Verbo)
+		}
+		item := m.novo(e, quando, TipoBancoAlteracao)
+		item.Texto, item.Curto, item.ConexaoID = texto, texto, d.ConexaoID
+	case "banco.consulta":
+		if e.Escopo.Agente == 0 {
+			chave := fmt.Sprintf("%d/%s", d.ConexaoID, diaDe(quando, m.c.Fuso))
+			if i, ok := m.bancos[chave]; ok && !m.itens[i].descartado {
+				item := &m.itens[i]
+				item.quantidade++
+				item.quando, item.Momento, item.Evento = quando, e.Momento, e.ID
+				item.Texto = fmt.Sprintf("Consultou o banco %s (%d vezes).", nome, item.quantidade)
+				item.Curto = item.Texto
+				return
+			}
+			item := m.novo(e, quando, TipoBanco)
+			item.quantidade, item.ConexaoID = 1, d.ConexaoID
+			item.Texto = "Consultou o banco " + nome + "."
+			item.Curto = item.Texto
+			m.bancos[chave] = len(m.itens) - 1
+			return
+		}
+		quem := agente(d.Ferramenta, d.Papel)
+		var curto string
+		switch d.Resultado {
+		case "aprovada":
+			curto = quem + " consultou o banco " + nome + " (aprovado por você)"
+			if d.Erro {
+				curto = quem + " consultou o banco " + nome + " (aprovado por você), mas deu erro"
+			}
+		case "recusada":
+			curto = "Você recusou uma consulta do " + quem + " no banco " + nome
+		case "expirou":
+			curto = "Uma consulta do " + quem + " no banco " + nome + " expirou sem resposta"
+		default:
+			curto = "Uma consulta do " + quem + " no banco " + nome + " foi cancelada"
+		}
+		item := m.novo(e, quando, TipoBancoAgente)
+		item.ConexaoID = d.ConexaoID
+		item.Curto = curto + "."
+		item.Texto = curto + " em " + m.cita(tarefa, projeto) + "."
+	}
 }
 
 // textoLousa: "Claude Code (dev) acrescentou 6 itens à lousa de “X”."
@@ -665,6 +756,9 @@ func (m *montador) montar(eventos []dados.Evento) []Item {
 		}
 		lista = append(lista, item)
 	}
+	// Itens juntados (consultas do dia, movimentos, lousa) ficam com a hora
+	// do último evento: a ordem segue essa hora.
+	sort.SliceStable(lista, func(i, j int) bool { return lista[i].quando.Before(lista[j].quando) })
 	return lista
 }
 

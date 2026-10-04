@@ -67,16 +67,26 @@ mod unix {
 
     /// Pedido HTTP com corpo JSON opcional; devolve o status e o corpo.
     pub fn pedir_com_corpo(metodo: &str, caminho: &str, corpo: Option<&str>) -> Result<(u16, String), String> {
-        let (status, corpo) = pedir_bytes(metodo, caminho, "application/json", corpo.unwrap_or("").as_bytes())?;
+        pedir_com_corpo_ate(metodo, caminho, corpo, Duration::from_secs(10))
+    }
+
+    /// O mesmo, esperando a resposta até `espera` (uma consulta ao banco pode
+    /// levar o tempo-limite inteiro dela).
+    pub fn pedir_com_corpo_ate(metodo: &str, caminho: &str, corpo: Option<&str>, espera: Duration) -> Result<(u16, String), String> {
+        let (status, corpo) = pedir_bytes_ate(metodo, caminho, "application/json", corpo.unwrap_or("").as_bytes(), espera)?;
         Ok((status, String::from_utf8_lossy(&corpo).into_owned()))
     }
 
     /// Pedido HTTP com corpo em bytes (uma imagem, por exemplo); devolve o
     /// status e o corpo da resposta, também em bytes.
     pub fn pedir_bytes(metodo: &str, caminho: &str, tipo: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        pedir_bytes_ate(metodo, caminho, tipo, corpo, Duration::from_secs(10))
+    }
+
+    fn pedir_bytes_ate(metodo: &str, caminho: &str, tipo: &str, corpo: &[u8], espera: Duration) -> Result<(u16, Vec<u8>), String> {
         let mut fluxo = conectar().map_err(|e| format!("núcleo indisponível: {e}"))?;
         let token = ler_token().map_err(|e| format!("sem token do núcleo: {e}"))?;
-        fluxo.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        fluxo.set_read_timeout(Some(espera)).ok();
         let cabecalho = format!(
             "{metodo} {caminho} HTTP/1.0\r\nHost: colmeia\r\nAuthorization: Bearer {token}\r\nContent-Type: {tipo}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             corpo.len()
@@ -203,6 +213,9 @@ mod outros {
         Err(AVISO.into())
     }
     pub fn pedir_com_corpo(_: &str, _: &str, _: Option<&str>) -> Result<(u16, String), String> {
+        Err(AVISO.into())
+    }
+    pub fn pedir_com_corpo_ate(_: &str, _: &str, _: Option<&str>, _: std::time::Duration) -> Result<(u16, String), String> {
         Err(AVISO.into())
     }
     pub fn pedir_bytes(_: &str, _: &str, _: &str, _: &[u8]) -> Result<(u16, Vec<u8>), String> {

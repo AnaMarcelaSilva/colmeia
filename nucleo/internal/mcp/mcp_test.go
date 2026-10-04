@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // nucleoFalso guarda os pedidos e responde como o núcleo.
@@ -17,7 +18,7 @@ type nucleoFalso struct {
 	corpos  []any
 }
 
-func (n *nucleoFalso) Pedir(_ context.Context, metodo, caminho string, corpo any) (int, []byte, error) {
+func (n *nucleoFalso) Pedir(ctx context.Context, metodo, caminho string, corpo any) (int, []byte, error) {
 	n.mu.Lock()
 	n.pedidos = append(n.pedidos, metodo+" "+caminho)
 	n.corpos = append(n.corpos, corpo)
@@ -35,6 +36,14 @@ func (n *nucleoFalso) Pedir(_ context.Context, metodo, caminho string, corpo any
 		return 200, []byte(`{"lousa":3,"elementos":[{"id":1,"tipo":"nota","texto":"Fluxo da tela"}]}`), nil
 	case caminho == "/v1/agente/lousa/elementos":
 		return 200, []byte(`{"lousa":3,"ids":[7,8,9],"refs":{"a":7,"b":8}}`), nil
+	case caminho == "/v1/agente/bancos":
+		return 200, []byte(`{"conexoes":[{"id":4,"nome":"loja-web-dev","tipo":"postgres","banco":"loja"}]}`), nil
+	case caminho == "/v1/agente/bancos/4/consultas":
+		return 200, []byte(`{"texto":"1 linhas · 3 ms\nid | total\n1 | 10.50\n","linhas":1}`), nil
+	case caminho == "/v1/agente/bancos/5/consultas":
+		// Espera a aprovação até a chamada ser cancelada.
+		<-ctx.Done()
+		return 0, nil, ctx.Err()
 	}
 	return 404, []byte(`{"erro":"não encontrado"}`), nil
 }
@@ -127,7 +136,7 @@ func TestServidorMCP(t *testing.T) {
 	for _, f := range ferramentas {
 		nomes = append(nomes, f.(map[string]any)["name"].(string))
 	}
-	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa" {
+	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,listar_bancos,consultar_banco" {
 		t.Errorf("ferramentas: %v", nomes)
 	}
 
@@ -221,4 +230,40 @@ func TestServidorMCP(t *testing.T) {
 	if err := <-c.fim; err != nil {
 		t.Errorf("fim: %v", err)
 	}
+}
+
+func TestConsultarBancoECancelar(t *testing.T) {
+	nucleo := &nucleoFalso{}
+	c := conectar(t, nucleo)
+	if texto, erro := resultado(t, c.chamar(1, "listar_bancos", `{}`)); erro || !strings.Contains(texto, "loja-web-dev") {
+		t.Errorf("listar_bancos: %q %v", texto, erro)
+	}
+	if texto, erro := resultado(t, c.chamar(2, "consultar_banco", `{"conexao":4,"sql":"SELECT id, total FROM pedidos"}`)); erro || !strings.Contains(texto, "1 | 10.50") {
+		t.Errorf("consultar_banco: %q %v", texto, erro)
+	}
+	if _, erro := resultado(t, c.chamar(3, "consultar_banco", `{"conexao":4}`)); !erro {
+		t.Error("sem SQL")
+	}
+	// Uma consulta esperando aprovação não segura as outras chamadas, e o
+	// cancelamento do cliente chega ao núcleo.
+	c.mandar(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"consultar_banco","arguments":{"conexao":5,"sql":"SELECT 1"}}}`)
+	c.mandar(`{"jsonrpc":"2.0","id":5,"method":"ping"}`)
+	if r := c.receber(); r["id"] != 5.0 {
+		t.Fatalf("o ping esperou a consulta: %v", r)
+	}
+	c.mandar(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4,"reason":"Esc"}}`)
+	r := c.receber()
+	if r["id"] != 4.0 {
+		t.Fatalf("resposta da cancelada: %v", r)
+	}
+	if _, erro := resultado(t, r); !erro {
+		t.Error("cancelada volta como erro")
+	}
+	for _, f := range Ferramentas {
+		if f.Nome == "consultar_banco" && f.prazo < 5*time.Minute {
+			t.Errorf("o prazo da consulta precisa cobrir a aprovação: %v", f.prazo)
+		}
+	}
+	c.envia.Close()
+	<-c.fim
 }

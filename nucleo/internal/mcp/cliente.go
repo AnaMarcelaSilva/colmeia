@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 )
 
 // ClienteSocket fala com o núcleo pelo socket local, com o token do agente.
@@ -18,9 +17,9 @@ type ClienteSocket struct {
 
 // NovoClienteSocket prepara o cliente para o socket do núcleo.
 func NovoClienteSocket(socket, token string) *ClienteSocket {
+	// Sem prazo fixo aqui: cada ferramenta tem o seu, no contexto da chamada
+	// (uma consulta ao banco espera a aprovação do usuário por minutos).
 	return &ClienteSocket{Token: token, http: &http.Client{
-		// O navegador pode levar uns segundos para abrir e carregar a página.
-		Timeout: 60 * time.Second,
 		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)

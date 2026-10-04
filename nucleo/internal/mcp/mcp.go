@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MaxLinha aceita do cliente.
@@ -38,7 +39,17 @@ type Servidor struct {
 
 	muSaida sync.Mutex
 	saida   io.Writer
+
+	// Chamadas em andamento (cada uma na sua goroutine), pelo id do
+	// pedido: notifications/cancelled cancela a chamada.
+	muChamadas sync.Mutex
+	chamadas   map[string]context.CancelFunc
+	andamento  sync.WaitGroup
 }
+
+// PrazoPadrao de uma ferramenta (o navegador pode levar uns segundos para
+// abrir e carregar a página).
+const PrazoPadrao = 60 * time.Second
 
 type mensagem struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -61,12 +72,16 @@ const (
 	instrucoesGerais = "Ferramentas da Colmeia para a tarefa em que você trabalha: ler a tarefa e a nota da daily ou da sprint, " +
 		"complementar a nota com o que foi pedido, anexar imagens, abrir e capturar o navegador da tarefa e ler e acrescentar itens à lousa (quadro livre) da tarefa. " +
 		"Quando um pedido da daily chegar no terminal, responda pela nota (complementar_nota com o número do pedido), " +
-		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide."
+		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide. " +
+		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar)."
 )
 
 // Servir lê os pedidos até o fim da entrada.
 func (s *Servidor) Servir(ctx context.Context, entrada io.Reader, saida io.Writer) error {
 	s.saida = saida
+	s.chamadas = map[string]context.CancelFunc{}
+	// No fim da entrada, espera as chamadas em andamento responderem.
+	defer s.andamento.Wait()
 	leitor := bufio.NewReaderSize(entrada, 64<<10)
 	for {
 		linha, grande, err := lerLinha(leitor)
@@ -145,7 +160,19 @@ func (s *Servidor) tratar(ctx context.Context, linha []byte) {
 		return // resposta a um pedido nosso (não fazemos nenhum)
 	}
 	if notificacao {
-		return // notifications/initialized, notifications/cancelled: nada a fazer
+		if m.Metodo == "notifications/cancelled" {
+			var p struct {
+				ID json.RawMessage `json:"requestId"`
+			}
+			if json.Unmarshal(m.Params, &p) == nil {
+				s.muChamadas.Lock()
+				if cancelar := s.chamadas[string(p.ID)]; cancelar != nil {
+					cancelar()
+				}
+				s.muChamadas.Unlock()
+			}
+		}
+		return // notifications/initialized: nada a fazer
 	}
 	switch m.Metodo {
 	case "initialize":
@@ -183,12 +210,32 @@ func (s *Servidor) tratar(ctx context.Context, linha []byte) {
 			s.responderErro(m.ID, erroParametros, "ferramenta desconhecida: "+p.Nome)
 			return
 		}
-		conteudo, err := f.chamar(ctx, s.Nucleo, p.Argumentos)
-		if err != nil {
-			s.responder(m.ID, map[string]any{"content": []any{texto(err.Error())}, "isError": true})
-			return
+		prazo := f.prazo
+		if prazo == 0 {
+			prazo = PrazoPadrao
 		}
-		s.responder(m.ID, map[string]any{"content": conteudo})
+		// Cada chamada na sua goroutine: uma consulta esperando aprovação não
+		// segura as outras nem o cancelamento.
+		chamada, cancelar := context.WithTimeout(ctx, prazo)
+		s.muChamadas.Lock()
+		s.chamadas[string(m.ID)] = cancelar
+		s.muChamadas.Unlock()
+		s.andamento.Add(1)
+		go func() {
+			defer s.andamento.Done()
+			defer func() {
+				s.muChamadas.Lock()
+				delete(s.chamadas, string(m.ID))
+				s.muChamadas.Unlock()
+				cancelar()
+			}()
+			conteudo, err := f.chamar(chamada, s.Nucleo, p.Argumentos)
+			if err != nil {
+				s.responder(m.ID, map[string]any{"content": []any{texto(err.Error())}, "isError": true})
+				return
+			}
+			s.responder(m.ID, map[string]any{"content": conteudo})
+		}()
 	default:
 		s.responderErro(m.ID, erroMetodo, "método desconhecido: "+m.Metodo)
 	}
@@ -203,6 +250,8 @@ type Ferramenta struct {
 	Descricao string         `json:"description"`
 	Entrada   map[string]any `json:"inputSchema"`
 	chamar    func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error)
+	// prazo da chamada (0: PrazoPadrao).
+	prazo time.Duration
 }
 
 // argumentos lê os argumentos estritamente: campo desconhecido é erro.
@@ -467,6 +516,59 @@ var Ferramentas = []Ferramenta{
 			ids, _ := r["ids"].([]any)
 			bruto, _ := json.Marshal(map[string]any{"ids": ids, "refs": r["refs"]})
 			return []any{texto(fmt.Sprintf("Acrescentei %d itens à lousa da tarefa: %s", len(ids), bruto))}, nil
+		},
+	},
+	{
+		Nome: "listar_bancos", Titulo: "Listar os bancos de dados",
+		Descricao: "Lista as conexões de banco de dados do usuário liberadas para agentes (id, nome, tipo e banco padrão). Use o id em consultar_banco.",
+		Entrada:   objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/bancos", nil)
+			if err != nil {
+				return nil, err
+			}
+			if lista, _ := r["conexoes"].([]any); len(lista) == 0 {
+				return []any{texto("Nenhuma conexão liberada para agentes. Peça ao usuário para ligar “Agentes podem pedir consultas” na conexão, na tela Bancos de dados da Colmeia.")}, nil
+			}
+			return comoTexto(r), nil
+		},
+	},
+	{
+		Nome: "consultar_banco", Titulo: "Consultar um banco de dados",
+		Descricao: "Executa uma consulta SOMENTE LEITURA (um SELECT, WITH, SHOW, EXPLAIN...) numa conexão de listar_bancos. O usuário vê a instrução na tela e aprova " +
+			"ou recusa cada uma; a resposta pode levar alguns minutos. Uma instrução por vez, até 200 linhas e 64 KB de resposta. Prefira consultas pequenas, " +
+			"com as colunas e o LIMIT necessários. Alterações (INSERT, UPDATE, DDL...) são recusadas.",
+		Entrada: objeto(map[string]any{
+			"conexao": map[string]any{"type": "integer", "description": "O id da conexão (de listar_bancos)."},
+			"sql":     map[string]any{"type": "string", "description": "A instrução, só de leitura."},
+			"banco":   map[string]any{"type": "string", "description": "Banco do servidor (opcional; sem ele, o padrão da conexão)."},
+			"limite":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Máximo de linhas (padrão e máximo: 200)."},
+		}, "conexao", "sql"),
+		prazo: 6 * time.Minute,
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Conexao int64  `json:"conexao"`
+				SQL     string `json:"sql"`
+				Banco   string `json:"banco"`
+				Limite  int    `json:"limite"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if a.Conexao <= 0 || strings.TrimSpace(a.SQL) == "" {
+				return nil, errors.New("informe a conexão (id de listar_bancos) e o SQL")
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/bancos/"+strconv.FormatInt(a.Conexao, 10)+"/consultas",
+				map[string]any{"sql": a.SQL, "banco": a.Banco, "limite": a.Limite})
+			if err != nil {
+				return nil, err
+			}
+			resultado, _ := r["texto"].(string)
+			return []any{texto(resultado)}, nil
 		},
 	},
 }

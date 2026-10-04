@@ -28,7 +28,9 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | Eventos | WebSocket por perfil | Leva à tela, na hora, cada mudança e o estado dos agentes |
 | MCP dos agentes | `colmeia-nucleo mcp` (stdio) | O próprio núcleo como servidor MCP para os agentes do Claude Code que a Colmeia abre, restrito à tarefa de cada um |
 | Navegador | Chrome ou Chromium por `--remote-debugging-pipe` | Uma janela por tarefa, ao lado da Colmeia, para abrir e capturar o que o agente criou |
-| Extensões (planejado) | servidores MCP | Integrações (GitHub, Docker, banco) |
+| Bancos de dados | `database/sql` com pgx, go-sql-driver/mysql, go-mssqldb e o SQLite do modernc | Conexões do perfil só como cliente: árvore, console e consultas dos agentes com aprovação |
+| Chaveiro | Secret Service pelo D-Bus (go-keyring) | Onde ficam as senhas das conexões; sem ele, só na memória do núcleo |
+| Extensões (planejado) | servidores MCP | Integrações (GitHub, Docker) |
 
 ## Protocolo `/v1`
 
@@ -40,7 +42,7 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
 | `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`) ou o aviso antes de capturar (`aviso_captura`) |
-| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes}`, com o estado e o último fim de cada agente |
+| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=`, `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
 | `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto}`; aceita `projeto=` |
@@ -68,6 +70,17 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/tarefas/{id}/arquivo?caminho=&mostrar=` | Pré-visualização: texto (até 256 KB, `cortado`), imagem (dimensões e formato), `binario` ou `sensivel` (o conteúdo só vem com `mostrar=1`); sempre com `caminho_absoluto` |
 | `GET /v1/tarefas/{id}/arquivo/imagem?caminho=` | A imagem (PNG, JPEG ou GIF) como PNG reduzido a 2048 px |
 | `GET` / `POST` / `DELETE /v1/agentes/{id}/mensagens` | Histórico do que você mandou ao agente (da mais nova à mais antiga, até 200), guardar uma mensagem (`{"texto"}`, responde `{"guardada": bool}`: não guarda o que parece senha ou chave) e apagar tudo |
+| `GET` / `POST /v1/perfis/{id}/conexoes` | Conexões de banco do perfil (`{conexoes, chaveiro_disponivel}`; cada uma com `senha: "chaveiro"\|"memoria"\|"nenhuma"` e `senha_disponivel`, nunca a senha) e criar uma (`{pasta, nome, tipo, host, porta, usuario, banco, arquivo, ssl, ssl_ca, escrita, agentes, senha?, guardar}`) |
+| `GET` / `PATCH` / `DELETE /v1/conexoes/{id}` | Ler; editar (todos os campos, como no criar; a senha vazia ou ausente fica como estava; o tipo não muda) e fechar os pools; remover (a senha sai do chaveiro, o histórico de consultas vai junto, a linha do tempo fica) |
+| `PUT` / `DELETE /v1/conexoes/{id}/senha` | `{senha, guardar}`: guarda no chaveiro (se pedido e se houver) ou só na memória e responde `{senha: "chaveiro"\|"memoria"\|"nenhuma"}`. Sem chaveiro agora, uma conexão do chaveiro continua `chaveiro` (a senha fica na memória só nesta sessão). Apagar tira do chaveiro e da memória (a próxima conexão pergunta) |
+| `POST /v1/perfis/{id}/conexoes/testar` · `POST /v1/conexoes/{id}/testar` | Testa um rascunho (senha no corpo; vazia com `conexao_id`, vale a salva) ou a conexão salva, numa conexão avulsa: `{ok, ms, servidor, tls}` ou `{ok: false, erro, detalhe}` (a frase simples e a mensagem do driver sem a senha) |
+| `POST /v1/conexoes/{id}/desconectar` | Fecha os pools e as execuções da conexão |
+| `GET /v1/conexoes/{id}/arvore?nivel=bancos\|esquemas\|objetos\|colunas&banco=&esquema=&objeto=` | Um nível da árvore: `{nomes, padrao}`, `{nomes}`, `{tabelas, views, total, cortado}` (até 20.000 nomes) ou `{colunas: [{nome, tipo, pk, fk}]}` |
+| `POST /v1/conexoes/{id}/previa` | `{banco, esquema, objeto}`: confere no catálogo que o objeto existe, cita o nome e roda o `SELECT` das 100 primeiras linhas em leitura: `{resultado, sql}` |
+| `POST /v1/conexoes/{id}/execucoes` | `{ficha (16 a 64 letras, algarismos, - ou _), sql, banco?, limite (1 a 5000, padrão 500), tempo_s (1 a 600, padrão 30), confirmar?}`; espera terminar e responde `{colunas: [{nome, tipo, numero}], linhas, mais, ms, afetadas?, verbo, altera}` (cada célula é texto ou null, cortada em 4 KB; binário, inclusive bytes com caracteres de controle numa coluna que não é de texto, vira `<binário 12 KB>`). Uma alteração numa conexão só leitura: 403 `{somente_leitura}`; com escrita ligada e sem `confirmar`: 409 `{precisa_confirmar, verbo, sql, banco, sem_where, confirmacao}` (o nonce vale uma vez, por 2 min, preso a conexão, banco e SQL). Sem a senha: 428 `{precisa_senha}`; tempo esgotado ou cancelada: 422 `{tempo_esgotado}` / `{cancelada}`; erro do banco: 422 `{erro, linha?, do_servidor}`; usuário ou senha recusados pelo servidor: 422 `{erro, detalhe, senha_recusada}` (o 1044 do MySQL, senha aceita sem acesso ao banco, não leva `senha_recusada`). No histórico, a cancelada fica com `resultado: "cancelada"` |
+| `GET /v1/execucoes/{ficha}/mais?limite=` · `DELETE /v1/execucoes/{ficha}` | A próxima página da execução aberta (410 se ela já fechou: fica aberta até 2 min parada, uma por conexão); cancelar a que roda ou fechar a aberta |
+| `GET` / `DELETE /v1/conexoes/{id}/historico` | As últimas 200 consultas da conexão (com `hora` local) / apagar |
+| `GET /v1/perfis/{id}/aprovacoes` · `POST /v1/aprovacoes/{id}` | Os pedidos de consulta dos agentes esperando você; aprovar ou recusar (`{aprovar, motivo?, senha?, guardar?}`: o motivo, até 500 caracteres, vai só para o agente; a senha, quando falta, só para o chaveiro ou a memória). Uma senha recusada pelo servidor responde 422 `{erro, senha_recusada: true}` e o pedido continua pendente, com o mesmo prazo |
 | `POST /v1/encerrar` | Desliga o núcleo (responde 202 antes); é o que `colmeia-nucleo --encerrar` chama |
 | `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
 | `GET` / `POST /v1/perfis/{id}/workspaces` | Listar e criar workspaces |
@@ -96,6 +109,8 @@ Rotas dos agentes (`/v1/agente/*`): só aceitam o token de um agente, e o token 
 | `POST /v1/agente/navegador/captura` | `{anexar?, legenda?}`: o PNG reduzido a 1568 px (base64) e o id do anexo |
 | `POST /v1/agente/pedidos/{id}/concluir` | `{resumo?}`: só um pedido da tarefa do token; o resumo, se houver, complementa a nota |
 | `GET /v1/agente/lousa` | A lousa da tarefa do token: cada item com id, tipo, posição, tamanho, cor, título, texto, pontas e autor |
+| `GET /v1/agente/bancos` | As conexões do perfil com "Agentes podem pedir consultas": `{conexoes: [{id, nome, tipo, banco}]}`, sem host nem usuário |
+| `POST /v1/agente/bancos/{id}/consultas` | `{sql, banco?, limite? (até 200)}`: só leitura (uma alteração é recusada, mesmo com escrita ligada na conexão) e sem as funções que leem arquivos do servidor ou derrubam sessões. Cria o pedido, segura o agente em `aguardando · aprovar consulta` e espera a sua resposta por até 5 min (sem resposta, conta como recusa). Aprovada: `{texto, linhas, mais}`, com até 64 KB em colunas separadas por `\|`; recusada, expirada ou cancelada: 409 `{erro, resultado}` |
 | `POST /v1/agente/lousa/elementos` | `{elementos: [...]}`: até 50 itens (nota, texto, código, ligação e imagem de um anexo da própria tarefa), com `ref` local para as ligações; sem `x`/`y`, o núcleo põe numa grade à direita do que existe, e sem tamanho estima pelo texto. Só acrescenta; grava `lousa.agente` |
 
 Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
@@ -113,12 +128,15 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `tarefa.removida` | `tarefa_id`, `projeto_id` |
 | `agente.criado` / `agente.removido` | `agente` / `agente_id`, `tarefa_id` |
 | `agente.iniciou` | `agente_id`, `tarefa_id`, `desde`, `desde_hora` |
-| `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação` ou `esperando resposta`), `desde`, `desde_hora` |
+| `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação`, `esperando resposta` ou `aprovar consulta`), `desde`, `desde_hora` |
 | `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `hora`, `texto`) |
 | `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` (e `agente_id`, se veio de um agente) |
 | `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |
 | `pedido.criado` / `pedido.entregue` / `pedido.respondido` / `pedido.cancelado` / `pedido.falhou` | `pedido_id`, `tarefa_id`, `agente_id` e `pedido` (o objeto, lido na hora; no histórico só fica o tamanho do texto) |
 | `navegador.aberto` / `navegador.fechado` / `navegador.captura` / `navegador.recusado` | `tarefa_id`, `agente_id` (0 é você), `descricao` (esquema, host e caminho, nunca a query) |
+| `conexao.mudou` | `acao` (`criada`, `alterada`, `removida`) e `conexao_id`: a tela relê a lista de conexões |
+| `banco.consulta` | `conexao_id`, `tarefa_id`, `agente_id`: houve consulta ou alteração (sem SQL nem resultado); a tela relê o histórico se estiver nele |
+| `banco.aprovacao` | Fora da corrente (leva o SQL, que só vai para a tela): `acao: "pedida"` com `aprovacao` (`id, conexao_id, conexao, tipo, agente_id, tarefa_id, agente, tarefa, sql, banco, limite, criada_hora, expira, expira_hora, precisa_senha`) ou `acao: "resolvida"` com `aprovacao_id`, `resultado` (`aprovada`, `recusada`, `expirou`, `cancelada`), `linhas`, `ms`, `hora` e `erro` |
 | `lousa.mudou` | `lousa_id`, `dono` (`workspace_id` ou `tarefa_id`), `elementos` (os itens inteiros, com o texto) e `removidos`; com `agente_id` e `evento` quando foi o agente (o evento `lousa.agente` no histórico não tem texto). Mudanças da tela não ficam no histórico ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)) |
 
 Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). Para não perder nada: a tela abre o WebSocket, pede o `/quadro` (que traz o `seq` já incluído nele) e aplica só as mensagens com `seq` maior. Quem publica nunca espera: cada tela tem uma fila de 256 mensagens e, se ela encher, recebe um único `recarregar`. Tipos desconhecidos são ignorados pela tela.
@@ -143,6 +161,7 @@ O núcleo acompanha a saída de cada terminal sem varredura periódica: cada lei
 | `aguardando` · `pede aprovação` | 5 s sem saída e o que a ferramenta escreveu depois da sua última digitação termina com um pedido de aprovação conhecido |
 | `aguardando` · `esperando resposta` | 5 s sem saída numa ferramenta de IA, ou um BEL fora de OSC num terminal comum |
 | `ocioso` | Terminal comum 60 s sem saída |
+| `aguardando` · `aprovar consulta` | Um pedido de consulta ao banco do agente espera a sua aprovação. O núcleo segura o estado (`Segurar`/`Soltar`): a saída do spinner e o silêncio não mudam nada até você responder |
 
 O fim do processo vira `agente.terminou` com o motivo: `terminou` (código 0 ou 130, ou terminal comum), `interrompido` (sinal que não veio da Colmeia), `erro` (outro código numa ferramenta de IA), `removido` ou `nucleo_encerrado`.
 
@@ -156,7 +175,7 @@ Pela daily, pela sprint ou pela apresentação, você pede algo a mais ao agente
 
 Cada agente do Claude Code que a Colmeia abre ganha um token próprio (32 bytes aleatórios, guardado só em memória pelo sha256) e um `--mcp-config` com o servidor `colmeia`: o próprio `colmeia-nucleo mcp --socket … --token-arquivo …`, por stdio. O token fica num arquivo `0600` em `<canal>/agentes/` (tmpfs), nunca em argumento ou variável de ambiente, e é revogado quando o agente termina, é removido ou o núcleo encerra. A Colmeia passa também `--allowedTools mcp__colmeia`: tudo nelas já está confinado à tarefa. Os outros servidores MCP do usuário continuam valendo (sem `--strict-mcp-config`). Agentes que já rodavam antes desta versão ganham o MCP quando forem iniciados de novo.
 
-Ferramentas: `ler_tarefa`, `ler_nota`, `complementar_nota`, `escrever_nota`, `anexar_imagem`, `abrir_navegador`, `capturar_navegador`, `concluir_pedido`, `ler_lousa` e `acrescentar_a_lousa`. Os argumentos são estritos (campo desconhecido é erro) e cada linha tem até 1 MB.
+Ferramentas: `ler_tarefa`, `ler_nota`, `complementar_nota`, `escrever_nota`, `anexar_imagem`, `abrir_navegador`, `capturar_navegador`, `concluir_pedido`, `ler_lousa`, `acrescentar_a_lousa`, `listar_bancos` e `consultar_banco`. Os argumentos são estritos (campo desconhecido é erro) e cada linha tem até 1 MB. Cada chamada roda na sua goroutine, com o próprio prazo (60 s; 6 min em `consultar_banco`, que espera a sua aprovação), e `notifications/cancelled` cancela a chamada (o pedido de consulta some da tela). A configuração MCP passa `"timeout": 420000` ao Claude Code para ele esperar a aprovação.
 
 ### Lousa
 
@@ -167,6 +186,23 @@ O quadro livre de cada workspace e de cada tarefa. A tela desenha só o que apar
 Um Chrome ou Chromium por perfil (`COLMEIA_NAVEGADOR`, ou o primeiro de `chromium`, `chromium-browser`, `google-chrome-stable`, `google-chrome` no PATH), com a pasta de perfil `<dados>/navegador/<perfil>/` (0700), nunca a do usuário, e controle só por `--remote-debugging-pipe` (descritores 3 e 4, mensagens separadas por `\0`): nenhuma porta. O balão "Não é possível atualizar o Chrome" fica escondido nesse perfil (`--simulate-outdated-no-au` com uma data distante), porque cobria a página ao lado do agente. Cada tarefa tem a sua janela, posicionada ao lado da Colmeia (ou na metade direita do monitor); no Wayland o compositor pode ignorar a posição. Endereços aceitos: http, https e `file://` de dentro da pasta da tarefa, menos os arquivos sensíveis (os mesmos que a gaveta esconde: `.env*`, `*.pem`, `*.key`, `id_rsa*`…) e o `.git`. A conferência não vale só para o endereço aberto: todo `file://` que a página pede depois (redirecionamento, iframe, imagem, script) passa pela mesma regra pelo domínio `Fetch` do protocolo, e a captura confere o endereço atual da página antes de tirar o print; se a página saiu da pasta, a captura é recusada e vira `navegador.recusado` na linha do tempo. Enquanto a tela mostra algo que pode estar compartilhado (a apresentação, a Daily ou a Sprint), a janela que o agente abre fica fora da área visível (a captura continua funcionando) e vem para o lado quando você clica em "Navegador". Uma página aberta pode tentar instruir o agente (o mesmo risco do WebFetch); as ferramentas da Colmeia só agem dentro da tarefa.
 
 Um agente do Claude Code sempre tem um id de conversa: o de uma conversa retomada ou um novo, passado com `--session-id`. Ao iniciar de novo, a conversa que já existe é aberta com `--resume`. As conversas ficam onde o Claude Code guarda: `<configuração>/projects/<pasta com tudo que não é letra ou número trocado por "-">/<id>.jsonl`; a Colmeia lê só o fim de cada arquivo para achar o título.
+
+## Bancos de dados
+
+O núcleo conecta como cliente aos bancos das conexões do perfil, por `database/sql`: pgx (PostgreSQL), go-sql-driver/mysql (MySQL e MariaDB), go-mssqldb (SQL Server, experimental: só testado por unidade) e o SQLite do modernc, já usado pela Colmeia. Nada escuta porta.
+
+- **Configuração explícita.** O Postgres não deixa o ambiente do usuário entrar: o texto de conexão aceita só as chaves que a Colmeia monta, e depois de lido host, porta, banco, usuário, senha, TLS e parâmetros de sessão são fixados à mão (as `PG*`, o `~/.pgpass` e os certificados de cliente do ambiente não valem). O MySQL é montado por `mysql.Config`, sem DSN em texto, com `LOAD DATA LOCAL INFILE` desligado e sem várias instruções por chamada.
+- **TLS:** Desligado, Preferir (tenta com TLS e cai para texto puro; o "Testar" diz qual usou), Exigir (cifra sem conferir o certificado) e Verificar (confere com a CA indicada ou as do sistema e o nome do servidor).
+- **Pools** por (conexão, banco), com até 3 conexões, no máximo 4 bancos abertos por conexão; cada um fecha sozinho depois de 10 min sem uso (um timer rearmado a cada uso, sem varredura) e ao editar, remover, desconectar ou trocar a senha.
+- **Uma instrução por vez.** O leitor léxico de cada dialeto (aspas, crase, colchetes, `$tag$`, comentários `--`, `#` e `/* */`, inclusive o `/*!…*/` executável do MySQL) divide o texto, acha a instrução sob o cursor e classifica: lê quem começa por `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN` (sem `ANALYZE`), `VALUES`, `TABLE` ou um `PRAGMA` só de leitura e não tem, fora de texto, nenhuma palavra que altera (`INSERT`, `UPDATE`, `DELETE`, `INTO`, `SET`, `FOR UPDATE/SHARE`, `CALL`, `EXEC`…); o resto altera. Na dúvida, altera: o erro só faz aparecer uma confirmação a mais. A tela tem o mesmo leitor só para escolher o trecho e colorir.
+- **Leitura** roda numa transação só de leitura sempre desfeita no fim: `BEGIN READ ONLY` com `statement_timeout` no Postgres (e `default_transaction_read_only` na sessão de uma conexão sem escrita), `START TRANSACTION READ ONLY` com `max_execution_time` no MySQL, `BEGIN TRAN … ROLLBACK` no SQL Server e o arquivo aberto com `mode=ro` e `query_only` no SQLite. **Alteração** exige escrita ligada na conexão e a sua confirmação, e roda como instrução avulsa (assim `CREATE DATABASE` e `VACUUM` também rodam).
+- **Cancelar** cancela o contexto: o pgx manda o CancelRequest, o go-mssqldb o pacote de atenção e o SQLite interrompe; no MySQL, o núcleo roda `KILL QUERY` por outra conexão do pool, senão o servidor continuaria executando. O tempo-limite vale para cada página.
+- **Resultado** em páginas de até 5.000 linhas e 8 MB, cada célula como texto (até 4 KB) ou null; uma linha lida a mais diz se há mais sem errar no fim exato. A execução fica aberta para "carregar mais" até 2 min parada, uma por conexão.
+- **Erros** passam por um redator que troca a senha (se aparecer) por `***`; a tela recebe a frase simples ("Usuário ou senha recusados.", "Não achou o servidor host:porta.") e o detalhe do driver, e a posição do erro de SQL quando o servidor dá.
+
+**Senhas.** Ficam no chaveiro do sistema (Secret Service pelo D-Bus, serviço `Colmeia` ou `COLMEIA_CHAVEIRO_SERVICO`, conta `conexao:<uuid aleatório>`), com prazo de 30 s por chamada, porque o desbloqueio pode abrir uma janela e esperar. Sem chaveiro (ou com `COLMEIA_CHAVEIRO=memoria`), só na memória do núcleo, até ele encerrar. A coluna `senha` da conexão diz só onde ela está; remover a conexão apaga a entrada do chaveiro.
+
+**Consultas dos agentes.** O pedido fica em memória no núcleo (não na corrente, porque leva o SQL), aparece na tela pelo aviso `banco.aprovacao` (e no `/quadro`, para a tela que reconecta) e segura o agente em `aguardando · aprovar consulta`, que move o cartão para "Aguardando você". Aprovado, roda em leitura (30 s, até 200 linhas, resposta até 64 KB) mesmo que a conexão tenha escrita ligada. Sem aprovação automática nem escrita pelo agente. Veja a [decisão 0009](decisoes/0009-bancos-chaveiro-e-somente-leitura.md).
 
 ## Dados
 
@@ -186,11 +222,16 @@ lousas  (id, perfil_id, workspace_id, tarefa_id, criada_em)    -- um dono só (C
 lousa_elementos (id, lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto,
          anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, versao, atualizado_em)
          -- nota, texto, codigo, imagem, video, tarefa, ligacao; em unidades do quadro
+conexoes_banco (id, perfil_id, pasta, nome, tipo, host, porta, usuario, banco, arquivo,
+         ssl, ssl_ca, escrita, agentes, chave_segredo, senha, criada_em, atualizada_em)
+         -- senha diz onde ela está: chaveiro, memoria ou nenhuma (nunca a senha)
+consultas_banco (id, conexao_id, sql, banco, origem, agente_id, momento,
+         duracao_ms, linhas, erro, altera, resultado)   -- até 500 por conexão, apagável
 ```
 
 O hash cobre `anterior|momento|tipo|dados`. Os dados de cada evento começam com `"_escopo":{perfil, projeto, tarefa, agente}`, coberto pelo hash; as colunas derivadas repetem esse escopo para a linha do tempo de um perfil não ler o histórico inteiro, e a verificação confere que batem. Os eventos gravados antes delas foram ligados aos perfis uma única vez (`PRAGMA user_version = 2`), seguindo o próprio histórico: é a única exceção ao "só acréscimo", mexe só nas colunas derivadas e o que não dá para ligar fica sem perfil. As mudanças de tarefa guardam a tarefa inteira (com o título) e o nome do projeto: a linha do tempo não depende de a tarefa ainda existir.
 
-Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens, as notas e os pedidos ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A lousa também fica fora ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)): até 2.000 itens por lousa, texto de até 8.000 caracteres (título e rótulo até 120), sem caracteres de controle nem nada que pareça senha ou chave; apagar um item leva as ligações dele, e o cartão de uma tarefa apagada fica sem a tarefa ("Tarefa removida"). A versão 4 do banco (`PRAGMA user_version = 4`) criou as tabelas da lousa e a coluna `anexos.na_lousa`. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
+Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); a linha da tabela sobrevive à tarefa, como o evento. A versão 3 do banco (`PRAGMA user_version = 3`) refez a tabela `anexos` numa transação, com as chaves estrangeiras desligadas só durante a troca e conferidas antes do commit, para aceitar a origem `arquivo` e ganhar `tipo`, `formato` e `nome`; os ids e as linhas ficam iguais. As mensagens, as notas e os pedidos ficam fora da corrente de eventos, em tabelas que podem ser apagadas ([decisão 0006](decisoes/0006-apresentacao-e-historico.md)); a nota grava só um evento com o tamanho do texto. A lousa também fica fora ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)): até 2.000 itens por lousa, texto de até 8.000 caracteres (título e rótulo até 120), sem caracteres de controle nem nada que pareça senha ou chave; apagar um item leva as ligações dele, e o cartão de uma tarefa apagada fica sem a tarefa ("Tarefa removida"). A versão 4 do banco (`PRAGMA user_version = 4`) criou as tabelas da lousa e a coluna `anexos.na_lousa`. A versão 5 criou `conexoes_banco` e `consultas_banco`. O histórico de consultas fica fora da corrente (texto até 20.000 caracteres; o SQL que parece levar uma senha, como `CREATE USER … PASSWORD '…'`, roda mas não fica guardado); na corrente vão só `banco.conexao` (`{acao, conexao_id, nome, tipo}`), `banco.consulta` (`{conexao_id, conexao, tipo, verbo, linhas, ms, erro, origem}` e, de um agente, `resultado`) e `banco.alteracao` (`{…, linhas_afetadas}`), sem SQL nem resultado. A conta separada de uma ferramenta num perfil fica em `perfis/<id>/contas/<ferramenta>/`, apontada pela variável da própria ferramenta (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). As cópias isoladas ficam em `copias/<tarefa>-<branch>/`. Colunas novas entram por migração ao abrir o banco, sem perder o que já está gravado.
 
 ## Regras de desempenho
 
@@ -205,7 +246,7 @@ Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); 
 
 ## Fases
 
-1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa, lousa do workspace e da tarefa (feito no Linux; falta o Windows).
+1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa, lousa do workspace e da tarefa, conexões de banco por perfil com consultas dos agentes aprovadas por você (feito no Linux; falta o Windows).
 2. **Orquestração:** MCP para Codex, Gemini e OpenCode, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
-3. **Integrações:** servidores MCP de GitHub, Docker por branch e banco, tarefa a partir de link, tela de provedores.
+3. **Integrações:** servidores MCP de GitHub e Docker por branch, tarefa a partir de link, tela de provedores.
 4. **Expansão:** servidores de terceiros, "entender projeto", busca e replay, custos, acesso remoto e celular.

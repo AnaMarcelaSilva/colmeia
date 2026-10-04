@@ -91,6 +91,17 @@ impl EstadoAgente {
 
 /// Motivo fixo do núcleo para um agente esperar você.
 pub const PEDE_APROVACAO: &str = "pede aprovação";
+/// Motivo fixo enquanto um pedido de consulta ao banco do agente espera a sua aprovação.
+pub const APROVAR_CONSULTA: &str = "aprovar consulta";
+
+/// O que o agente espera de você, dito do jeito do cartão e da abelha.
+pub fn acao_de_espera(motivo: &str) -> &'static str {
+    match motivo {
+        PEDE_APROVACAO => "pede aprovação",
+        APROVAR_CONSULTA => "quer consultar o banco",
+        _ => "espera sua resposta",
+    }
+}
 
 /// Um agente da tarefa como a tela mostra. `id` também é a chave do terminal.
 #[derive(Clone, Debug)]
@@ -153,6 +164,7 @@ impl AgenteTela {
                 EstadoAgente::Trabalhando => EstadoVisual::Trabalhando,
                 EstadoAgente::Ocioso => EstadoVisual::Parado,
                 EstadoAgente::Aguardando if self.motivo == PEDE_APROVACAO => EstadoVisual::PedeAprovacao,
+                EstadoAgente::Aguardando if self.motivo == APROVAR_CONSULTA => EstadoVisual::PedeConsulta,
                 EstadoAgente::Aguardando => EstadoVisual::SuaVez,
             };
         }
@@ -170,6 +182,7 @@ impl AgenteTela {
         match self.visual() {
             EstadoVisual::Trabalhando => "Trabalhando".into(),
             EstadoVisual::PedeAprovacao => format!("Parece pedir aprovação{}", desde(&self.desde)),
+            EstadoVisual::PedeConsulta => format!("Quer consultar o banco{}", desde(&self.desde)),
             EstadoVisual::SuaVez => format!("Sua vez{}", desde(&self.desde)),
             EstadoVisual::Parado if self.desde.is_empty() => "Parado".into(),
             EstadoVisual::Parado => format!("Parado desde {}", self.desde),
@@ -194,6 +207,7 @@ impl AgenteTela {
         let hora = |h: &str| if h.is_empty() { String::new() } else { format!(" · {h}") };
         match self.visual() {
             EstadoVisual::PedeAprovacao => ("Pede aprovação".into(), hora(&self.desde)),
+            EstadoVisual::PedeConsulta => ("Quer consultar o banco".into(), hora(&self.desde)),
             EstadoVisual::SuaVez => ("Sua vez".into(), hora(&self.desde)),
             EstadoVisual::Parado => ("Parado".into(), hora(&self.desde)),
             _ => {
@@ -277,7 +291,7 @@ impl Tarefa {
     /// Calcula o aviso de espera e o de erro a partir dos agentes.
     pub fn derivar(&mut self) {
         let esperando = self.agentes.iter().find(|a| a.ativo && a.estado == EstadoAgente::Aguardando);
-        let acao = esperando.map(|a| if a.motivo == PEDE_APROVACAO { "pede aprovação" } else { "espera sua resposta" });
+        let acao = esperando.map(|a| acao_de_espera(&a.motivo));
         self.motivo = esperando.zip(acao).map(|(a, acao)| format!("{} {acao}", a.nome_com_papel()));
         self.motivo_acao = acao.unwrap_or_default().to_string();
         self.motivo_desde = esperando.map(|a| a.desde.clone()).unwrap_or_default();
@@ -305,6 +319,23 @@ pub struct Modelo {
     pub pedidos: Vec<api::Pedido>,
     /// Tarefas com o navegador da Colmeia aberto.
     pub navegadores: std::collections::HashSet<i64>,
+    /// Pedidos de consulta ao banco dos agentes, esperando você.
+    pub aprovacoes: Vec<api::Aprovacao>,
+    /// Como terminou o último pedido de cada agente (a linha que fica no
+    /// lugar do cartão de pedido, até o próximo).
+    pub resolvidas: std::collections::HashMap<i64, Resolvida>,
+}
+
+/// O desfecho de um pedido de consulta do agente.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resolvida {
+    pub tarefa: i64,
+    /// "aprovada", "recusada", "expirou" ou "cancelada".
+    pub resultado: String,
+    pub linhas: i64,
+    pub ms: i64,
+    pub hora: String,
+    pub erro: bool,
 }
 
 /// O que a tela principal precisa fazer depois de aplicar um evento.
@@ -322,6 +353,10 @@ pub enum Efeito {
     Recarregar,
     /// O agente respondeu um pedido (a nota e as capturas já chegaram).
     PedidoRespondido { tarefa: i64, agente: i64, titulo: String },
+    /// Um agente pediu uma consulta ao banco: o aviso único de chegada.
+    PedidoDeConsulta { tarefa: i64, agente: i64, texto: String },
+    /// As conexões de banco do perfil mudaram (ou houve consulta numa delas).
+    Conexoes { conexao: i64, consulta: bool },
 }
 
 /// Mensagem do WebSocket de eventos do núcleo. Tipos desconhecidos são
@@ -423,6 +458,44 @@ pub enum Evento {
         #[serde(default)]
         agente_id: i64,
     },
+    /// Um pedido de consulta do agente: pedido (com a instrução, que só vem
+    /// para a tela) ou resolvido (com o desfecho).
+    #[serde(rename = "banco.aprovacao")]
+    BancoAprovacao {
+        seq: u64,
+        acao: String,
+        #[serde(default)]
+        aprovacao: Option<Box<api::Aprovacao>>,
+        #[serde(default)]
+        aprovacao_id: String,
+        #[serde(default)]
+        agente_id: i64,
+        #[serde(default)]
+        tarefa_id: i64,
+        #[serde(default)]
+        resultado: String,
+        #[serde(default)]
+        linhas: i64,
+        #[serde(default)]
+        ms: i64,
+        #[serde(default)]
+        hora: String,
+        #[serde(default)]
+        erro: bool,
+    },
+    #[serde(rename = "conexao.mudou")]
+    ConexaoMudou {
+        seq: u64,
+        #[serde(default)]
+        conexao_id: i64,
+    },
+    /// Houve consulta ou alteração numa conexão (sem o SQL).
+    #[serde(rename = "banco.consulta")]
+    BancoConsulta {
+        seq: u64,
+        #[serde(default)]
+        conexao_id: i64,
+    },
     #[serde(other)]
     Desconhecido,
 }
@@ -449,7 +522,10 @@ impl Evento {
             | Evento::NavegadorAberto { seq, .. }
             | Evento::NavegadorFechado { seq, .. }
             | Evento::NavegadorCaptura { seq }
-            | Evento::LousaMudou { seq, .. } => *seq,
+            | Evento::LousaMudou { seq, .. }
+            | Evento::BancoAprovacao { seq, .. }
+            | Evento::ConexaoMudou { seq, .. }
+            | Evento::BancoConsulta { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -460,6 +536,8 @@ impl Evento {
             // Mexer na lousa não entra na linha do tempo; o que o agente acrescenta entra.
             Evento::LousaMudou { agente_id, .. } => *agente_id != 0,
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
+            // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
+            Evento::BancoAprovacao { .. } => false,
             _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido),
         }
     }
@@ -486,6 +564,12 @@ impl Modelo {
         self.tarefas = tarefas;
         self.pedidos = q.pedidos;
         self.navegadores = q.navegadores.into_iter().collect();
+        self.aprovacoes = q.aprovacoes;
+    }
+
+    /// Os pedidos de consulta esperando você (todos do perfil).
+    pub fn aprovacoes_da_tarefa(&self, tarefa: i64) -> impl Iterator<Item = &api::Aprovacao> {
+        self.aprovacoes.iter().filter(move |a| a.tarefa_id == tarefa)
     }
 
     /// O pedido que o cartão da tarefa mostra: o aberto mais antigo (o que
@@ -533,6 +617,22 @@ impl Modelo {
                     efeitos.push(Efeito::PedidoRespondido { tarefa, agente, titulo: t.titulo.clone() });
                 }
             }
+            Evento::BancoAprovacao { acao, aprovacao, aprovacao_id, agente_id, tarefa_id, resultado, linhas, ms, hora, erro, .. } => {
+                if acao == "pedida" {
+                    let Some(a) = aprovacao else { return efeitos };
+                    self.resolvidas.remove(&a.agente_id);
+                    if !self.aprovacoes.iter().any(|x| x.id == a.id) {
+                        let quem = if a.agente.is_empty() { "O agente".to_string() } else { a.agente.clone() };
+                        efeitos.push(Efeito::PedidoDeConsulta { tarefa: a.tarefa_id, agente: a.agente_id, texto: format!("{quem} quer consultar {}", a.conexao) });
+                        self.aprovacoes.push(*a);
+                    }
+                } else {
+                    self.aprovacoes.retain(|a| a.id != aprovacao_id);
+                    self.resolvidas.insert(agente_id, Resolvida { tarefa: tarefa_id, resultado, linhas, ms, hora, erro });
+                }
+            }
+            Evento::ConexaoMudou { conexao_id, .. } => efeitos.push(Efeito::Conexoes { conexao: conexao_id, consulta: false }),
+            Evento::BancoConsulta { conexao_id, .. } => efeitos.push(Efeito::Conexoes { conexao: conexao_id, consulta: true }),
             Evento::NavegadorAberto { tarefa_id, .. } => {
                 self.navegadores.insert(tarefa_id);
             }
@@ -645,8 +745,9 @@ impl Modelo {
                     a.motivo = motivo;
                     a.desde = desde_hora;
                     a.desde_em = desde;
-                    if passou_a_esperar {
-                        let acao = if a.motivo == PEDE_APROVACAO { "pede aprovação" } else { "espera sua resposta" };
+                    // O pedido de consulta tem o aviso próprio (com o nome da conexão).
+                    if passou_a_esperar && a.motivo != APROVAR_CONSULTA {
+                        let acao = acao_de_espera(&a.motivo);
                         efeitos.push(Efeito::Atencao {
                             tarefa: tarefa_id,
                             agente: agente_id,
@@ -803,6 +904,37 @@ mod testes {
         m.aplicar(evento(removida));
         m.aplicar(evento(removida));
         assert_eq!(m.tarefas.len(), 1);
+    }
+
+    #[test]
+    fn pedido_de_consulta_do_agente() {
+        let mut m = modelo();
+        // O estado "aprovar consulta" não gera o aviso genérico: o pedido tem o dele.
+        let efeitos = m.aplicar(evento(
+            r#"{"tipo":"agente.estado","seq":6,"agente_id":7,"tarefa_id":10,"estado":"aguardando","motivo":"aprovar consulta","desde_hora":"14:32"}"#,
+        ));
+        assert!(efeitos.is_empty());
+        let a = &m.tarefas[0].agentes[0];
+        assert_eq!(a.visual(), EstadoVisual::PedeConsulta);
+        assert!(a.visual().pede_voce() && a.visual().espera_voce());
+        assert_eq!(a.texto_estado(), "Quer consultar o banco · desde 14:32");
+        assert_eq!(m.tarefas[0].motivo.as_deref(), Some("Claude Code (dev) quer consultar o banco"));
+        let pedida = r#"{"tipo":"banco.aprovacao","seq":7,"acao":"pedida","agente_id":7,"tarefa_id":10,"aprovacao":{"id":"ab12","conexao_id":3,
+            "conexao":"loja-web-dev","agente_id":7,"tarefa_id":10,"agente":"Claude Code (dev)","sql":"SELECT 1","expira_hora":"14:37"}}"#;
+        let efeitos = m.aplicar(evento(pedida));
+        assert!(
+            matches!(&efeitos[..], [Efeito::PedidoDeConsulta { tarefa: 10, agente: 7, texto }] if texto == "Claude Code (dev) quer consultar loja-web-dev")
+        );
+        // Repetida (a tela reconectou): sem aviso de novo.
+        assert!(m.aplicar(evento(pedida)).is_empty());
+        assert_eq!(m.aprovacoes_da_tarefa(10).count(), 1);
+        m.aplicar(evento(
+            r#"{"tipo":"banco.aprovacao","seq":8,"acao":"resolvida","aprovacao_id":"ab12","agente_id":7,"tarefa_id":10,"resultado":"aprovada","linhas":37,"ms":42,"hora":"14:33"}"#,
+        ));
+        assert!(m.aprovacoes.is_empty());
+        assert_eq!(m.resolvidas[&7].linhas, 37);
+        assert!(!evento(pedida).entra_na_linha());
+        assert!(evento(r#"{"tipo":"banco.consulta","seq":9,"conexao_id":3}"#).entra_na_linha());
     }
 
     #[test]

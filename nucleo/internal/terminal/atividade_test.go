@@ -209,3 +209,33 @@ func TestCodigoDeSaidaEQuemFechou(t *testing.T) {
 		t.Errorf("fechado pela Colmeia: %+v", m)
 	}
 }
+
+func TestSegurarDuranteAprovacao(t *testing.T) {
+	c := acompanhar(t, "claude")
+	c.escrever("✻ Pensando…")
+	c.a.segurar(AprovarConsulta)
+	c.esperar(t, Aguardando, AprovarConsulta)
+	// O spinner continua escrevendo enquanto espera a ferramenta: não volta a trabalhando.
+	for range 5 {
+		c.escrever("✻ Esperando a ferramenta…")
+		time.Sleep(10 * time.Millisecond)
+	}
+	if estado, motivo, _ := c.a.atual(); estado != Aguardando || motivo != AprovarConsulta {
+		t.Fatalf("segurado: %s %s", estado, motivo)
+	}
+	// Silêncio também não troca o motivo para "sua vez".
+	time.Sleep(3 * temposCurtos.Silencio)
+	if _, motivo, _ := c.a.atual(); motivo != AprovarConsulta {
+		t.Fatalf("o silêncio trocou o motivo: %s", motivo)
+	}
+	// Dois pedidos: só volta quando o último for resolvido.
+	c.a.segurar(AprovarConsulta)
+	c.a.soltar()
+	if estado, _, _ := c.a.atual(); estado != Aguardando {
+		t.Fatal("ainda há um pedido esperando")
+	}
+	c.a.soltar()
+	c.esperar(t, Trabalhando, "")
+	// E o acompanhamento segue: em silêncio, vira a sua vez.
+	c.esperar(t, Aguardando, EsperandoResposta)
+}

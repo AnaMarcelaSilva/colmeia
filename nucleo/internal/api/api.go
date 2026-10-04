@@ -16,7 +16,9 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/avisos"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/bancos"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/chaveiro"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/demo"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/navegador"
@@ -59,6 +61,14 @@ type Servidor struct {
 	Executavel string
 	// Navegadores: um Chrome controlado por perfil, aberto sob pedido.
 	Navegadores *navegador.Gerente
+	// Bancos de dados das conexões do perfil (pools e execuções), o chaveiro
+	// onde ficam as senhas e o prazo para você aprovar um pedido do agente.
+	Bancos         *bancos.Gerente
+	Chaveiro       chaveiro.Chaveiro
+	PrazoAprovacao time.Duration
+	cofre          *cofre
+	muAprovacoes   sync.Mutex
+	aprovacoes     map[string]*aprovacao
 
 	mu sync.Mutex // um agente abre por vez
 
@@ -102,6 +112,7 @@ func (s *Servidor) Rotas() http.Handler {
 			s.Navegadores = navegador.NovoGerente(filepath.Join(s.DirDados, "navegador"))
 		}
 		s.Navegadores.AoMudar = s.aoMudarNavegador
+		s.iniciarBancos()
 		s.Banco.AoGravar(s.publicarEventos)
 		s.iniciarTrabalhador()
 		s.rotasDados(mux)

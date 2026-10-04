@@ -191,7 +191,7 @@ func Abrir(dir string) (*Banco, error) {
 	// Uma conexão só: o SQLite serializa as escritas de qualquer forma, e assim
 	// o encadeamento dos eventos nunca disputa com outra transação.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(esquema + esquemaPedidos + esquemaLousas); err != nil {
+	if _, err := db.Exec(esquema + esquemaPedidos + esquemaLousas + esquemaBancos); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("aplicando o esquema: %w", err)
 	}
@@ -277,6 +277,13 @@ func migrar(db *sql.DB) error {
 	// Versão 4: as lousas (tabelas criadas pelo esquema) e anexos.na_lousa.
 	if versao < 4 {
 		if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+			return err
+		}
+	}
+	// Versão 5: conexões de banco por perfil e o histórico de consultas
+	// (tabelas novas, criadas pelo esquema).
+	if versao < 5 {
+		if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
 			return err
 		}
 	}

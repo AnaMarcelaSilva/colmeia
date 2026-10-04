@@ -8,6 +8,7 @@
 mod abelha;
 mod api;
 mod apresentacao;
+mod banco;
 mod canal;
 mod compositor;
 mod dados;
@@ -73,6 +74,8 @@ enum Tela {
     },
     /// A lousa (quadro livre) do workspace.
     Lousa(i64),
+    /// Os bancos de dados do perfil.
+    Banco,
 }
 
 /// Como está a ligação com o núcleo.
@@ -110,6 +113,9 @@ enum AcaoLousa {
 }
 
 /// Aviso passageiro no rodapé. Um por vez: o mais novo substitui o anterior.
+/// A resposta do núcleo a um pedido de consulta: (id do pedido, resultado).
+type RespostaPedido = (String, Result<(), String>);
+
 struct Aviso {
     tipo: TipoAviso,
     texto: String,
@@ -217,6 +223,9 @@ struct Colmeia {
     popover_navegador: Option<PopoverNavegador>,
     enderecos: HashMap<i64, String>,
     respostas_navegador: (Sender<RespostaNavegador>, Receiver<RespostaNavegador>),
+    /// As respostas aos pedidos de consulta voltando do núcleo (aprovar com
+    /// senha testa a conexão antes: pode levar uns segundos).
+    respostas_pedido: (Sender<RespostaPedido>, Receiver<RespostaPedido>),
     abrindo_navegador: Option<i64>,
     /// O topo do terminal da tarefa, em pontos da janela (o navegador sem
     /// espaço ao lado fica abaixo do cabeçalho).
@@ -234,6 +243,8 @@ struct Colmeia {
     /// você ver (o ponto no chip) e o workspace para onde o "‹ Lousa" volta.
     lousas: HashMap<api::DonoLousa, lousa::Lousa>,
     lousa_na_tarefa: HashSet<i64>,
+    /// A tarefa que está na tela (ao abrir outra, a lousa dela começa fechada).
+    tarefa_na_tela: Option<i64>,
     novidade_na_lousa: HashSet<i64>,
     voltar_para_lousa: Option<i64>,
     /// A lousa que acabou de abrir pela barra lateral: ganha o teclado no primeiro quadro.
@@ -242,6 +253,12 @@ struct Colmeia {
     area_lousa: Option<egui::Rect>,
     /// A lousa apresentada em tela cheia (o palco).
     palco: Option<(api::DonoLousa, Box<lousa::palco::Palco>)>,
+    /// Os bancos de dados do perfil (conexões, árvore e consoles), a tela de
+    /// onde Ctrl+Shift+K veio e o que você está fazendo em cada pedido de
+    /// consulta de um agente.
+    banco: banco::Bancos,
+    tela_antes_do_banco: Option<Tela>,
+    pedidos_consulta: HashMap<String, banco::aprovacao::Estado>,
     carga: &'static str,
     bytes: Arc<AtomicU64>,
     quadros: u64,
@@ -307,6 +324,7 @@ impl Colmeia {
             popover_navegador: None,
             enderecos: HashMap::new(),
             respostas_navegador: mpsc::channel(),
+            respostas_pedido: mpsc::channel(),
             abrindo_navegador: None,
             topo_terminal: None,
             tela_avisada: None,
@@ -314,11 +332,15 @@ impl Colmeia {
             gaveta: None,
             lousas: HashMap::new(),
             lousa_na_tarefa: HashSet::new(),
+            tarefa_na_tela: None,
             novidade_na_lousa: HashSet::new(),
             voltar_para_lousa: None,
             lousa_ativa_ao_abrir: None,
             area_lousa: None,
             palco: None,
+            banco: banco::Bancos::novo(0),
+            tela_antes_do_banco: None,
+            pedidos_consulta: HashMap::new(),
             carga: "parada",
             bytes: bytes.clone(),
             quadros: 0,
@@ -422,6 +444,11 @@ impl Colmeia {
         self.novidade_na_lousa.clear();
         self.voltar_para_lousa = None;
         self.palco = None;
+        // As senhas e os consoles do perfil anterior ficam para trás.
+        self.banco = banco::Bancos::novo(perfil.id);
+        self.banco.nome_perfil = perfil.nome.clone();
+        self.tela_antes_do_banco = None;
+        self.pedidos_consulta.clear();
         // O retrato do quadro chega pela thread de eventos, fora da thread da tela.
         self.ouvinte = Some(Ouvinte::iniciar(perfil.id, ctx.clone()));
         self.conexao = Conexao::Conectando;
@@ -462,6 +489,8 @@ impl Colmeia {
                         // tela e se havia Chrome (lido de novo no próximo clique).
                         self.tela_avisada = None;
                         self.navegador = None;
+                        // E se há chaveiro (o diálogo de senha diz onde ela vai ficar).
+                        self.banco.recarregar(ctx);
                     }
                     self.conexao = Conexao::Ligado;
                     linha_mudou = true;
@@ -526,6 +555,26 @@ impl Colmeia {
                             Efeito::Recarregar => {
                                 for l in self.lousas.values_mut() {
                                     l.recarregar(ctx);
+                                }
+                            }
+                            // Um agente quer consultar o banco: um aviso só, fora da apresentação
+                            // e fora da tarefa dele (lá o cartão do pedido já aparece).
+                            Efeito::PedidoDeConsulta { tarefa, agente, texto } => {
+                                let na_tela = matches!(self.tela, Tela::Tarefa { id, .. } if id == tarefa);
+                                if self.apresentacao.is_none() && !na_tela {
+                                    self.avisar_com(TipoAviso::Alerta, texto, "Ver", AcaoAviso::Abrir { tarefa, agente }, agora);
+                                }
+                                let focada = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+                                if !focada && !self.pediu_atencao {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                                    self.pediu_atencao = true;
+                                }
+                            }
+                            Efeito::Conexoes { conexao, consulta } => {
+                                if consulta {
+                                    self.banco.houve_consulta(ctx, conexao);
+                                } else {
+                                    self.banco.recarregar(ctx);
                                 }
                             }
                             Efeito::PedidoRespondido { tarefa, agente, titulo } => {
@@ -781,6 +830,23 @@ impl Colmeia {
         }
     }
 
+    /// Abre a tela de bancos (ou, se ela já está aberta e não foi um clique
+    /// na barra lateral, volta para a tela de antes).
+    fn alternar_banco(&mut self, pela_lateral: bool) {
+        if matches!(self.tela, Tela::Banco) {
+            if !pela_lateral {
+                self.tela = self.tela_antes_do_banco.take().unwrap_or(Tela::Quadro);
+            }
+            return;
+        }
+        let antes = std::mem::replace(&mut self.tela, Tela::Banco);
+        self.banco.marcar_aberta();
+        self.tela_antes_do_banco = match antes {
+            Tela::Entrada(_) => None,
+            outra => Some(outra),
+        };
+    }
+
     /// Abre a tarefa, com foco no agente pedido (ou no primeiro).
     fn abrir_tarefa(&mut self, id: i64, agente: Option<i64>) {
         let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) else {
@@ -809,8 +875,10 @@ impl Colmeia {
         for t in self.modelo.tarefas.iter().filter(|t| self.escopo.contem(t.projeto_id)) {
             for a in &t.agentes {
                 match a.visual() {
-                    EstadoVisual::Erro if !a.erro_visto => candidatos.push((0, String::new(), t.id, a.id)),
-                    EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez => candidatos.push((1, a.desde.clone(), t.id, a.id)),
+                    // O pedido de consulta vence em minutos: vem antes de tudo.
+                    EstadoVisual::PedeConsulta => candidatos.push((0, a.desde.clone(), t.id, a.id)),
+                    EstadoVisual::Erro if !a.erro_visto => candidatos.push((1, String::new(), t.id, a.id)),
+                    EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez => candidatos.push((2, a.desde.clone(), t.id, a.id)),
                     _ => {}
                 }
             }
@@ -1016,6 +1084,29 @@ impl Colmeia {
             let medir = |ui: &mut egui::Ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(RichText::new(&fps).color(p.suave).size(11.5)));
             };
+            if matches!(self.tela, Tela::Banco) {
+                ui.label(RichText::new(format!("{perfil}  ›")).color(p.suave));
+                match self.banco.nome_escolhida() {
+                    // A conexão do console na trilha: onde o Ctrl+Enter vai rodar.
+                    Some(nome) => {
+                        ui.label(RichText::new("Bancos de dados  ›").color(p.suave));
+                        ui.label(texto_forte(nome, 15.0).color(p.texto));
+                    }
+                    None => {
+                        ui.label(texto_forte("Bancos de dados", 15.0).color(p.texto));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if tema::botao_secundario(ui, "Nova conexão").clicked() {
+                        self.banco.nova_conexao("postgres");
+                    }
+                    if self.mostrar_fps {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(&fps).color(p.suave).size(11.5));
+                    }
+                });
+                return;
+            }
             if let Some(ws) = workspace_da_lousa {
                 ui.label(RichText::new(format!("{perfil}  ›  {ws}  ›")).color(p.suave));
                 ui.label(texto_forte("Lousa", 15.0).color(p.texto));
@@ -1294,8 +1385,23 @@ impl Colmeia {
         }
         ui.add_space(14.0);
 
-        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_)), None, false, None).0.clicked() {
+        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_) | Tela::Banco), None, false, None)
+            .0
+            .clicked()
+        {
             self.mudar_escopo(Escopo::Perfil);
+        }
+        if !self.demo {
+            ui.add_space(2.0);
+            let (resposta, _) = item_lateral(ui, "Bancos de dados", matches!(self.tela, Tela::Banco), None, false, Some(tema::Icone::Banco));
+            // O contador dos pedidos de consulta esperando você, no lugar do ponto.
+            let pedidos = self.modelo.aprovacoes.len();
+            if pedidos > 0 {
+                tema::contador(ui.painter(), resposta.rect.right_center() - egui::vec2(14.0, 0.0), pedidos);
+            }
+            if resposta.on_hover_text("Bancos de dados (Ctrl+Shift+K)").clicked() {
+                self.alternar_banco(true);
+            }
         }
         ui.add_space(8.0);
         let mut workspace_anterior = String::new();
@@ -1322,7 +1428,7 @@ impl Colmeia {
                     }
                 }
             }
-            let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none();
+            let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none() && !matches!(self.tela, Tela::Banco);
             let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
             let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
             let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
@@ -1396,6 +1502,12 @@ impl Colmeia {
             self.tela = Tela::Quadro;
             return;
         };
+        // Abrir a tarefa mostra o agente (ou o estado vazio): a lousa não
+        // fica ligada da última visita. Só a linha do tempo a abre junto.
+        if self.tarefa_na_tela != Some(id) {
+            self.tarefa_na_tela = Some(id);
+            self.lousa_na_tarefa.remove(&id);
+        }
         let agentes = tarefa.agentes.clone();
         let pasta = tarefa.pasta.clone();
         let p = cores();
@@ -1428,9 +1540,8 @@ impl Colmeia {
             let mut reservado = 2.0;
             let mut reservado_editor = 0.0;
             if !self.demo {
-                if !agentes.is_empty() {
-                    reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
-                }
+                // "+ Agente" sempre: com ou sem agente, é o caminho para abrir um.
+                reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
                 reservado += tema::largura_botao_dividido(&pintor, "Navegador") + 6.0 + espaco;
                 // Os chips medem sempre em negrito (a largura não muda ao ligar).
                 reservado += medir("Arquivos", tema::forte(13.0)) + 28.0 + espaco;
@@ -1478,7 +1589,7 @@ impl Colmeia {
                 return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                novo_agente = !agentes.is_empty() && tema::botao_principal(ui, "+ Agente", pode).clicked();
+                novo_agente = tema::botao_principal(ui, "+ Agente", pode).on_hover_text("Abrir um agente (Claude Code, Codex…) nesta tarefa").clicked();
                 ui.add_space(6.0);
                 let ponto = navegador_aberto.then_some(p.ok);
                 let (principal, menu) = tema::botao_dividido(ui, "Navegador", ponto);
@@ -1524,6 +1635,7 @@ impl Colmeia {
             });
         });
         ui.add_space(8.0);
+        self.pedidos_de_consulta(ui, id, &agentes, agora);
         if abrir_editor
             && let Some((nome, comando)) = self.editor
             && let Err(e) = sistema::abrir_com(comando, &pasta)
@@ -1564,8 +1676,12 @@ impl Colmeia {
         }
         let dono = api::DonoLousa { workspace_id: 0, tarefa_id: id };
         if agentes.is_empty() && self.lousa_na_tarefa.contains(&id) {
-            // Sem agente, a lousa ocupa a área toda abaixo do cabeçalho.
-            let area = ui.available_rect_before_wrap();
+            // Sem agente, a lousa fica abaixo de uma faixa que mantém à vista
+            // como abrir um (e como voltar: "Fechar lousa").
+            let tudo = ui.available_rect_before_wrap();
+            let faixa = egui::Rect::from_min_size(tudo.min, egui::vec2(tudo.width(), 48.0));
+            self.faixa_sem_agentes(ui, faixa, id);
+            let area = egui::Rect::from_min_max(egui::pos2(tudo.left(), faixa.bottom() + 8.0), tudo.max);
             let acoes = self.mostrar_lousa(ui, area, dono, agora);
             self.tratar_lousa(dono, acoes, ui.ctx(), agora);
             if self.gaveta == Some(id) {
@@ -1640,6 +1756,94 @@ impl Colmeia {
         }
     }
 
+    /// Os pedidos de consulta ao banco dos agentes da tarefa, entre o
+    /// cabeçalho e o terminal; depois da decisão, a linha com o desfecho.
+    fn pedidos_de_consulta(&mut self, ui: &mut egui::Ui, tarefa: i64, agentes: &[AgenteTela], agora: f64) {
+        let pendentes: Vec<api::Aprovacao> = self.modelo.aprovacoes_da_tarefa(tarefa).cloned().collect();
+        self.pedidos_consulta.retain(|id, _| self.modelo.aprovacoes.iter().any(|a| a.id == *id));
+        let mut respostas = Vec::new();
+        for a in &pendentes {
+            let estado = self.pedidos_consulta.entry(a.id.clone()).or_insert_with(banco::aprovacao::Estado::novo);
+            if let Some(r) = banco::aprovacao::cartao(ui, a, estado, self.banco.chaveiro) {
+                respostas.push((a.id.clone(), r));
+            }
+            ui.add_space(8.0);
+        }
+        for agente in agentes {
+            if pendentes.iter().any(|a| a.agente_id == agente.id) {
+                continue;
+            }
+            if let Some(r) = self.modelo.resolvidas.get(&agente.id).filter(|r| r.tarefa == tarefa) {
+                banco::aprovacao::resolvida(ui, r);
+                ui.add_space(4.0);
+            }
+        }
+        for (id, resposta) in respostas {
+            if let Some(estado) = self.pedidos_consulta.get_mut(&id) {
+                estado.enviando = true;
+                estado.erro = None;
+                estado.erro_senha = None;
+            }
+            let envio = self.respostas_pedido.0.clone();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let resultado = match resposta {
+                    banco::aprovacao::Resposta::Aprovar { senha, guardar } => api::responder_aprovacao(&id, true, "", &senha, guardar),
+                    banco::aprovacao::Resposta::Recusar { motivo } => api::responder_aprovacao(&id, false, &motivo, "", false),
+                };
+                let _ = envio.send((id, resultado));
+                ctx.request_repaint();
+            });
+        }
+        while let Ok((id, resultado)) = self.respostas_pedido.1.try_recv() {
+            let Some(estado) = self.pedidos_consulta.get_mut(&id) else { continue };
+            estado.enviando = false;
+            match resultado {
+                Ok(()) => {}
+                // Senha errada: o pedido continua (mesmo prazo); o campo volta
+                // vazio, com o foco, e o agente não fica sabendo.
+                Err(e) if e.starts_with("Usuário ou senha recusados") => {
+                    estado.senha.clear();
+                    estado.erro_senha = Some(e);
+                    estado.focar_senha = true;
+                }
+                Err(e) => {
+                    estado.erro = Some(e.clone());
+                    self.erro(format!("Não consegui responder o pedido: {e}"), agora);
+                }
+            }
+        }
+    }
+
+    /// A faixa sobre a lousa de uma tarefa sem agente: o caminho para abrir
+    /// um continua à vista, e "Fechar lousa" volta ao estado vazio.
+    fn faixa_sem_agentes(&mut self, ui: &mut egui::Ui, faixa: egui::Rect, id: i64) {
+        let p = cores();
+        let tem_claude = !self.demo && self.opcoes_de_agente().iter().any(|o| o.id == "claude");
+        let pode = self.pode_mudar();
+        let (mut novo, mut retomar, mut fechar) = (false, false, false);
+        ui.painter().rect(faixa, CornerRadius::same(tema::RAIO_SUPERFICIE), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+        let mut filho =
+            ui.new_child(egui::UiBuilder::new().max_rect(faixa.shrink2(egui::vec2(14.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        filho.label(RichText::new("Esta tarefa ainda não tem agentes.").color(p.texto).size(13.0));
+        if !self.demo {
+            filho.add_space(8.0);
+            novo = tema::botao_principal(&mut filho, "Adicionar agente", pode).clicked();
+            if tem_claude {
+                retomar = tema::botao_secundario_com(&mut filho, "Retomar conversa do Claude Code", pode).clicked();
+            }
+        }
+        filho.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            fechar = tema::botao_secundario(ui, "Fechar lousa").on_hover_text("Voltar à tarefa (Ctrl+Shift+Q)").clicked();
+        });
+        if fechar {
+            self.alternar_lousa_da_tarefa(id);
+        }
+        if novo || retomar {
+            self.adicionar_agente(id, retomar);
+        }
+    }
+
     /// Tarefa sem agentes: abrir um novo ou retomar uma conversa do Claude Code
     /// começada em outro lugar (no IntelliJ, por exemplo) na mesma pasta.
     fn sem_agentes(&mut self, ui: &mut egui::Ui, id: i64, pasta: &str) {
@@ -1654,7 +1858,7 @@ impl Colmeia {
                     let texto = if self.demo {
                         "Na demonstração, os agentes são terminais de teste.".to_string()
                     } else {
-                        format!("O agente abre em {pasta}, com a conta de IA do perfil. Se você já conversava com o Claude Code nessa pasta, dá para continuar a mesma conversa aqui.")
+                        format!("Para falar com o Claude, adicione um agente: o terminal dele abre aqui, em {pasta}, com a caixa de mensagem embaixo. Se você já conversava com o Claude Code nessa pasta, dá para continuar a mesma conversa.")
                     };
                     tema::cabecalho(ui, "Esta tarefa ainda não tem agentes", &texto);
                     if self.demo {
@@ -1703,7 +1907,7 @@ impl Colmeia {
         let borda = match visual {
             _ if teclado_no_compositor => Stroke::new(1.0, p.destaque.gamma_multiply(0.5)),
             _ if focado => Stroke::new(1.5, p.destaque),
-            EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez => Stroke::new(1.5, p.alerta),
+            EstadoVisual::PedeAprovacao | EstadoVisual::PedeConsulta | EstadoVisual::SuaVez => Stroke::new(1.5, p.alerta),
             EstadoVisual::Erro => Stroke::new(1.5, p.erro),
             _ => Stroke::new(1.0, p.borda),
         };
@@ -1885,10 +2089,18 @@ impl Colmeia {
     /// Atalhos da Colmeia: Ctrl+Shift+letra, tirados da fila antes de o
     /// terminal ler (como nos terminais do GNOME).
     fn atalhos(&mut self, ctx: &egui::Context) {
-        if self.dialogo.is_some() || self.demo || self.apresentacao.is_some() || self.palco.is_some() {
+        if self.dialogo.is_some() || self.demo || self.apresentacao.is_some() || self.palco.is_some() || self.banco.modal_aberto() {
             return;
         }
         let atalho = |tecla| ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, tecla));
+        // Ctrl+Shift+K: os bancos de dados; de novo, volta para onde estava.
+        if atalho(Key::K) {
+            self.alternar_banco(false);
+        }
+        if matches!(self.tela, Tela::Banco) && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Escape)) {
+            self.tela = Tela::Quadro;
+            self.tela_antes_do_banco = None;
+        }
         if atalho(Key::L) {
             // Da lousa do workspace, a linha do tempo de todos os projetos (não
             // a do projeto que estava escolhido antes de abrir a lousa).
@@ -2706,11 +2918,15 @@ impl eframe::App for Colmeia {
         let mut acoes = Vec::new();
         let mut acoes_linha = Vec::new();
         let mut acoes_lousa = None;
+        let mut acoes_banco = Vec::new();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 16 })).show(
             ui,
             |ui| {
                 let area = ui.max_rect().expand2(egui::vec2(20.0, 16.0));
                 self.favo.desenhar(ui.painter(), area);
+                if !matches!(self.tela, Tela::Tarefa { .. }) {
+                    self.tarefa_na_tela = None;
+                }
                 match self.tela {
                     Tela::Quadro if self.modelo.projetos.is_empty() && self.conexao == Conexao::Ligado => self.sem_projetos(ui),
                     Tela::Quadro => {
@@ -2742,10 +2958,28 @@ impl eframe::App for Colmeia {
                         self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
                         acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
                     }
+                    Tela::Banco => {
+                        let modelo = &self.modelo;
+                        let nomes = |agente: i64| {
+                            modelo
+                                .tarefas
+                                .iter()
+                                .flat_map(|t| &t.agentes)
+                                .find(|a| a.id == agente)
+                                .map_or_else(|| "Um agente".to_string(), |a| a.nome_com_papel())
+                        };
+                        acoes_banco = self.banco.mostrar(ui, &self.modelo.aprovacoes, &nomes, agora);
+                    }
                     Tela::Entrada(_) => {}
                 }
             },
         );
+        for acao in acoes_banco {
+            match acao {
+                banco::Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
+                banco::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
+            }
+        }
         for acao in acoes {
             match acao {
                 quadro::Acao::AbrirTarefa(id) => self.abrir_tarefa(id, None),
@@ -2765,12 +2999,17 @@ impl eframe::App for Colmeia {
                     if lousa {
                         // O agente mexeu na lousa: ela abre junto, enquadrada no que ele pôs.
                         self.lousa_na_tarefa.insert(tarefa);
+                        self.tarefa_na_tela = Some(tarefa);
                         self.novidade_na_lousa.remove(&tarefa);
                         let dono = api::DonoLousa { workspace_id: 0, tarefa_id: tarefa };
                         self.lousas.entry(dono).or_insert_with(|| lousa::Lousa::nova(&ctx, dono, agora)).enquadrar_agente = true;
                     }
                 }
                 registro::Acao::IrParaQuadro => self.tela = Tela::Quadro,
+                registro::Acao::AbrirBanco(conexao) => {
+                    self.banco.abrir_conexao(conexao);
+                    self.alternar_banco(true);
+                }
                 registro::Acao::VerTodos => self.mudar_escopo(Escopo::Perfil),
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
                 registro::Acao::Apresentar { deck, periodo, tarefa } => {

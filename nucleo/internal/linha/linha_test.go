@@ -330,3 +330,19 @@ func TestLousaDoAgenteNaLinhaDoTempo(t *testing.T) {
 		t.Error("lousa vazia no slide")
 	}
 }
+
+// As consultas do dia numa conexão viram um item com a hora da última, e a
+// ordem do dia segue essa hora.
+func TestConsultasJuntasNaHoraDaUltima(t *testing.T) {
+	h := &historico{t: t}
+	p := dados.Escopo{Perfil: 1}
+	consulta := map[string]any{"conexao_id": 1, "conexao": "loja-web-dev", "tipo": "postgres", "verbo": "SELECT", "linhas": 3, "origem": "voce"}
+	h.add("2026-09-25 14:05", "banco.consulta", p, consulta)
+	h.add("2026-09-25 14:15", "projeto.criado", p, map[string]any{"id": 1, "nome": "loja-web"})
+	h.add("2026-09-25 14:23", "banco.consulta", p, consulta)
+	dias := Montar(h.eventos, Contexto{Agora: em("2026-09-25 18:00"), Fuso: fuso})
+	itens := dias[0].Itens
+	if len(itens) != 2 || itens[0].Hora != "14:23" || itens[0].Texto != "Consultou o banco loja-web-dev (2 vezes)." || itens[1].Hora != "14:15" {
+		t.Fatalf("itens: %+v", itens)
+	}
+}

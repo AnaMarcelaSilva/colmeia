@@ -43,7 +43,19 @@ func Abrir() (l net.Listener, token string, fechar func(), err error) {
 	if err != nil {
 		return nil, "", nil, err
 	}
+	// O socket só sai no fim se ainda for este: um núcleo novo que subiu
+	// enquanto este encerrava já pôs o dele no mesmo caminho (e o Close
+	// padrão apagaria o socket do outro).
+	if ul, ok := l.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
 	if err := os.Chmod(caminho, 0o600); err != nil {
+		l.Close()
+		os.Remove(caminho)
+		return nil, "", nil, err
+	}
+	meu, err := os.Lstat(caminho)
+	if err != nil {
 		l.Close()
 		return nil, "", nil, err
 	}
@@ -54,12 +66,21 @@ func Abrir() (l net.Listener, token string, fechar func(), err error) {
 	}
 	if err != nil {
 		l.Close()
+		os.Remove(caminho)
 		return nil, "", nil, err
 	}
 	fechar = func() {
 		l.Close()
-		os.Remove(caminho)
-		os.Remove(filepath.Join(dir, NomeToken))
+		// O token no arquivo diz de quem é o canal agora (o inode sozinho
+		// não basta: o sistema reaproveita o número).
+		arquivoToken := filepath.Join(dir, NomeToken)
+		if lido, err := os.ReadFile(arquivoToken); err != nil || string(lido) != token {
+			return
+		}
+		if agora, err := os.Lstat(caminho); err == nil && os.SameFile(meu, agora) {
+			os.Remove(caminho)
+		}
+		os.Remove(arquivoToken)
 	}
 	return l, token, fechar, nil
 }

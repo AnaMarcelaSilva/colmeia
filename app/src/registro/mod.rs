@@ -54,6 +54,8 @@ pub enum Acao {
     },
     IrParaQuadro,
     VerTodos,
+    /// Abrir a tela de bancos nesta conexão (um item da linha do tempo).
+    AbrirBanco(i64),
     Avisar(TipoAviso, String),
     /// Abrir a apresentação no slide da tarefa (o clique num cartão abre em janela).
     Apresentar {

@@ -44,6 +44,8 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasArquivos(mux)
 	s.rotasAgente(mux)
 	s.rotasLousas(mux)
+	s.rotasBancos(mux)
+	s.rotasBancosDoAgente(mux)
 }
 
 // responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.

@@ -454,8 +454,10 @@ func (s *Servidor) prepararMCP(agente int64) ([]string, error) {
 		s.Fichas.Revogar(agente)
 		return nil, err
 	}
+	// timeout: o prazo de cada chamada, em ms. Uma consulta ao banco espera a
+	// sua aprovação por até 5 min, mais a execução.
 	config := map[string]any{"mcpServers": map[string]any{"colmeia": map[string]any{
-		"type": "stdio", "command": s.Executavel,
+		"type": "stdio", "command": s.Executavel, "timeout": 420000,
 		"args": []string{"mcp", "--socket", filepath.Join(s.DirCanal, canal.NomeSocket), "--token-arquivo", arquivoToken},
 	}}}
 	bruto, _ := json.MarshalIndent(config, "", "  ")

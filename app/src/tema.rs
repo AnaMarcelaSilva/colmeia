@@ -419,7 +419,7 @@ pub fn campo(ui: &mut egui::Ui, rotulo: &str, texto: &mut String, dica: &str) ->
 /// Fundo de um campo de texto. Nos temas claros, o editável fica no tom mais
 /// claro (como um papel em branco) e o só leitura no recuado; no escuro, o
 /// recuado já se destaca do painel.
-fn fundo_campo(p: &Paleta, so_leitura: bool) -> Color32 {
+pub fn fundo_campo(p: &Paleta, so_leitura: bool) -> Color32 {
     if claro() && !so_leitura { p.superficie_alta } else { p.superficie }
 }
 
@@ -485,7 +485,9 @@ pub fn botao_secundario_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Resp
         (true, true) => (p.realce, p.borda),
         (true, false) => (p.superficie_alta, p.borda),
     };
-    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
+    // Com o foco do teclado (a confirmação de escrita começa em "Cancelar"), o contorno de foco.
+    let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, borda) };
+    ui.painter().rect(rect, CornerRadius::same(16), fundo, borda, egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, cor);
     if ativo { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta }
 }
@@ -498,7 +500,8 @@ pub fn botao_alerta(ui: &mut egui::Ui, texto: &str) -> Response {
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.erro);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
     let fundo = if resposta.hovered() { p.erro.gamma_multiply(0.12) } else { p.superficie_alta };
-    ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, p.erro), egui::StrokeKind::Inside);
+    let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, p.erro) };
+    ui.painter().rect(rect, CornerRadius::same(16), fundo, borda, egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.erro);
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -509,6 +512,8 @@ pub fn botao_alerta(ui: &mut egui::Ui, texto: &str) -> Response {
 pub enum EstadoVisual {
     Trabalhando,
     PedeAprovacao,
+    /// Um pedido de consulta ao banco do agente espera a sua aprovação.
+    PedeConsulta,
     SuaVez,
     Parado,
     Terminou,
@@ -522,7 +527,7 @@ impl EstadoVisual {
         let p = cores();
         match self {
             EstadoVisual::Trabalhando => p.ok,
-            EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez | EstadoVisual::Interrompido => p.alerta,
+            EstadoVisual::PedeAprovacao | EstadoVisual::PedeConsulta | EstadoVisual::SuaVez | EstadoVisual::Interrompido => p.alerta,
             EstadoVisual::Parado | EstadoVisual::Terminou => p.suave,
             EstadoVisual::Erro => p.erro,
             EstadoVisual::Concluiu => p.destaque,
@@ -534,6 +539,7 @@ impl EstadoVisual {
         match self {
             EstadoVisual::Trabalhando => "Trabalhando",
             EstadoVisual::PedeAprovacao => "Pede aprovação",
+            EstadoVisual::PedeConsulta => "Quer consultar o banco",
             EstadoVisual::SuaVez => "Sua vez",
             EstadoVisual::Parado => "Parado",
             EstadoVisual::Terminou => "Terminou",
@@ -551,7 +557,12 @@ impl EstadoVisual {
 
     /// Pede você: aparece na abelha, no aviso e no título da janela.
     pub fn pede_voce(self) -> bool {
-        matches!(self, EstadoVisual::PedeAprovacao | EstadoVisual::SuaVez | EstadoVisual::Erro)
+        matches!(self, EstadoVisual::PedeAprovacao | EstadoVisual::PedeConsulta | EstadoVisual::SuaVez | EstadoVisual::Erro)
+    }
+
+    /// Espera uma resposta sua (sem contar o erro).
+    pub fn espera_voce(self) -> bool {
+        matches!(self, EstadoVisual::PedeAprovacao | EstadoVisual::PedeConsulta | EstadoVisual::SuaVez)
     }
 }
 
@@ -684,6 +695,14 @@ pub enum Icone {
     Lousa,
     Duplicar,
     Apagar,
+    // Bancos de dados: a árvore, os selos da conexão e o cancelar.
+    Banco,
+    Esquema,
+    Tabela,
+    Visao,
+    Lapis,
+    Agente,
+    Parar,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -824,7 +843,117 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
             pintor.line_segment([c + vec2(-2.0, -6.0), c + vec2(2.0, -6.0)], traco);
             pintor.add(Shape::line(vec![c + vec2(-4.5, -4.0), c + vec2(-3.5, 6.0), c + vec2(3.5, 6.0), c + vec2(4.5, -4.0)], traco));
         }
+        Icone::Banco => {
+            // Cilindro: a elipse de cima, as laterais e o arco de baixo.
+            let topo = c + vec2(0.0, -5.0);
+            pintor.add(Shape::ellipse_stroke(topo, vec2(6.0, 2.0), traco));
+            pintor.line_segment([topo + vec2(-6.0, 0.0), topo + vec2(-6.0, 10.0)], traco);
+            pintor.line_segment([topo + vec2(6.0, 0.0), topo + vec2(6.0, 10.0)], traco);
+            let arco: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 12.0;
+                    topo + vec2(6.0 * a.cos(), 10.0 + 2.0 * a.sin())
+                })
+                .collect();
+            pintor.add(Shape::line(arco, traco));
+        }
+        Icone::Esquema => {
+            pintor.rect_stroke(Rect::from_min_size(c + vec2(-5.5, -5.5), vec2(7.0, 7.0)), CornerRadius::same(1), traco, egui::StrokeKind::Middle);
+            pintor.rect_stroke(Rect::from_min_size(c + vec2(-1.5, -1.5), vec2(7.0, 7.0)), CornerRadius::same(1), traco, egui::StrokeKind::Middle);
+        }
+        Icone::Tabela | Icone::Visao => {
+            let r = caixa(12.0, 10.0);
+            if icone == Icone::Tabela {
+                pintor.rect_stroke(r, CornerRadius::same(1), traco, egui::StrokeKind::Middle);
+            } else {
+                let contorno = vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+                for forma in Shape::dashed_line(&contorno, traco, 3.0, 2.0) {
+                    pintor.add(forma);
+                }
+            }
+            pintor.line_segment([r.left_top() + vec2(0.0, 3.0), r.right_top() + vec2(0.0, 3.0)], traco);
+            pintor.line_segment([r.center_top() + vec2(0.0, 3.0), r.center_bottom()], traco);
+        }
+        Icone::Lapis => {
+            // Lápis inclinado em 14 px: corpo de 2 traços paralelos (4 px de
+            // largura), a ponta em triângulo e a faixa da borracha.
+            let d = vec2(1.0, -1.0) / std::f32::consts::SQRT_2;
+            let n = vec2(1.0, 1.0) / std::f32::consts::SQRT_2;
+            let ponta = c + vec2(-5.5, 5.5);
+            let fim = c + vec2(5.5, -5.5);
+            let base = ponta + d * 4.5;
+            let meia = 2.0;
+            let corpo = vec![base + n * meia, fim + n * meia, fim - n * meia, base - n * meia];
+            pintor.add(Shape::closed_line(corpo, traco));
+            pintor.add(Shape::line(vec![base + n * meia, ponta, base - n * meia], traco));
+            let faixa = fim - d * 3.0;
+            pintor.line_segment([faixa + n * meia, faixa - n * meia], traco);
+            pintor.circle_filled(ponta + d * 1.0, 1.0, cor);
+        }
+        Icone::Agente => {
+            // O favo do logo, só o contorno.
+            let pontos: Vec<Pos2> = (0..=6)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_3 * i as f32 + std::f32::consts::FRAC_PI_6;
+                    c + vec2(5.5 * a.cos(), 5.5 * a.sin())
+                })
+                .collect();
+            pintor.add(Shape::line(pontos, traco));
+        }
+        Icone::Parar => {
+            pintor.rect_filled(caixa(9.0, 9.0), CornerRadius::same(2), cor);
+        }
     }
+}
+
+/// Divisória arrastável entre duas superfícies: invisível parada (o vão de
+/// 8 px já separa), um traço de 2 px no destaque com o mouse ou arrastando.
+/// Devolve quanto foi arrastado neste quadro.
+pub fn divisoria(ui: &mut egui::Ui, rect: Rect, id: egui::Id, vertical: bool) -> f32 {
+    let p = cores();
+    let resposta = ui.interact(rect, id, Sense::drag());
+    let cursor = if vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical };
+    let resposta = resposta.on_hover_cursor(cursor);
+    if resposta.hovered() || resposta.dragged() {
+        let traco = if vertical {
+            Rect::from_center_size(rect.center(), vec2(2.0, rect.height()))
+        } else {
+            Rect::from_center_size(rect.center(), vec2(rect.width(), 2.0))
+        };
+        ui.painter().rect_filled(traco, CornerRadius::same(1), p.destaque.gamma_multiply(0.6));
+    }
+    if resposta.dragged_by(egui::PointerButton::Primary) {
+        let d = resposta.drag_delta();
+        if vertical { d.x } else { d.y }
+    } else {
+        0.0
+    }
+}
+
+/// Contador de pedidos pendentes: pílula de 18 px na cor de alerta, com o
+/// número (9+ acima de nove). `centro_direito` é o meio da borda direita.
+pub fn contador(pintor: &egui::Painter, centro_direito: Pos2, n: usize) -> Rect {
+    let texto = if n > 9 { "9+".to_string() } else { n.to_string() };
+    let galeria = pintor.layout_no_wrap(texto, forte(11.5), sobre_destaque());
+    let largura = (galeria.size().x + 10.0).max(18.0);
+    let rect = Rect::from_min_max(pos2(centro_direito.x - largura, centro_direito.y - 9.0), pos2(centro_direito.x, centro_direito.y + 9.0));
+    pintor.rect_filled(rect, CornerRadius::same(9), cores().alerta);
+    pintor.galley(rect.center() - galeria.size() / 2.0, galeria, sobre_destaque());
+    rect
+}
+
+/// Caixa de marcar que pode ficar inativa (contorno apagado, texto suave, sem clique).
+pub fn caixa_marcar_com(ui: &mut egui::Ui, texto: &str, marcada: &mut bool, ativa: bool) -> Response {
+    if ativa {
+        return caixa_marcar(ui, texto, marcada);
+    }
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), p.suave);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(16.0 + 8.0 + galeria.size().x, 24.0_f32.max(galeria.size().y)), Sense::hover());
+    let caixa = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(16.0, 16.0));
+    ui.painter().rect(caixa, CornerRadius::same(4), Color32::TRANSPARENT, Stroke::new(1.5, p.borda.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+    ui.painter().galley(pos2(caixa.right() + 8.0, rect.center().y - galeria.size().y / 2.0), galeria, p.suave);
+    resposta
 }
 
 /// ↗ desenhado em 10×10: a diagonal e o canto (a fonte não garante o símbolo).

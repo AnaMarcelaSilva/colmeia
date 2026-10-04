@@ -20,6 +20,7 @@ import (
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/api"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/chaveiro"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/mcp"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
@@ -107,7 +108,11 @@ func main() {
 		log.Printf("sem o caminho do próprio núcleo; os agentes ficam sem as ferramentas da Colmeia: %v", err)
 	}
 	fichas := canal.NovasFichas()
-	servidor := &api.Servidor{Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados,
+	// Senhas das conexões de banco: o chaveiro do sistema, sondado já (a
+	// primeira resposta do D-Bus pode demorar), ou só a memória.
+	cofre := chaveiro.DoAmbiente()
+	go cofre.Disponivel()
+	servidor := &api.Servidor{Chaveiro: cofre, Sessoes: sessoes, Agentes: agentes, Bytes: &bytes, Versao: versao, Demo: *modoDemo, Banco: banco, DirDados: dirDados,
 		AvisoHistorico: avisoHistorico, AoEncerrar: func() { parar <- syscall.SIGTERM },
 		Fichas: fichas, DirCanal: dirCanal, Executavel: executavel}
 	servidorHTTP := &http.Server{

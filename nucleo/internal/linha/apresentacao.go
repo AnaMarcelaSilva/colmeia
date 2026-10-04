@@ -161,7 +161,8 @@ type Deck struct {
 // ou um terminal comum parado não viram slide).
 func trabalho(tipo string) bool {
 	switch tipo {
-	case TipoConcluiu, TipoMoveu, TipoSessao, TipoSessaoAberta, TipoSessaoAguardando, TipoErro, TipoInterrompido, TipoCaptura, TipoNota, TipoLousa:
+	case TipoConcluiu, TipoMoveu, TipoSessao, TipoSessaoAberta, TipoSessaoAguardando, TipoErro, TipoInterrompido, TipoCaptura, TipoNota, TipoLousa,
+		TipoBancoAgente:
 		return true
 	}
 	return false
@@ -220,7 +221,7 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		ultimo := ""
 		for _, item := range itens {
 			dia := diaDe(item.quando, fuso)
-			if dia < hoje && dia >= limite && item.Tipo != TipoProjeto && dia > ultimo {
+			if dia < hoje && dia >= limite && item.Tipo != TipoProjeto && !deBanco(item.Tipo) && dia > ultimo {
 				ultimo = dia
 			}
 		}

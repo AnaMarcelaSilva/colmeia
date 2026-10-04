@@ -4,10 +4,11 @@ Obrigada pelo interesse! A Colmeia é um projeto pessoal, de código aberto, sem
 
 ## Rodar
 
-Veja "Como rodar" no [README](README.md). Para mexer na tela sem tocar nos seus dados de verdade, use pastas de teste:
+Veja "Desenvolvimento e testes" no [README](README.md#desenvolvimento-e-testes). Para mexer na tela sem tocar nos seus dados de verdade, use pastas de teste:
 
 ```bash
 export COLMEIA_DIR=/tmp/colmeia-teste/run COLMEIA_DADOS=/tmp/colmeia-teste/dados
+export COLMEIA_CHAVEIRO_SERVICO=colmeia-teste   # senhas de banco num serviço de teste do chaveiro
 go -C nucleo build -o ../bin/colmeia-nucleo ./cmd/colmeia-nucleo
 COLMEIA_NUCLEO=$PWD/bin/colmeia-nucleo cargo run --release -p colmeia
 # no fim: bin/colmeia-nucleo --encerrar (com as mesmas variáveis)
@@ -25,7 +26,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-O CI roda os mesmos passos, mais `govulncheck`, `cargo audit` e o gitleaks no histórico inteiro.
+O CI roda os mesmos passos, mais `govulncheck`, `cargo audit` e o gitleaks no histórico inteiro. Os testes com MySQL e PostgreSQL de verdade (`-tags integracao`) estão em "Desenvolvimento e testes" no [README](README.md#desenvolvimento-e-testes).
+
+## Dependências
+
+Uma dependência nova precisa de licença compatível com MIT e Apache-2.0 (nada GPL, LGPL ou AGPL) e entra na lista em [docs/dependencias.md](docs/dependencias.md).
 
 ## Estilo
 
