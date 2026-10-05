@@ -21,6 +21,8 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 - **O tempo dos agentes fica escondido por padrão** na daily, na sprint, na linha do tempo, na apresentação e no texto copiado (o núcleo nem manda os tempos); os tempos continuam gravados ([decisão 0010](docs/decisoes/0010-tempo-dos-agentes-opcional.md)). O banco ganha a coluna `perfis.tempo_agentes`, migrada sozinha.
 - Com o tempo desligado, a fileira de números não mostra "Tempo de agente" (antes aparecia "0").
 - **Slide da apresentação com a nota em destaque:** "O que foi feito" começa recolhido ("O que foi feito · 6 itens", um clique abre) e a nota ganha a fonte maior da coluna, com o markdown formatado (títulos, negrito, código, listas e tabelas simples) em vez dos símbolos crus.
+- **Barra lateral com o workspace em destaque:** o nome do workspace em seminegrito e na cor do texto, a seta na cor de destaque, os projetos recuados embaixo dele e uma linha fina entre um workspace e outro.
+- **Caminho do topo clicável:** o perfil abre todos os projetos, o workspace abre a visão dele e, dentro de uma tarefa, o nome do projeto volta ao quadro. Da lousa e dos bancos, o clique volta ao quadro.
 - API: `PATCH /v1/workspaces/{id}` com `recolhido`, `workspace_recolhido` nos projetos e o evento `workspace.recolhido`.
 
 ### Entrega G · Bancos de dados por perfil

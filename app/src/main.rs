@@ -1141,6 +1141,9 @@ impl Colmeia {
 
     fn topo(&mut self, ui: &mut egui::Ui, agora: f64) {
         let p = cores();
+        // O caminho é clicável: o perfil e o workspace (e o projeto, dentro
+        // de uma tarefa) fecham a tela atual e abrem o quadro deles.
+        let mut ir: Option<Escopo> = None;
         ui.horizontal(|ui| {
             ui.set_height(34.0);
             let perfil = self.perfil.as_ref().map(|p| p.nome.clone()).unwrap_or_default();
@@ -1153,7 +1156,9 @@ impl Colmeia {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(RichText::new(&fps).color(p.suave).size(11.5)));
             };
             if matches!(self.tela, Tela::Banco) {
-                ui.label(RichText::new(format!("{perfil}  ›")).color(p.suave));
+                if migalha(ui, &perfil) {
+                    ir = Some(Escopo::Perfil);
+                }
                 match self.banco.nome_escolhida() {
                     // A conexão do console na trilha: onde o Ctrl+Enter vai rodar.
                     Some(nome) => {
@@ -1176,7 +1181,14 @@ impl Colmeia {
                 return;
             }
             if let Some(ws) = workspace_da_lousa {
-                ui.label(RichText::new(format!("{perfil}  ›  {ws}  ›")).color(p.suave));
+                if migalha(ui, &perfil) {
+                    ir = Some(Escopo::Perfil);
+                }
+                if migalha(ui, &ws)
+                    && let Tela::Lousa(id) = self.tela
+                {
+                    ir = Some(Escopo::Workspace(id));
+                }
                 ui.label(texto_forte("Lousa", 15.0).color(p.texto));
                 if self.mostrar_fps {
                     medir(ui);
@@ -1201,7 +1213,9 @@ impl Colmeia {
             let workspace = if projeto_da_tarefa.is_some() { None } else { workspace };
             match (projeto_da_tarefa.or(self.projeto_em_foco()), workspace) {
                 (None, Some((nome, n))) => {
-                    ui.label(RichText::new(format!("{perfil}  ›")).color(p.suave));
+                    if migalha(ui, &perfil) {
+                        ir = Some(Escopo::Perfil);
+                    }
                     ui.label(texto_forte(&nome, 15.0).color(p.texto));
                     ui.label(RichText::new(if n == 1 { "1 projeto".to_string() } else { format!("{n} projetos") }).color(p.suave));
                 }
@@ -1210,8 +1224,24 @@ impl Colmeia {
                     ui.label(RichText::new("todos os projetos").color(p.suave));
                 }
                 (Some(projeto), _) => {
-                    ui.label(RichText::new(format!("{perfil}  ›  {}  ›", projeto.workspace)).color(p.suave));
-                    ui.label(texto_forte(&projeto.nome, 15.0).color(p.texto));
+                    if migalha(ui, &perfil) {
+                        ir = Some(Escopo::Perfil);
+                    }
+                    if migalha(ui, &projeto.workspace) && projeto.workspace_id != 0 {
+                        ir = Some(Escopo::Workspace(projeto.workspace_id));
+                    }
+                    // Dentro de uma tarefa, o nome do projeto volta ao quadro dele.
+                    if projeto_da_tarefa.is_some() {
+                        let r = ui
+                            .add(egui::Label::new(texto_forte(&projeto.nome, 15.0).color(p.texto)).sense(egui::Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Voltar ao quadro do projeto");
+                        if r.clicked() {
+                            ir = Some(Escopo::Projeto(projeto.id));
+                        }
+                    } else {
+                        ui.label(texto_forte(&projeto.nome, 15.0).color(p.texto));
+                    }
                 }
             }
             if !self.demo {
@@ -1258,6 +1288,13 @@ impl Colmeia {
                 ui.label(RichText::new(format!("{} FPS · {} recebidos", self.fps, formatar_vazao(self.vazao))).color(p.suave).size(11.5));
             });
         });
+        if let Some(escopo) = ir {
+            // Da lousa e dos bancos volta ao quadro; o registro só troca o escopo.
+            if matches!(self.tela, Tela::Lousa(_) | Tela::Banco) {
+                self.tela = Tela::Quadro;
+            }
+            self.mudar_escopo(escopo);
+        }
     }
 
     /// Barra acima do quadro e do registro: a troca entre as quatro páginas e
@@ -1715,7 +1752,7 @@ impl Colmeia {
         }
         ui.add_space(14.0);
 
-        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_) | Tela::Banco), None, false, None)
+        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_) | Tela::Banco), None, false, None, 0.0)
             .0
             .clicked()
         {
@@ -1723,7 +1760,7 @@ impl Colmeia {
         }
         if !self.demo {
             ui.add_space(2.0);
-            let (resposta, _) = item_lateral(ui, "Bancos de dados", matches!(self.tela, Tela::Banco), None, false, Some(tema::Icone::Banco));
+            let (resposta, _) = item_lateral(ui, "Bancos de dados", matches!(self.tela, Tela::Banco), None, false, Some(tema::Icone::Banco), 0.0);
             // O contador dos pedidos de consulta esperando você, no lugar do ponto.
             let pedidos = self.modelo.aprovacoes.len();
             if pedidos > 0 {
@@ -1756,6 +1793,12 @@ impl Colmeia {
                 // Recolhido, o workspace esconde a lousa e os projetos, menos o que está aberto.
                 let recolhido = projeto.recolhido && projeto.workspace_id != 0;
                 if workspace_anterior != Some((projeto.workspace_id, &projeto.workspace)) {
+                    // Uma linha fina separa um workspace do anterior.
+                    if workspace_anterior.is_some() {
+                        ui.add_space(4.0);
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                        ui.painter().hline(r.x_range().shrink(8.0), r.center().y, Stroke::new(1.0, p.borda));
+                    }
                     ui.add_space(6.0);
                     workspace_anterior = Some((projeto.workspace_id, &projeto.workspace));
                     // O nome do workspace abre todos os projetos dele (quadro, daily e sprint juntos).
@@ -1786,7 +1829,7 @@ impl Colmeia {
                     if !self.demo && projeto.workspace_id != 0 && !recolhido {
                         ui.add_space(2.0);
                         let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", projeto.workspace);
-                        if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa))
+                        if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa), RECUO_WORKSPACE)
                             .0
                             .on_hover_text(dica)
                             .clicked()
@@ -1802,7 +1845,15 @@ impl Colmeia {
                 let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
                 let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
                 let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
-                let (resposta, mais) = item_lateral(ui, &projeto.nome, ativo, abelha::cor_ponto(estado, tem_erro, concluiu), !self.demo, None);
+                let (resposta, mais) = item_lateral(
+                    ui,
+                    &projeto.nome,
+                    ativo,
+                    abelha::cor_ponto(estado, tem_erro, concluiu),
+                    !self.demo,
+                    None,
+                    if projeto.workspace_id != 0 { RECUO_WORKSPACE } else { 0.0 },
+                );
                 let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
                 if resposta.clicked() {
                     mudar = Some(projeto.id);
@@ -1845,7 +1896,7 @@ impl Colmeia {
         ui.add_space(6.0);
         if !self.demo
             && pode
-            && item_lateral(ui, "+ Novo projeto", false, None, false, None).0.clicked()
+            && item_lateral(ui, "+ Novo projeto", false, None, false, None, 0.0).0.clicked()
             && let Some(perfil) = &self.perfil
         {
             self.dialogo = Some(Dialogo::NovoProjeto(dialogos::NovoProjeto::new(perfil.id)));
@@ -3130,9 +3181,12 @@ fn item_lateral(
     ponto: Option<Color32>,
     menu: bool,
     icone: Option<tema::Icone>,
+    recuo: f32,
 ) -> (egui::Response, Option<egui::Response>) {
     let p = cores();
     let (rect, resposta) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+    // Dentro de um workspace, o item vai para a direita, embaixo do nome dele.
+    let rect = rect.with_min_x(rect.min.x + recuo);
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let em_cima = ui.rect_contains_pointer(rect);
     if ativo || em_cima {
@@ -3180,11 +3234,9 @@ fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize
     if ativo || em_cima {
         ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), if ativo { p.realce } else { p.realce.gamma_multiply(0.6) });
     }
-    let (fonte, cor) = match (ativo, em_cima) {
-        (true, _) => (tema::forte(11.5), p.texto),
-        (false, true) => (egui::FontId::proportional(11.5), p.texto),
-        (false, false) => (egui::FontId::proportional(11.5), p.suave),
-    };
+    // O workspace se destaca dos projetos: seminegrito e na cor do texto
+    // sempre, maior que antes, com a seta na cor de destaque.
+    let (fonte, cor) = (tema::forte(12.5), p.texto);
     // O ativo leva também a marca de 3 px à esquerda (no Leitura o realce
     // do ativo e o do mouse em cima ficam quase iguais).
     if ativo {
@@ -3199,7 +3251,7 @@ fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize
     let g_quantos = ui.painter().layout_no_wrap(quantos, egui::FontId::proportional(11.0), cor_quantos);
     // A seta desenhada (a fonte não tem ▸/▾): para a direita recolhido, para baixo aberto.
     let c = rect.left_center() + egui::vec2(12.0, 0.0);
-    let cor_seta = if seta.hovered() { p.texto } else { p.suave };
+    let cor_seta = if seta.hovered() { p.texto } else { p.destaque };
     let pontas = if recolhido {
         vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 3.5)]
     } else {
@@ -3219,6 +3271,26 @@ fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize
         ui.painter().rect_stroke(rect, CornerRadius::same(tema::RAIO_CONTROLE), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
     }
     (resposta, seta)
+}
+
+/// Quanto os projetos e a lousa de um workspace entram na barra lateral.
+const RECUO_WORKSPACE: f32 = 12.0;
+
+/// Um passo do caminho no topo: suave, com a cor do texto e a mãozinha ao
+/// passar o mouse, seguido do "›". Devolve se foi clicado.
+fn migalha(ui: &mut egui::Ui, texto: &str) -> bool {
+    let p = cores();
+    let id = ui.id().with(("migalha", texto));
+    let em_cima = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let r = ui
+        .add(egui::Label::new(RichText::new(texto).color(if em_cima { p.texto } else { p.suave })).sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if r.hovered() != em_cima {
+        ui.ctx().data_mut(|d| d.insert_temp(id, r.hovered()));
+        ui.ctx().request_repaint();
+    }
+    ui.label(RichText::new("›").color(p.suave));
+    r.clicked()
 }
 
 /// A cor do texto (para medir antes de desenhar).
