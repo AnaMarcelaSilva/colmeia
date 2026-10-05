@@ -4,6 +4,25 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ## [Não lançado]
 
+### Entrega H · Enter envia, daily e sprint gerais e tempo dos agentes só quando pedido
+
+#### Novo
+
+- **Visão do workspace:** o nome do workspace na barra lateral é clicável e mostra todos os projetos dele no quadro, na linha do tempo, na daily e na sprint, sem navegar projeto por projeto. "Todos os projetos" continua sendo o perfil inteiro.
+- **Daily e sprint gerais, separadas por projeto:** no workspace ou no perfil, os cartões vêm por projeto (na ordem da barra lateral), com uma fileira de saltos no topo ("loja-web · 4"), os links **Só este projeto** e **Abrir quadro** em cada projeto e o rodapé "Sem atividade no período: …". Dois projetos com o mesmo nome em workspaces diferentes aparecem com o workspace na frente. Na visão de um projeto, "Ver o workspace X inteiro". O texto da daily sai por projeto e a apresentação ganha um divisor por projeto também na daily (com o workspace em cima quando há mais de um).
+- **Chip "Ver"** na barra do registro: o perfil, cada workspace e os projetos de cada um, num menu só; muda o mesmo escopo da barra lateral.
+- **Recolher workspace na barra lateral:** a seta ao lado do nome esconde a lousa e os projetos dele (o projeto aberto continua visível). Recolhido, um ponto ao lado do nome mostra o estado mais urgente dos projetos escondidos, para nenhum agente esperando passar despercebido. Fica guardado no núcleo e vale para todas as telas do perfil.
+- **Mostrar tempo dos agentes:** caixa na barra do registro (no "⋯" quando a barra aperta), guardada por perfil no núcleo.
+- API: `workspace=` na linha do tempo, no resumo e na apresentação (exclusivo com `projeto=`); `tempo_agentes` no `PATCH /v1/perfis/{id}`, no perfil e nas respostas do registro; `secao_id` e `workspace` nos slides, `projeto_id` e `workspace` nas seções da sprint; evento `perfil.tempo_agentes`.
+
+#### Mudou
+
+- **Enter envia a mensagem** na caixa do painel da tarefa e em "Pedir ao agente", como no terminal do Claude Code; **Shift+Enter quebra a linha**. Ctrl+Enter continua enviando; Alt+Enter e o Enter de uma composição de acento não fazem nada; colar texto com várias linhas não envia; com um diálogo aberto, o Enter é do diálogo. O console SQL, a lousa, o texto da daily e a nota do slide continuam com Ctrl+Enter (a dica da nota agora diz).
+- **O tempo dos agentes fica escondido por padrão** na daily, na sprint, na linha do tempo, na apresentação e no texto copiado (o núcleo nem manda os tempos); os tempos continuam gravados ([decisão 0010](docs/decisoes/0010-tempo-dos-agentes-opcional.md)). O banco ganha a coluna `perfis.tempo_agentes`, migrada sozinha.
+- Com o tempo desligado, a fileira de números não mostra "Tempo de agente" (antes aparecia "0").
+- **Slide da apresentação com a nota em destaque:** "O que foi feito" começa recolhido ("O que foi feito · 6 itens", um clique abre) e a nota ganha a fonte maior da coluna, com o markdown formatado (títulos, negrito, código, listas e tabelas simples) em vez dos símbolos crus.
+- API: `PATCH /v1/workspaces/{id}` com `recolhido`, `workspace_recolhido` nos projetos e o evento `workspace.recolhido`.
+
 ### Entrega G · Bancos de dados por perfil
 
 #### Novo

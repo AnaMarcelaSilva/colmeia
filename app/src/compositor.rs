@@ -1,5 +1,7 @@
-//! Caixa de mensagem do painel da tarefa. Enter quebra a linha, Ctrl+Enter
-//! envia, e Ctrl+V com uma imagem na área de transferência anexa a imagem: ela
+//! Caixa de mensagem do painel da tarefa. Enter envia e Shift+Enter quebra a
+//! linha, como no terminal do Claude Code (Ctrl+Enter também envia; a regra
+//! fica em `teclas`). Colar texto com várias linhas não envia. Ctrl+V com uma
+//! imagem na área de transferência anexa a imagem: ela
 //! vai para o núcleo como PNG (a tela não escreve nos dados), fica anexada à
 //! tarefa, e o caminho que o núcleo devolve vai junto na mensagem, que é como
 //! o Claude Code e o Codex recebem imagens.
@@ -15,6 +17,7 @@ use eframe::egui::{self, ColorImage, CornerRadius, Event, Key, Modifiers, Textur
 
 use crate::api;
 use crate::dados::AgenteTela;
+use crate::teclas;
 use crate::tema::{self, cores};
 
 /// Mensagens guardadas por agente (o núcleo guarda o mesmo tanto).
@@ -139,6 +142,8 @@ pub struct Compositor {
     /// A caixa tinha o teclado no quadro anterior (o egui solta o foco no
     /// Esc antes de a caixa ver a tecla).
     tinha_foco: bool,
+    /// Composição de acento (IME) em andamento: o Enter dela não envia.
+    composicao: teclas::Composicao,
 }
 
 impl Default for Compositor {
@@ -155,6 +160,7 @@ impl Default for Compositor {
             respostas: mpsc::channel(),
             aviso_historico: None,
             tinha_foco: false,
+            composicao: teclas::Composicao::default(),
         }
     }
 }
@@ -255,6 +261,10 @@ impl Compositor {
             if let Some(h) = self.historicos.get_mut(&agente) {
                 h.acrescentar(texto);
             }
+            // 0 é "sem agente" (como em ler_historico): nada a guardar no núcleo.
+            if agente == 0 {
+                continue;
+            }
             let envio = self.respostas.0.clone();
             let (ctx, texto) = (ctx.clone(), texto.to_string());
             std::thread::spawn(move || match api::guardar_mensagem(agente, &texto) {
@@ -304,7 +314,9 @@ impl Compositor {
         }
     }
 
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64) -> Option<Envio> {
+    /// `teclado_livre`: nenhum diálogo, menu modal ou caixa flutuante está
+    /// aberto por cima. Sem ele, a caixa não mexe no Enter (que confirma o diálogo).
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64, teclado_livre: bool) -> Option<Envio> {
         let p = cores();
         let id = egui::Id::new(ID);
         // O clique que pediu o foco (um botão da lousa, por exemplo) solta o
@@ -323,8 +335,10 @@ impl Compositor {
         }
         self.tinha_foco = ui.memory(|m| m.has_focus(id));
         let navegando = self.historicos.get(&foco).and_then(Historico::onde);
-        // Ctrl+Enter envia; é retirado da fila antes de o campo ver, para não virar quebra de linha.
-        let mut enviar = com_foco && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+        // Enter (e Ctrl+Enter) envia; sai da fila antes de o campo ver, mesmo
+        // quando não dá para enviar (nem envia nem quebra a linha). Shift+Enter
+        // fica para o campo, que quebra a linha.
+        let mut enviar = com_foco && teclado_livre && ui.input_mut(|i| self.composicao.tirar_enters(&mut i.events));
         // O egui só avisa um Ctrl+V quando há texto para colar. Sem texto (só uma
         // imagem), o que chega é a tecla V sendo solta com o Ctrl ainda apertado.
         let (agora, colou_texto, soltou_ctrl_v) = ui.input(|i| {
@@ -385,6 +399,7 @@ impl Compositor {
             let dica = if self.para_todos { "Mensagem para todos os agentes da tarefa".to_string() } else { format!("Mensagem para {em_foco}") };
             let campo = egui::TextEdit::multiline(&mut self.rascunho)
                 .id(id)
+                .return_key(teclas::quebra_de_linha())
                 // A margem vai na moldura: com uma moldura dada, o TextEdit
                 // ignora `.margin()`, e o texto ficava 7 px acima de "Para:".
                 .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 7)))
@@ -412,10 +427,11 @@ impl Compositor {
             (None, _, _) if destinos.is_empty() => (parou.to_string(), p.alerta),
             (None, Some((n, total)), _) => (format!("Mensagem {n} de {total} · ↓ mais nova · Esc volta ao rascunho"), p.suave),
             (None, None, Some(aviso)) => (aviso.clone(), p.alerta),
-            (None, None, None) if tem_historico => {
-                ("Ctrl+Enter envia · ↑ mensagens anteriores · Enter quebra a linha · Ctrl+V cola imagens".to_string(), p.suave)
+            (None, None, None) => {
+                let fonte = egui::FontId::proportional(11.5);
+                let cabe = |t: &str| ui.painter().layout_no_wrap(t.to_string(), fonte.clone(), p.suave).size().x <= caixa.width() - 28.0;
+                (dica_das_teclas(tem_historico, cabe), p.suave)
             }
-            (None, None, None) => ("Ctrl+Enter envia · Enter quebra a linha · Ctrl+V cola imagens".to_string(), p.suave),
         };
         ui.painter().text(
             egui::pos2(caixa.left() + 14.0, caixa.bottom() + 12.0),
@@ -493,6 +509,18 @@ impl Compositor {
     }
 }
 
+/// A dica das teclas embaixo da caixa, cortada pelo tamanho (nunca com "…"):
+/// sai primeiro o Ctrl+V, depois a seta. "Enter envia · Shift+Enter nova
+/// linha" fica sempre.
+fn dica_das_teclas(tem_historico: bool, cabe: impl Fn(&str) -> bool) -> String {
+    let opcoes: &[&str] = if tem_historico {
+        &["Enter envia · Shift+Enter nova linha · ↑ anteriores · Ctrl+V imagem", "Enter envia · Shift+Enter nova linha · ↑ anteriores"]
+    } else {
+        &["Enter envia · Shift+Enter nova linha · Ctrl+V cola imagens"]
+    };
+    opcoes.iter().find(|t| cabe(t)).map_or("Enter envia · Shift+Enter nova linha", |t| t).to_string()
+}
+
 /// Codifica a imagem colada como PNG, para enviar ao núcleo.
 fn codificar_png(imagem: &arboard::ImageData) -> Result<Vec<u8>, String> {
     let mut png = Vec::new();
@@ -558,6 +586,78 @@ mod testes {
         assert_eq!(h.subir("x"), None);
         assert!(!h.navegando());
         assert_eq!(h.descer(), None);
+    }
+
+    /// Roda um quadro da caixa com estes eventos e devolve o que ela enviou.
+    fn quadro(ctx: &egui::Context, c: &mut Compositor, eventos: Vec<Event>, livre: bool) -> Option<Envio> {
+        let agentes = [AgenteTela {
+            id: 0,
+            ferramenta: "claude".into(),
+            papel: "dev".into(),
+            ativo: true,
+            estado: crate::dados::EstadoAgente::Trabalhando,
+            motivo: String::new(),
+            desde: String::new(),
+            desde_em: String::new(),
+            fim: None,
+            erro_visto: false,
+        }];
+        let entrada =
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 400.0))), events: eventos, ..Default::default() };
+        let mut envio = None;
+        let mut saida = ctx.run_ui(entrada, |ui| {
+            let area = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(800.0, c.altura()));
+            envio = c.mostrar(ui, area, &agentes, 0, 1, livre);
+        });
+        saida.textures_delta.clear();
+        envio
+    }
+
+    fn tecla(modifiers: Modifiers) -> Event {
+        Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn enter_envia_e_shift_enter_quebra_a_linha() {
+        let ctx = egui::Context::default();
+        tema::instalar(&ctx);
+        let mut c = Compositor { focar: true, ..Default::default() };
+        // Dois quadros para o foco chegar ao campo.
+        quadro(&ctx, &mut c, vec![], true);
+        quadro(&ctx, &mut c, vec![], true);
+        assert!(Compositor::com_foco(&ctx));
+        quadro(&ctx, &mut c, vec![Event::Text("a".into()), tecla(Modifiers::SHIFT), Event::Text("b".into())], true);
+        assert_eq!(c.rascunho, "a\nb");
+        // Colar texto com várias linhas não envia.
+        assert!(quadro(&ctx, &mut c, vec![Event::Paste("\nc\nd".into())], true).is_none());
+        assert_eq!(c.rascunho, "a\nb\nc\nd");
+        // Com um diálogo aberto, o Enter é dele.
+        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::NONE)], false).is_none());
+        // Composição de acento: o Enter não envia.
+        let preedit = Event::Ime(egui::ImeEvent::Preedit { text: "´".into(), active_range_chars: None });
+        assert!(quadro(&ctx, &mut c, vec![preedit, tecla(Modifiers::NONE)], true).is_none());
+        assert!(quadro(&ctx, &mut c, vec![Event::Ime(egui::ImeEvent::Commit(String::new()))], true).is_none());
+        // Alt+Enter não faz nada.
+        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::ALT)], true).is_none());
+        assert_eq!(c.rascunho, "a\nb\nc\nd");
+        let envio = quadro(&ctx, &mut c, vec![tecla(Modifiers::NONE)], true).expect("Enter envia");
+        assert_eq!((envio.texto.as_str(), envio.destinos.as_slice()), ("a\nb\nc\nd", &[0][..]));
+        assert!(c.rascunho.is_empty());
+        // Caixa vazia: o Enter não envia nem quebra a linha.
+        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::NONE)], true).is_none());
+        assert!(c.rascunho.is_empty());
+        // Ctrl+Enter continua enviando.
+        quadro(&ctx, &mut c, vec![Event::Text("oi".into())], true);
+        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::CTRL)], true).is_some_and(|e| e.texto == "oi"));
+    }
+
+    #[test]
+    fn dica_corta_pelo_tamanho() {
+        assert_eq!(dica_das_teclas(true, |_| true), "Enter envia · Shift+Enter nova linha · ↑ anteriores · Ctrl+V imagem");
+        assert_eq!(dica_das_teclas(true, |t| !t.contains("Ctrl+V")), "Enter envia · Shift+Enter nova linha · ↑ anteriores");
+        assert_eq!(dica_das_teclas(true, |_| false), "Enter envia · Shift+Enter nova linha");
+        assert_eq!(dica_das_teclas(false, |_| true), "Enter envia · Shift+Enter nova linha · Ctrl+V cola imagens");
+        assert_eq!(dica_das_teclas(false, |_| false), "Enter envia · Shift+Enter nova linha");
     }
 
     #[test]

@@ -32,9 +32,11 @@ Na primeira execução, a Colmeia pede a criação de um perfil. Perfis separam 
 
 Em seguida, adicione um projeto. Pode ser um repositório git ou qualquer pasta, que não é alterada ao ser adicionada.
 
-Para falar com um agente, crie uma tarefa em "+ Nova tarefa", abra a tarefa e clique em **Adicionar agente**. O terminal do Claude Code abre dentro da tarefa. É possível digitar diretamente nele ou usar a caixa de mensagem embaixo, que envia com Ctrl+Enter, aceita imagens coladas e lembra das mensagens anteriores com a seta para cima.
+Para falar com um agente, crie uma tarefa em "+ Nova tarefa", abra a tarefa e clique em **Adicionar agente**. O terminal do Claude Code abre dentro da tarefa. É possível digitar diretamente nele ou usar a caixa de mensagem embaixo, que envia com Enter (Shift+Enter quebra a linha), aceita imagens coladas e lembra das mensagens anteriores com a seta para cima.
 
 Os cartões podem ser arrastados entre colunas, e o botão direito (ou o "⋯") mostra as demais ações.
+
+Na barra lateral, os projetos ficam agrupados por workspace. Clicar no nome do workspace mostra todos os projetos dele juntos, e a seta ao lado recolhe o grupo. Um workspace recolhido continua sinalizando, com um ponto colorido, quando algum agente dele precisa de você.
 
 ## O que dá para fazer
 
@@ -63,9 +65,11 @@ Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
 
-Tudo o que acontece nas tarefas vira um registro. A **linha do tempo** mostra um dia por vez, com um cartão por tarefa e as capturas em miniatura. A **daily** junta o que mudou desde o último dia com atividade, separado em concluídas, em revisão, esperando você, trabalhando e com erro, e "Copiar texto" entrega o resumo pronto para falar. A **sprint** cobre 7 ou 14 dias, o mês ou as datas que você escolher, e exporta em Markdown com as capturas.
+Tudo o que acontece nas tarefas vira um registro. A **linha do tempo** mostra um dia por vez, com um cartão por tarefa e as capturas em miniatura. A **daily** junta o que mudou desde o último dia com atividade, separado em concluídas, em revisão, esperando você, trabalhando e com erro, e "Copiar texto" entrega o resumo pronto para falar. A **sprint** cobre 7 ou 14 dias, o mês ou as datas que você escolher, e exporta em Markdown com as capturas. As três funcionam por projeto, por workspace ou para o perfil inteiro, sempre separadas por projeto.
 
-O **modo apresentação** (F5) foi feito para a reunião. Ele exibe a daily ou a sprint em tela cheia, com uma capa e um slide por tarefa. Cada slide tem a sua nota, que você escreve com N e que funciona como roteiro da fala, e aceita fotos e vídeos com A ou arrastando o arquivo para a janela. Fotos JPEG perdem o EXIF no caminho. Enquanto você apresenta, nenhum aviso aparece na tela.
+O tempo que cada agente trabalhou e esperou fica oculto por padrão, inclusive no texto copiado e na exportação. A opção "Mostrar tempo dos agentes", guardada por perfil, exibe esses números quando necessário ([decisão 0010](docs/decisoes/0010-tempo-dos-agentes-opcional.md)).
+
+O **modo apresentação** (F5) foi feito para a reunião. Ele exibe a daily ou a sprint em tela cheia, com uma capa e um slide por tarefa. Cada slide destaca a sua nota, escrita com N em markdown, que funciona como roteiro da fala. A lista do que foi feito fica recolhida e abre com um clique. O slide também aceita fotos e vídeos com A ou arrastando o arquivo para a janela. Fotos JPEG perdem o EXIF no caminho. Enquanto você apresenta, nenhum aviso aparece na tela.
 
 ![A linha do tempo: o cabeçalho do dia com os números e um cartão por tarefa, com as miniaturas](docs/imagens/linha-do-tempo.png)
 
@@ -107,7 +111,7 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
 | Ctrl+Esc | Volta ao quadro |
-| Ctrl+Enter, ↑ ↓ | Na caixa de mensagem, envia e navega pelas mensagens anteriores |
+| Enter, Shift+Enter, ↑ ↓ | Na caixa de mensagem, envia, quebra a linha e navega pelas mensagens anteriores |
 | Ctrl+Enter, Esc | No console de banco, executa e cancela |
 | F5 / Shift+F5 | Apresenta / retoma do último slide |
 

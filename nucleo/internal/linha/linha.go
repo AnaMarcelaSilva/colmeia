@@ -38,6 +38,66 @@ type Contexto struct {
 	VariosProjetos bool
 	// NomesNoEscopo são os projetos olhados, para o cabeçalho dos resumos.
 	NomesNoEscopo []string
+	// Escopo é o cabeçalho pronto ("estudos · 3 projetos", "todos os
+	// projetos · 5 projetos", "loja-web"); vazio usa NomesNoEscopo.
+	Escopo string
+	// Workspaces: o nome do workspace de cada projeto. Ordem: a posição do
+	// projeto na barra lateral (workspace e nome), que as seções seguem.
+	Workspaces map[int64]string
+	Ordem      map[int64]int
+	// VariosWorkspaces: o recorte tem projetos de mais de um workspace; o
+	// nome da seção leva o workspace na frente ("estudos · loja-web"), para
+	// dois projetos com o mesmo nome não se confundirem.
+	VariosWorkspaces bool
+	// MostrarTempo: os textos e os números dizem quanto os agentes
+	// trabalharam e esperaram você. O valor zero esconde (o padrão do
+	// perfil): sem ele, nenhuma resposta leva tempo de agente.
+	MostrarTempo bool
+}
+
+// escopo é o cabeçalho dos resumos e do deck ("" quando não há).
+func (c Contexto) escopo() string {
+	if c.Escopo != "" {
+		return c.Escopo
+	}
+	if len(c.NomesNoEscopo) > 0 {
+		return lista(c.NomesNoEscopo)
+	}
+	return ""
+}
+
+// workspaceDaSecao é o workspace que vai na frente do nome da seção (só
+// quando o recorte tem mais de um).
+func (c Contexto) workspaceDaSecao(projeto int64) string {
+	if !c.VariosWorkspaces {
+		return ""
+	}
+	return c.Workspaces[projeto]
+}
+
+// rotuloSecao: "loja-web", ou "estudos · loja-web" com mais de um workspace.
+func (c Contexto) rotuloSecao(projeto int64, nome string) string {
+	if nome == "" {
+		nome = "sem projeto"
+	}
+	if ws := c.workspaceDaSecao(projeto); ws != "" {
+		return ws + " · " + nome
+	}
+	return nome
+}
+
+// antesNaOrdem ordena projetos como a barra lateral; os que não estão no
+// contexto (removidos) vão para o fim, pelo nome.
+func (c Contexto) antesNaOrdem(a, b int64, nomeA, nomeB string) bool {
+	oa, okA := c.Ordem[a]
+	ob, okB := c.Ordem[b]
+	switch {
+	case okA && okB && oa != ob:
+		return oa < ob
+	case okA != okB:
+		return okA
+	}
+	return nomeA < nomeB
 }
 
 // Ativo é um agente rodando agora: o estado e desde quando (a última
@@ -138,9 +198,10 @@ type Dia struct {
 	Resumo string `json:"resumo"`
 	Itens  []Item `json:"itens"`
 	// Números do dia, para o cabeçalho (o que veio nesta página).
-	Concluidas int   `json:"concluidas"`
-	Erros      int   `json:"erros"`
-	TempoS     int64 `json:"tempo_s"`
+	Concluidas int `json:"concluidas"`
+	Erros      int `json:"erros"`
+	// TempoS só vai com o tempo dos agentes ligado.
+	TempoS int64 `json:"tempo_s,omitempty"`
 }
 
 var nomesColuna = map[string]string{
@@ -346,6 +407,14 @@ func (m *montador) passar(e dados.Evento) {
 			item.Tipo, agoraFaz = TipoSessaoAguardando, " esperando você em "
 		case "ocioso":
 			item.Tipo, agoraFaz = TipoSessaoParada, " parado em "
+		}
+		// Sem o tempo dos agentes, nada de "desde": "esperando você desde
+		// 14:26" diz quanto ele esperou.
+		if !m.c.MostrarTempo {
+			item.Texto = agente(d.Ferramenta, d.Papel) + agoraFaz + m.cita(tarefa, projeto) + "."
+			item.Curto = agente(d.Ferramenta, d.Papel) + strings.TrimSuffix(agoraFaz, " em ") + "."
+			m.abertas[e.Escopo.Agente] = len(m.itens) - 1
+			return
 		}
 		// "desde" é a última mudança de estado, como no cartão; sem ela, o início.
 		desde := ativo.Desde
@@ -700,6 +769,9 @@ func (m *montador) terminou(e dados.Evento, quando time.Time, d conteudo) {
 	nome := agente(d.Ferramenta, d.Papel)
 	item := m.novo(e, quando, TipoSessao)
 	item.ferramenta, item.trabalhando, item.titulo = d.Ferramenta, d.TrabalhandoS, m.titulo(tarefa)
+	if !m.c.MostrarTempo {
+		item.trabalhando = 0
+	}
 	cita := m.cita(tarefa, projeto)
 	switch d.Motivo {
 	case "erro":
@@ -712,6 +784,14 @@ func (m *montador) terminou(e dados.Evento, quando time.Time, d conteudo) {
 		item.Curto = nome + " foi interrompido."
 	default:
 		item.agente, item.aguardando = nome, d.AguardandoS
+		if !m.c.MostrarTempo {
+			// Sem o tempo dos agentes: a sessão conta, a duração não aparece
+			// (e as somas por dia, projeto e ferramenta ficam em zero).
+			item.trabalhando, item.aguardando = 0, 0
+			item.Texto = nome + " terminou uma sessão em " + cita + "."
+			item.Curto = nome + " terminou uma sessão."
+			return
+		}
 		item.Texto = nome + " trabalhou " + Duracao(d.TrabalhandoS) + " em " + cita
 		item.Curto = nome + " trabalhou " + Duracao(d.TrabalhandoS)
 		if d.AguardandoS >= 60 {
@@ -796,6 +876,13 @@ func plural(n int, um, varios string) string {
 func Montar(eventos []dados.Evento, c Contexto) []Dia {
 	m := novoMontador(c)
 	itens := m.montar(eventos)
+	// Na linha do tempo do recorte com mais de um workspace, a etiqueta do
+	// projeto leva o workspace ("trabalho-x · loja-web").
+	for i := range itens {
+		if ws := c.workspaceDaSecao(itens[i].ProjetoID); ws != "" && itens[i].Projeto != "" {
+			itens[i].Projeto = ws + " · " + itens[i].Projeto
+		}
+	}
 	dias := []Dia{}
 	for i := len(itens) - 1; i >= 0; i-- {
 		item := itens[i]

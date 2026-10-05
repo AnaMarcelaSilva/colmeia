@@ -149,6 +149,8 @@ pub struct Caixa {
     /// encolhe quando os exemplos somem, e o Enviar fica onde estava.
     topo_rodape: f32,
     canal: (Sender<Resposta>, Receiver<Resposta>),
+    /// Composição de acento (IME) em andamento: o Enter dela não envia.
+    composicao: crate::teclas::Composicao,
 }
 
 impl Caixa {
@@ -166,6 +168,7 @@ impl Caixa {
             quadros: 0,
             topo_rodape: 0.0,
             canal: mpsc::channel(),
+            composicao: Default::default(),
         };
         registro::em_segundo_plano(&caixa.canal.0, ctx, move || Resposta::Destino(api::destino_do_pedido(tarefa)));
         caixa
@@ -212,12 +215,16 @@ impl Caixa {
         let p = cores();
         let n = self.texto.chars().count();
         let pode_enviar = !self.texto.trim().is_empty() && n <= MAX_PEDIDO && !self.enviando && !self.bloqueado() && self.destino.is_some();
-        // Ctrl+Enter envia; Esc fecha (o rascunho fica).
+        // Esc fecha (o rascunho fica). Enter envia e Shift+Enter quebra a
+        // linha, só com o campo em foco: com o foco num botão de exemplo, o
+        // Enter é do botão (põe o texto e devolve o foco ao campo).
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             return Some(Saida::Fechar);
         }
-        let ctrl_enter = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
-        let mut enviar = ctrl_enter && pode_enviar;
+        let id = Id::new(("campo-pedido", self.tarefa));
+        let com_foco = ctx.memory(|m| m.has_focus(id));
+        let enter = com_foco && ctx.input_mut(|i| self.composicao.tirar_enters(&mut i.events));
+        let mut enviar = enter && pode_enviar;
         let mut cancelar = None;
         let area = egui::Area::new(Id::new("caixa-pedido")).order(egui::Order::Foreground).pivot(pivo).fixed_pos(ancora).show(ctx, |ui| {
             tema::moldura_flutuante().show(ui, |ui| {
@@ -243,8 +250,7 @@ impl Caixa {
                         None => {}
                     }
                 }
-                let id = Id::new(("campo-pedido", self.tarefa));
-                let resposta = tema::campo_multilinha(ui, &mut self.texto, 3, 120.0, id, self.enviando);
+                let resposta = tema::campo_mensagem(ui, &mut self.texto, 3, 120.0, id, self.enviando);
                 // Foco no campo uma vez só (pedir em todo quadro trava os eventos).
                 if std::mem::take(&mut self.focar) {
                     resposta.request_focus();
@@ -271,7 +277,7 @@ impl Caixa {
                 self.topo_rodape = self.topo_rodape.max(topo);
                 ui.horizontal(|ui| {
                     ui.set_height(34.0);
-                    ui.label(RichText::new("Ctrl+Enter envia · Esc fecha").color(p.suave).size(12.0));
+                    ui.label(RichText::new("Enter envia · Shift+Enter nova linha · Esc fecha").color(p.suave).size(12.0));
                     if n >= AVISO_TAMANHO {
                         let cor = if n >= MAX_PEDIDO { p.erro } else { p.alerta };
                         ui.label(RichText::new(format!("{} / {}", milhar(n), milhar(MAX_PEDIDO))).color(cor).size(12.5));

@@ -21,6 +21,7 @@ mod pedido;
 mod quadro;
 mod registro;
 mod sistema;
+mod teclas;
 mod tema;
 mod terminal;
 
@@ -39,25 +40,46 @@ use eventos::{Mensagem, Ouvinte};
 use tema::{EstadoVisual, TipoAviso, cores, texto_forte};
 use terminal::{MINIATURA, SO_CARTAO, TEMPO_REAL, TerminalAgente, pedir_carga};
 
-/// O que está na tela: todos os projetos do perfil ou um projeto. A abelha resume o escopo.
-#[derive(Clone, Copy, PartialEq)]
+/// O que está na tela: todos os projetos do perfil, os de um workspace ou
+/// um projeto. Vale para o quadro e para o registro (linha do tempo, daily e
+/// sprint), e a barra lateral destaca o mesmo. A abelha resume o escopo.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Escopo {
     Perfil,
+    Workspace(i64),
     Projeto(i64),
 }
 
 impl Escopo {
-    fn contem(self, projeto: i64) -> bool {
+    /// O projeto está no escopo (o workspace de cada projeto vem de `projetos`, sem consulta).
+    fn contem(self, projeto: i64, projetos: &[Projeto]) -> bool {
         match self {
             Escopo::Perfil => true,
+            Escopo::Workspace(w) => projetos.iter().any(|p| p.id == projeto && p.workspace_id == w),
             Escopo::Projeto(p) => p == projeto,
         }
     }
 
     fn projeto(self) -> Option<i64> {
         match self {
-            Escopo::Perfil => None,
             Escopo::Projeto(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn recorte(self) -> api::Recorte {
+        match self {
+            Escopo::Perfil => api::Recorte::Perfil,
+            Escopo::Workspace(w) => api::Recorte::Workspace(w),
+            Escopo::Projeto(p) => api::Recorte::Projeto(p),
+        }
+    }
+
+    fn do_recorte(r: api::Recorte) -> Escopo {
+        match r {
+            api::Recorte::Perfil => Escopo::Perfil,
+            api::Recorte::Workspace(w) => Escopo::Workspace(w),
+            api::Recorte::Projeto(p) => Escopo::Projeto(p),
         }
     }
 }
@@ -153,6 +175,9 @@ enum RespostaNavegador {
 /// Largura mínima do título no cabeçalho do painel da tarefa.
 const TITULO_MINIMO: f32 = 160.0;
 
+/// Altura que a abelha e o seletor de tema ocupam no pé da barra lateral.
+const RESERVA_ABELHA: f32 = 250.0;
+
 /// Avisos de "precisa de você" que chegam juntos viram um só.
 const JUNTAR_AVISOS: f64 = 10.0;
 /// Duração do clarão na borda do terminal capturado.
@@ -166,6 +191,11 @@ struct Colmeia {
     aviso: Option<Aviso>,
     perfil: Option<api::Perfil>,
     perfis: Vec<api::Perfil>,
+    /// O nome do workspace em foco, para o aviso se ele for removido.
+    nome_workspace: String,
+    /// A opção do tempo dos agentes mandada ao núcleo e ainda sem resposta
+    /// (o valor anterior, para desfazer se der erro).
+    tempo_pendente: Option<(bool, Receiver<Result<(), String>>)>,
     modelo: dados::Modelo,
     branches: Vec<String>,
     /// Terminais dos agentes, pelo id do agente (na demonstração, o número do terminal de teste).
@@ -287,6 +317,8 @@ impl Colmeia {
             aviso: None,
             perfil: None,
             perfis: Vec::new(),
+            nome_workspace: String::new(),
+            tempo_pendente: None,
             modelo: dados::Modelo::default(),
             branches: Vec::new(),
             terminais: HashMap::new(),
@@ -360,7 +392,7 @@ impl Colmeia {
 
         // Modo demonstração: dados de exemplo e os terminais de teste do núcleo.
         // COLMEIA_CARTOES=500, COLMEIA_TAREFA=101 e COLMEIA_CENARIO=erro ajudam a medir sem clicar.
-        app.perfil = Some(api::Perfil { id: 0, nome: "Demonstração".into(), tema: escolha.chave().into(), aviso_captura: false });
+        app.perfil = Some(api::Perfil { id: 0, nome: "Demonstração".into(), tema: escolha.chave().into(), aviso_captura: false, tempo_agentes: false });
         app.modelo.projetos = dados::projetos_demo();
         let cartoes = std::env::var("COLMEIA_CARTOES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
         app.modelo.tarefas = dados::gerar_demo(cartoes);
@@ -466,6 +498,12 @@ impl Colmeia {
         }
         let mut atencoes = Vec::new();
         let (mut linha_mudou, mut estado_mudou) = (false, false);
+        // O nome do workspace em foco, para o aviso se ele sumir.
+        if let Escopo::Workspace(w) = self.escopo
+            && let Some(p) = self.modelo.projetos.iter().find(|p| p.workspace_id == w)
+        {
+            self.nome_workspace = p.workspace.clone();
+        }
         // Novidade para a apresentação: o que não veio dela mesma (nota e anexos).
         let mut de_fora = false;
         for m in mensagens {
@@ -483,6 +521,7 @@ impl Colmeia {
                     {
                         self.escopo = Escopo::Perfil;
                     }
+                    self.conferir_workspace(agora);
                     if matches!(self.conexao, Conexao::Fora | Conexao::Antigo) {
                         self.avisar(TipoAviso::Neutro, "Conectado de novo", agora);
                         // O núcleo pode ter reiniciado: esquece o que ele sabia da
@@ -500,6 +539,13 @@ impl Colmeia {
                 }
                 Mensagem::Evento(e) => {
                     linha_mudou |= e.entra_na_linha();
+                    // A opção do tempo mudou (aqui ou em outra tela): o perfil
+                    // guarda, e o registro esconde na hora ou busca de novo.
+                    if let dados::Evento::PerfilTempoAgentes { perfil_id, mostrar, .. } = &e
+                        && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
+                    {
+                        p.tempo_agentes = *mostrar;
+                    }
                     if let dados::Evento::LousaMudou { lousa_id, dono, elementos, removidos, agente_id, .. } = &e {
                         self.lousa_mudou(*lousa_id, *dono, elementos.clone(), removidos, *agente_id, agora);
                     }
@@ -610,6 +656,7 @@ impl Colmeia {
         {
             self.tela = Tela::Quadro;
         }
+        self.conferir_workspace(agora);
         if let Some(a) = &mut self.apresentacao {
             // Na apresentação, os slides não mudam sozinhos: aparece "Novidades · R atualiza".
             a.novidades |= de_fora;
@@ -619,9 +666,9 @@ impl Colmeia {
         } else if let Tela::Registro(aba) = self.tela {
             let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
             if linha_mudou {
-                self.registro.novidade(aba, perfil, self.escopo.projeto(), ctx);
+                self.registro.novidade(aba, perfil, ctx);
             } else if estado_mudou {
-                self.registro.estado_mudou(aba, perfil, self.escopo.projeto(), ctx);
+                self.registro.estado_mudou(aba, perfil, ctx);
             }
         } else if linha_mudou || estado_mudou {
             // Fora da tela, o registro só fica marcado; busca ao voltar.
@@ -783,11 +830,32 @@ impl Colmeia {
         } else if let Escopo::Projeto(id) = self.escopo {
             api::branches(id).unwrap_or_default()
         } else {
-            let mut todas: Vec<String> = self.modelo.tarefas.iter().map(|t| t.branch.clone()).collect();
+            let escopo = self.escopo;
+            let projetos = &self.modelo.projetos;
+            let mut todas: Vec<String> = self.modelo.tarefas.iter().filter(|t| escopo.contem(t.projeto_id, projetos)).map(|t| t.branch.clone()).collect();
             todas.sort();
             todas.dedup();
             todas
         };
+    }
+
+    /// O workspace em foco ficou sem projetos (todos removidos): volta para
+    /// todos os projetos, com um aviso neutro.
+    fn conferir_workspace(&mut self, agora: f64) {
+        if let Escopo::Workspace(w) = self.escopo
+            && !self.modelo.projetos.iter().any(|p| p.workspace_id == w)
+        {
+            self.escopo = Escopo::Perfil;
+            self.carregar_branches();
+            let nome = if self.nome_workspace.is_empty() { String::new() } else { format!(" {}", self.nome_workspace) };
+            self.avisar(TipoAviso::Neutro, format!("O workspace{nome} foi removido; mostrando todos os projetos."), agora);
+        }
+    }
+
+    /// Os projetos do escopo atual, na ordem da barra lateral.
+    fn projetos_no_escopo(&self) -> Vec<&Projeto> {
+        let escopo = self.escopo;
+        self.modelo.projetos.iter().filter(|p| escopo.contem(p.id, &self.modelo.projetos)).collect()
     }
 
     fn mudar_escopo(&mut self, escopo: Escopo) {
@@ -804,7 +872,7 @@ impl Colmeia {
     fn projeto_em_foco(&self) -> Option<&Projeto> {
         match self.escopo {
             Escopo::Projeto(id) => self.modelo.projetos.iter().find(|p| p.id == id),
-            Escopo::Perfil => None,
+            Escopo::Perfil | Escopo::Workspace(_) => None,
         }
     }
 
@@ -854,7 +922,7 @@ impl Colmeia {
         };
         let foco = agente.filter(|a| t.agentes.iter().any(|x| x.id == *a)).or_else(|| t.agentes.first().map(|a| a.id)).unwrap_or(0);
         let projeto = t.projeto_id;
-        if !self.escopo.contem(projeto) {
+        if !self.escopo.contem(projeto, &self.modelo.projetos) {
             self.escopo = Escopo::Projeto(projeto);
             self.carregar_branches();
         }
@@ -872,7 +940,7 @@ impl Colmeia {
             _ => 0,
         };
         let mut candidatos: Vec<(u8, String, i64, i64)> = Vec::new();
-        for t in self.modelo.tarefas.iter().filter(|t| self.escopo.contem(t.projeto_id)) {
+        for t in self.modelo.tarefas.iter().filter(|t| self.escopo.contem(t.projeto_id, &self.modelo.projetos)) {
             for a in &t.agentes {
                 match a.visual() {
                     // O pedido de consulta vence em minutos: vem antes de tudo.
@@ -1115,12 +1183,33 @@ impl Colmeia {
                 }
                 return;
             }
-            match self.projeto_em_foco() {
-                None => {
+            let workspace = match self.escopo {
+                Escopo::Workspace(w) => {
+                    let projetos: Vec<&Projeto> = self.modelo.projetos.iter().filter(|p| p.workspace_id == w).collect();
+                    projetos.first().map(|p| (p.workspace.clone(), projetos.len()))
+                }
+                _ => None,
+            };
+            // Dentro de uma tarefa, o caminho é sempre o da própria tarefa
+            // (perfil › workspace › projeto), seja qual for o escopo de onde se veio.
+            let projeto_da_tarefa = match self.tela {
+                Tela::Tarefa { id, .. } => {
+                    self.modelo.tarefas.iter().find(|t| t.id == id).and_then(|t| self.modelo.projetos.iter().find(|p| p.id == t.projeto_id))
+                }
+                _ => None,
+            };
+            let workspace = if projeto_da_tarefa.is_some() { None } else { workspace };
+            match (projeto_da_tarefa.or(self.projeto_em_foco()), workspace) {
+                (None, Some((nome, n))) => {
+                    ui.label(RichText::new(format!("{perfil}  ›")).color(p.suave));
+                    ui.label(texto_forte(&nome, 15.0).color(p.texto));
+                    ui.label(RichText::new(if n == 1 { "1 projeto".to_string() } else { format!("{n} projetos") }).color(p.suave));
+                }
+                (None, None) => {
                     ui.label(texto_forte(&perfil, 15.0).color(p.texto));
                     ui.label(RichText::new("todos os projetos").color(p.suave));
                 }
-                Some(projeto) => {
+                (Some(projeto), _) => {
                     ui.label(RichText::new(format!("{perfil}  ›  {}  ›", projeto.workspace)).color(p.suave));
                     ui.label(texto_forte(&projeto.nome, 15.0).color(p.texto));
                 }
@@ -1183,6 +1272,8 @@ impl Colmeia {
         };
         let mut avisar = None;
         let mut apresentar = false;
+        let mut mudar_tempo = None;
+        let mut barra_arranjo: Option<ArranjoBarra> = None;
         ui.horizontal(|ui| {
             ui.set_height(34.0);
             if !self.demo {
@@ -1206,6 +1297,17 @@ impl Colmeia {
                 ui.interact(area, ui.id().with("dica-troca"), egui::Sense::hover())
                     .on_hover_text("Quadro, linha do tempo (Ctrl+Shift+L), daily (Ctrl+Shift+D) e sprint");
                 ui.add_space(12.0);
+                if let Some(aba) = aba {
+                    // O grupo da direita é medido antes: o chip "Ver" fica com o
+                    // que sobra (cortado até um mínimo) e nada vai por cima dele.
+                    let valor = self.valor_ver();
+                    let natural = tema::largura_chip(ui, "Ver", &valor);
+                    let livre = ui.available_width() - 8.0;
+                    let arranjo = self.arranjo_barra(ui, aba, livre, natural);
+                    let maximo = (livre - arranjo.largura).clamp(CHIP_VER_MINIMO, natural);
+                    self.chip_ver(ui, maximo);
+                    barra_arranjo = Some(arranjo);
+                }
             }
             if aba.is_none() {
                 let valor = self.filtro.clone().unwrap_or_else(|| "todas".into());
@@ -1243,46 +1345,118 @@ impl Colmeia {
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
+                let pode = self.pode_mudar();
+                let dica_tempo = if pode {
+                    "Quanto tempo os agentes trabalharam e quanto esperaram você. Fica salvo neste perfil e vale para a daily, a sprint, a linha do tempo, a apresentação e o texto copiado."
+                } else {
+                    "Sem conexão com o núcleo"
+                };
+                let arranjo = barra_arranjo.unwrap_or_default();
                 match aba {
-                    Some(registro::Aba::Linha) => {}
+                    Some(registro::Aba::Linha) => {
+                        if let Some(rotulo) = arranjo.caixa {
+                            let mut marcada = tempo;
+                            if tema::caixa_marcar_com(ui, rotulo, &mut marcada, pode).on_hover_text(dica_tempo).changed() {
+                                mudar_tempo = Some(marcada);
+                            }
+                        } else {
+                            let mais = tema::botao_icone(ui, tema::Icone::Mais, 32.0);
+                            let aberto = egui::Popup::is_id_open(ui.ctx(), egui::Id::new("menu-registro"));
+                            let mais = if aberto { mais } else { mais.on_hover_text("Mais opções da linha do tempo") };
+                            egui::Popup::menu(&mais).id(egui::Id::new("menu-registro")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                                ui.set_min_width(240.0);
+                                if opcao_tempo(ui, tempo, pode) {
+                                    mudar_tempo = Some(!tempo);
+                                    ui.close();
+                                }
+                            });
+                        }
+                    }
                     Some(aba) => {
-                        // "Apresentar" sempre no mesmo lugar, na ponta: o "⋯" da
-                        // sprint fica à esquerda dos outros e não o empurra.
-                        // Sem trabalho no período, ele não aparece (nada de botão inativo).
-                        if self.registro.deck(aba).is_some() {
-                            apresentar = tema::botao_principal(ui, "Apresentar", true).on_hover_text("F5").clicked();
-                            ui.add_space(8.0);
+                        // "Apresentar" sempre no mesmo lugar, na ponta: o "⋯" fica
+                        // à esquerda dos outros e não o empurra. Sem trabalho no
+                        // período, ele não aparece (nada de botão inativo). Logo
+                        // depois de desligar o tempo, ficam inativos até a
+                        // resposta sem ele chegar.
+                        let atualizando = self.registro.atualizando();
+                        let texto = self.registro.texto(aba);
+                        if atualizando {
+                            tema::botao_principal(ui, "Apresentar", false).on_hover_text("Atualizando…");
+                            if arranjo.copiar {
+                                ui.add_space(8.0);
+                                tema::botao_secundario_com(ui, "Copiar texto", false).on_hover_text("Atualizando…");
+                            }
+                        } else {
+                            if self.registro.deck(aba).is_some() {
+                                apresentar = tema::botao_principal(ui, "Apresentar", true).on_hover_text("F5").clicked();
+                                ui.add_space(8.0);
+                            }
+                            if arranjo.copiar
+                                && let Some(texto) = &texto
+                                && tema::botao_secundario_com(ui, "Copiar texto", pode).clicked()
+                            {
+                                ui.ctx().copy_text(texto.clone());
+                                avisar = Some("Copiado");
+                            }
                         }
-                        if let Some(texto) = self.registro.texto(aba)
-                            && tema::botao_secundario_com(ui, "Copiar texto", self.pode_mudar()).clicked()
-                        {
-                            ui.ctx().copy_text(texto);
-                            avisar = Some("Copiado");
-                        }
-                        if aba == registro::Aba::Sprint {
+                        // A caixa do tempo fica na barra quando cabe; senão é o
+                        // primeiro item do "⋯" (que então aparece nas duas abas).
+                        if arranjo.mais {
                             ui.add_space(8.0);
                             let mais = tema::botao_icone(ui, tema::Icone::Mais, 32.0);
-                            let aberto = egui::Popup::is_id_open(ui.ctx(), egui::Id::new("menu-sprint"));
-                            let mais = if aberto { mais } else { mais.on_hover_text("Mais opções da sprint") };
+                            let aberto = egui::Popup::is_id_open(ui.ctx(), egui::Id::new("menu-registro"));
+                            let rotulo = if aba == registro::Aba::Sprint { "Mais opções da sprint" } else { "Mais opções da daily" };
+                            let mais = if aberto { mais } else { mais.on_hover_text(rotulo) };
                             // Id fixo e fechar só com clique fora: o clique no item
                             // é lido antes de o menu fechar (o menu fecha pelo ui.close()).
-                            egui::Popup::menu(&mais).id(egui::Id::new("menu-sprint")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(
+                            egui::Popup::menu(&mais).id(egui::Id::new("menu-registro")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(
                                 |ui| {
                                     ui.set_min_width(240.0);
-                                    let tem = self.registro.markdown().is_some() && self.pode_mudar();
-                                    if tema::opcao_menu_com(ui, "Copiar em Markdown", None, tem) {
-                                        if let Some(md) = self.registro.markdown() {
-                                            ui.ctx().copy_text(md);
-                                            avisar = Some("Copiado em Markdown");
-                                        }
+                                    if arranjo.caixa.is_none() && opcao_tempo(ui, tempo, pode) {
+                                        mudar_tempo = Some(!tempo);
                                         ui.close();
                                     }
-                                    if tema::opcao_menu_com(ui, "Salvar…", Some("Ctrl+S"), tem) {
-                                        self.registro.salvar_sprint(ui.ctx());
-                                        ui.close();
+                                    if !arranjo.copiar {
+                                        if arranjo.caixa.is_none() {
+                                            linha_do_menu(ui);
+                                        }
+                                        let tem = texto.is_some() && !atualizando && pode;
+                                        if tema::opcao_menu_com(ui, "Copiar texto", None, tem) {
+                                            if let Some(t) = &texto {
+                                                ui.ctx().copy_text(t.clone());
+                                                avisar = Some("Copiado");
+                                            }
+                                            ui.close();
+                                        }
+                                    }
+                                    if aba == registro::Aba::Sprint {
+                                        if arranjo.caixa.is_none() || !arranjo.copiar {
+                                            linha_do_menu(ui);
+                                        }
+                                        let tem = self.registro.markdown().is_some() && pode;
+                                        let copiar = tema::opcao_menu_com(ui, "Copiar em Markdown", None, tem);
+                                        if copiar {
+                                            if let Some(md) = self.registro.markdown() {
+                                                ui.ctx().copy_text(md);
+                                                avisar = Some("Copiado em Markdown");
+                                            }
+                                            ui.close();
+                                        }
+                                        if tema::opcao_menu_com(ui, "Salvar…", Some("Ctrl+S"), tem) {
+                                            self.registro.salvar_sprint(ui.ctx());
+                                            ui.close();
+                                        }
                                     }
                                 },
                             );
+                        }
+                        if let Some(rotulo) = arranjo.caixa {
+                            ui.add_space(20.0);
+                            let mut marcada = tempo;
+                            if tema::caixa_marcar_com(ui, rotulo, &mut marcada, pode).on_hover_text(dica_tempo).changed() {
+                                mudar_tempo = Some(marcada);
+                            }
                         }
                     }
                     None => {
@@ -1290,11 +1464,11 @@ impl Colmeia {
                         let resposta = tema::botao_principal(ui, "+ Nova tarefa", pode);
                         let resposta = if !self.pode_mudar() { resposta.on_hover_text("Indisponível sem o núcleo") } else { resposta };
                         if resposta.clicked() {
-                            let todos = self.modelo.projetos.clone();
+                            // Em "Todos os projetos" e num workspace, o diálogo deixa escolher o projeto.
+                            let todos: Vec<Projeto> = self.projetos_no_escopo().into_iter().cloned().collect();
                             let projeto = self.projeto_em_foco().cloned().or_else(|| todos.first().cloned());
                             if let Some(projeto) = projeto {
-                                // Em "Todos os projetos", o diálogo deixa escolher o projeto.
-                                let outros = if self.escopo == Escopo::Perfil { todos } else { Vec::new() };
+                                let outros = if self.escopo.projeto().is_none() { todos } else { Vec::new() };
                                 self.dialogo = Some(Dialogo::NovaTarefa(dialogos::NovaTarefa::new(projeto, outros)));
                             }
                         }
@@ -1303,11 +1477,167 @@ impl Colmeia {
             });
         });
         ui.add_space(10.0);
+        if let Some(mostrar) = mudar_tempo {
+            self.mudar_tempo(ui.ctx(), mostrar);
+        }
         if let Some(texto) = avisar {
             self.avisar(TipoAviso::Neutro, texto, agora);
         }
         if apresentar {
             self.apresentar(ui.ctx(), Inicio::Capa, true);
+        }
+    }
+
+    /// O chip "Ver" da barra do registro: de quais projetos ver (o perfil,
+    /// um workspace ou um projeto). Muda o mesmo escopo da barra lateral.
+    /// Mede as peças do grupo da direita e escolhe o arranjo da barra.
+    fn arranjo_barra(&self, ui: &egui::Ui, aba: registro::Aba, livre: f32, chip: f32) -> ArranjoBarra {
+        let medir = |t: &str, fonte: egui::FontId| ui.painter().layout_no_wrap(t.to_owned(), fonte, p_texto()).size().x;
+        let espaco = ui.spacing().item_spacing.x;
+        let pecas = PecasBarra {
+            apresentar: medir("Apresentar", tema::forte(13.5)) + 32.0 + 8.0 + espaco * 2.0,
+            copiar: medir("Copiar texto", egui::FontId::proportional(13.0)) + 28.0 + 8.0 + espaco * 2.0,
+            mais: 32.0 + 8.0 + espaco * 2.0,
+            caixa: medir("Mostrar tempo dos agentes", egui::FontId::proportional(13.5)) + 24.0 + 20.0 + espaco * 2.0,
+            caixa_curta: medir("Tempo dos agentes", egui::FontId::proportional(13.5)) + 24.0 + 20.0 + espaco * 2.0,
+        };
+        let atualizando = self.registro.atualizando();
+        let tem_apresentar = atualizando || self.registro.deck(aba).is_some();
+        let tem_copiar = atualizando || self.registro.texto(aba).is_some();
+        arranjar_barra(aba == registro::Aba::Linha, aba == registro::Aba::Sprint, tem_apresentar, tem_copiar, pecas, livre, chip)
+    }
+
+    /// O que o chip "Ver" diz: "todos os projetos", o workspace ou o projeto
+    /// (com o workspace na frente quando o nome se repete).
+    fn valor_ver(&self) -> String {
+        let projetos = &self.modelo.projetos;
+        let repetido = |nome: &str| projetos.iter().filter(|p| p.nome == nome).count() > 1;
+        match self.escopo {
+            Escopo::Perfil => "todos os projetos".to_string(),
+            Escopo::Workspace(w) => projetos.iter().find(|p| p.workspace_id == w).map_or_else(|| "workspace".into(), |p| p.workspace.clone()),
+            Escopo::Projeto(id) => match projetos.iter().find(|p| p.id == id) {
+                Some(p) if repetido(&p.nome) => format!("{} › {}", p.workspace, p.nome),
+                Some(p) => p.nome.clone(),
+                None => "projeto".into(),
+            },
+        }
+    }
+
+    fn chip_ver(&mut self, ui: &mut egui::Ui, maximo: f32) {
+        let projetos = &self.modelo.projetos;
+        // Os workspaces na ordem da lateral, com os projetos de cada um.
+        let mut workspaces: Vec<(i64, &str, Vec<&Projeto>)> = Vec::new();
+        for p in projetos {
+            match workspaces.last_mut() {
+                Some((id, _, lista)) if *id == p.workspace_id => lista.push(p),
+                _ => workspaces.push((p.workspace_id, &p.workspace, vec![p])),
+            }
+        }
+        let valor = self.valor_ver();
+        let id_menu = egui::Id::new("menu-ver");
+        let resposta = tema::chip_com_largura(ui, "Ver", &valor, self.escopo != Escopo::Perfil, maximo);
+        let resposta = if egui::Popup::is_id_open(ui.ctx(), id_menu) {
+            resposta
+        } else {
+            resposta.on_hover_text(format!("Ver: {valor}. De quais projetos ver: o perfil, um workspace ou um projeto. Muda também a barra lateral."))
+        };
+        let mut escolha = None;
+        let varios_workspaces = workspaces.len() > 1;
+        // O menu vai até a borda de baixo da janela (menos uma margem); se
+        // ainda não couber, a barra de rolagem sólida fica sempre à vista e
+        // as linhas param antes dela.
+        let altura_menu = (ui.ctx().content_rect().bottom() - resposta.rect.bottom() - 40.0).max(160.0);
+        egui::Popup::menu(&resposta).id(id_menu).show(|ui| {
+            ui.set_min_width(260.0);
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            ui.spacing_mut().scroll.bar_width = 6.0;
+            egui::ScrollArea::vertical().max_height(altura_menu).show(ui, |ui| {
+                // A largura final já vale na primeira linha (a bolinha do marcado fica no mesmo x).
+                ui.set_min_width(ui.available_width().clamp(240.0, 260.0));
+                let n = projetos.len();
+                if tema::opcao_menu_arvore(ui, "Todos os projetos", Some(&format!("· {n}")), 0, self.escopo == Escopo::Perfil) {
+                    escolha = Some(Escopo::Perfil);
+                }
+                linha_do_menu(ui);
+                for (ws, nome, lista) in &workspaces {
+                    let nivel = if varios_workspaces && *ws != 0 {
+                        let detalhe = if lista.len() == 1 { "· 1 projeto".to_string() } else { format!("· {} projetos", lista.len()) };
+                        if tema::opcao_menu_arvore(ui, nome, Some(&detalhe), 0, self.escopo == Escopo::Workspace(*ws)) {
+                            escolha = Some(Escopo::Workspace(*ws));
+                        }
+                        1
+                    } else {
+                        0
+                    };
+                    for p in lista {
+                        if tema::opcao_menu_arvore(ui, &p.nome, None, nivel, self.escopo == Escopo::Projeto(p.id)) {
+                            escolha = Some(Escopo::Projeto(p.id));
+                        }
+                    }
+                }
+            });
+        });
+        if let Some(e) = escolha {
+            egui::Popup::close_id(ui.ctx(), id_menu);
+            if e != self.escopo {
+                self.mudar_escopo(e);
+            }
+        }
+        ui.add_space(8.0);
+    }
+
+    /// Liga ou desliga o tempo dos agentes: muda aqui na hora (o registro
+    /// esconde na hora ao desligar) e grava no núcleo numa thread. Se o núcleo
+    /// recusar, a caixa volta como estava e um aviso diz por quê.
+    fn mudar_tempo(&mut self, ctx: &egui::Context, mostrar: bool) {
+        let Some(perfil) = self.perfil.as_mut() else { return };
+        if perfil.tempo_agentes == mostrar {
+            return;
+        }
+        let antes = perfil.tempo_agentes;
+        perfil.tempo_agentes = mostrar;
+        let (envio, recebe) = mpsc::channel();
+        let (id, ctx) = (perfil.id, ctx.clone());
+        std::thread::spawn(move || {
+            let _ = envio.send(api::definir_tempo_agentes(id, mostrar));
+            ctx.request_repaint();
+        });
+        // Um pedido anterior ainda sem resposta fica com o valor de antes dele.
+        let antes = self.tempo_pendente.take().map_or(antes, |(a, _)| a);
+        self.tempo_pendente = Some((antes, recebe));
+    }
+
+    /// Recolhe ou abre um workspace na barra lateral: muda aqui na hora e
+    /// grava no núcleo numa thread (as outras telas recebem pelo evento). Se
+    /// não gravar, só volta aberto na próxima vez que a Colmeia abrir.
+    fn recolher_workspace(&mut self, workspace: i64, recolhido: bool) {
+        for p in self.modelo.projetos.iter_mut().filter(|p| p.workspace_id == workspace) {
+            p.recolhido = recolhido;
+        }
+        if !self.demo {
+            std::thread::spawn(move || {
+                if let Err(e) = api::recolher_workspace(workspace, recolhido) {
+                    eprintln!("colmeia: não consegui guardar o workspace recolhido: {e}");
+                }
+            });
+        }
+    }
+
+    /// A resposta do núcleo à opção do tempo: em erro, desfaz e avisa.
+    fn receber_tempo(&mut self, agora: f64) {
+        let Some((antes, recebe)) = &self.tempo_pendente else { return };
+        let resultado = match recebe.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("sem resposta do núcleo".into()),
+        };
+        let antes = *antes;
+        self.tempo_pendente = None;
+        if let Err(e) = resultado {
+            if let Some(p) = self.perfil.as_mut() {
+                p.tempo_agentes = antes;
+            }
+            self.avisar(TipoAviso::Erro, format!("Não consegui salvar a opção do tempo: {e}"), agora);
         }
     }
 
@@ -1404,56 +1734,107 @@ impl Colmeia {
             }
         }
         ui.add_space(8.0);
-        let mut workspace_anterior = String::new();
+        let mut workspace_anterior = None;
         let mut mudar = None;
+        let mut mudar_workspace = None;
         let mut remover = None;
         let mut abrir_lousa = None;
+        let mut recolher = None;
         let pode = self.pode_mudar();
         let lousa_aberta = if let Tela::Lousa(ws) = self.tela { Some(ws) } else { None };
-        for projeto in &self.modelo.projetos {
-            if projeto.workspace != workspace_anterior {
-                ui.add_space(6.0);
-                ui.label(RichText::new(&projeto.workspace).color(p.suave).size(11.5));
-                workspace_anterior = projeto.workspace.clone();
-                // A lousa do workspace, antes dos projetos (fora da demonstração).
-                if !self.demo && projeto.workspace_id != 0 {
-                    ui.add_space(2.0);
-                    let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", projeto.workspace);
-                    if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa))
-                        .0
-                        .on_hover_text(dica)
-                        .clicked()
-                    {
-                        abrir_lousa = Some(projeto.workspace_id);
+        let fora_do_escopo = matches!(self.tela, Tela::Lousa(_) | Tela::Banco);
+        // A lista rola quando não cabe acima da abelha e do tema (janela
+        // baixa, muitos projetos): a abelha nunca cobre um projeto.
+        let altura_lista = (ui.available_height() - RESERVA_ABELHA).max(96.0);
+        // Barra de rolagem sólida: aparece sempre que há mais embaixo (não só
+        // com o mouse em cima) e reserva a largura dela, sem cobrir o realce,
+        // a contagem nem o ponto de estado dos itens.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        ui.spacing_mut().scroll.bar_width = 6.0;
+        egui::ScrollArea::vertical().id_salt("lateral-projetos").max_height(altura_lista).auto_shrink([false, true]).show(ui, |ui| {
+            for projeto in &self.modelo.projetos {
+                // Recolhido, o workspace esconde a lousa e os projetos, menos o que está aberto.
+                let recolhido = projeto.recolhido && projeto.workspace_id != 0;
+                if workspace_anterior != Some((projeto.workspace_id, &projeto.workspace)) {
+                    ui.add_space(6.0);
+                    workspace_anterior = Some((projeto.workspace_id, &projeto.workspace));
+                    // O nome do workspace abre todos os projetos dele (quadro, daily e sprint juntos).
+                    if projeto.workspace_id != 0 {
+                        let ativo = self.escopo == Escopo::Workspace(projeto.workspace_id) && !fora_do_escopo;
+                        let do_workspace = |id: i64| self.modelo.projetos.iter().any(|x| x.id == id && x.workspace_id == projeto.workspace_id);
+                        let n = self.modelo.projetos.iter().filter(|x| x.workspace_id == projeto.workspace_id).count();
+                        // O estado mais urgente das tarefas do workspace, para o ponto do recolhido.
+                        let tarefas = || self.modelo.tarefas.iter().filter(|t| do_workspace(t.projeto_id));
+                        let ponto = recolhido
+                            .then(|| {
+                                let estado = abelha::estado_base(tarefas(), rodando);
+                                let concluiu = self.abelha.conclusoes.iter().any(|c| do_workspace(c.projeto_id) && agora - c.em < abelha::CONCLUSAO_RECENTE);
+                                abelha::cor_ponto(estado, tarefas().any(|t| t.erro.is_some()), concluiu)
+                            })
+                            .flatten();
+                        let (resposta, seta) = cabecalho_lateral(ui, &projeto.workspace, ativo, n, recolhido, ponto);
+                        if resposta.on_hover_text(format!("Todos os projetos de {} (daily, sprint e quadro juntos)", projeto.workspace)).clicked() {
+                            mudar_workspace = Some(projeto.workspace_id);
+                        }
+                        if seta.clicked() {
+                            recolher = Some((projeto.workspace_id, !recolhido));
+                        }
+                    } else {
+                        ui.label(RichText::new(&projeto.workspace).color(p.suave).size(11.5));
+                    }
+                    // A lousa do workspace, antes dos projetos (fora da demonstração).
+                    if !self.demo && projeto.workspace_id != 0 && !recolhido {
+                        ui.add_space(2.0);
+                        let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", projeto.workspace);
+                        if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa))
+                            .0
+                            .on_hover_text(dica)
+                            .clicked()
+                        {
+                            abrir_lousa = Some(projeto.workspace_id);
+                        }
                     }
                 }
-            }
-            let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none() && !matches!(self.tela, Tela::Banco);
-            let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
-            let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
-            let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
-            let (resposta, mais) = item_lateral(ui, &projeto.nome, ativo, abelha::cor_ponto(estado, tem_erro, concluiu), !self.demo, None);
-            let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
-            if resposta.clicked() {
-                mudar = Some(projeto.id);
-            }
-            if self.demo {
-                continue;
-            }
-            let menu = |ui: &mut egui::Ui, remover: &mut Option<(i64, String)>| {
-                ui.set_min_width(240.0);
-                if tema::opcao_menu_com(ui, "Remover da Colmeia…", None, pode) {
-                    *remover = Some((projeto.id, projeto.nome.clone()));
-                    ui.close();
+                let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none() && !matches!(self.tela, Tela::Banco);
+                if recolhido && self.escopo != Escopo::Projeto(projeto.id) {
+                    continue;
                 }
-            };
-            resposta.context_menu(|ui| menu(ui, &mut remover));
-            if let Some(mais) = mais {
-                egui::Popup::menu(&mais).show(|ui| menu(ui, &mut remover));
+                let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
+                let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
+                let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
+                let (resposta, mais) = item_lateral(ui, &projeto.nome, ativo, abelha::cor_ponto(estado, tem_erro, concluiu), !self.demo, None);
+                let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
+                if resposta.clicked() {
+                    mudar = Some(projeto.id);
+                }
+                if self.demo {
+                    continue;
+                }
+                let menu = |ui: &mut egui::Ui, remover: &mut Option<(i64, String)>| {
+                    ui.set_min_width(240.0);
+                    if tema::opcao_menu_com(ui, "Remover da Colmeia…", None, pode) {
+                        *remover = Some((projeto.id, projeto.nome.clone()));
+                        ui.close();
+                    }
+                };
+                resposta.context_menu(|ui| menu(ui, &mut remover));
+                if let Some(mais) = mais {
+                    egui::Popup::menu(&mais).show(|ui| menu(ui, &mut remover));
+                }
             }
-        }
+        });
         if let Some(id) = mudar {
             self.mudar_escopo(Escopo::Projeto(id));
+        }
+        if let Some((ws, recolhido)) = recolher {
+            self.recolher_workspace(ws, recolhido);
+        }
+        if let Some(ws) = mudar_workspace {
+            // Da lousa ou dos bancos, o workspace abre no quadro.
+            if fora_do_escopo {
+                self.tela = Tela::Quadro;
+            }
+            self.mudar_escopo(Escopo::Workspace(ws));
         }
         if let Some(ws) = abrir_lousa {
             self.abrir_lousa_do_workspace(ws);
@@ -1726,7 +2107,14 @@ impl Colmeia {
             self.mostrar_gaveta(ui.ctx(), id, area_gaveta, coluna.width(), &pasta, Some(foco), agora);
         }
         let caixa_mensagem = egui::Rect::from_min_max(egui::pos2(coluna.min.x, principal.max.y + 10.0), coluna.max);
-        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco, id) {
+        // Com um diálogo ou caixa por cima, o Enter é de quem está por cima.
+        let teclado_livre = self.dialogo.is_none()
+            && !self.banco.modal_aberto()
+            && self.caixa_pedido.is_none()
+            && self.apresentacao.is_none()
+            && self.palco.is_none()
+            && self.popover_navegador.is_none();
+        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco, id, teclado_livre) {
             for agente in envio.destinos {
                 if let Some(t) = self.terminais.get(&agente) {
                     t.enviar(&envio.texto);
@@ -2075,7 +2463,7 @@ impl Colmeia {
                     _ => registro::Aba::Daily,
                 };
                 if let Some(projeto) = self.modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.projeto_id)
-                    && !self.escopo.contem(projeto)
+                    && !self.escopo.contem(projeto, &self.modelo.projetos)
                 {
                     self.mudar_escopo(Escopo::Projeto(projeto));
                 }
@@ -2203,7 +2591,8 @@ impl Colmeia {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         }
         self.abelha.resumo_aberto = false;
-        let a = Apresentacao::nova(ctx, perfil, self.escopo.projeto(), periodo, deck, inicio, tela_cheia || self.tela_cheia_antes, self.tema);
+        let mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
+        let a = Apresentacao::nova(ctx, perfil, self.escopo.recorte(), periodo, deck, inicio, tela_cheia || self.tela_cheia_antes, self.tema, mostrar_tempo);
         self.apresentacao = Some(Box::new(a));
     }
 
@@ -2772,6 +3161,166 @@ fn item_lateral(
     (resposta, mais)
 }
 
+/// Cabeçalho de um workspace na barra lateral: o nome, pequeno como antes,
+/// agora clicável (mostra todos os projetos dele). Com o mouse em cima o
+/// texto vai para a cor do texto (o suave sobre o realce não tem contraste
+/// nos temas claros); ativo, fundo de realce e seminegrito. O número de
+/// projetos aparece à direita só ativo ou com o mouse em cima.
+/// A seta à esquerda recolhe ou abre o workspace (devolvida à parte: o
+/// clique nela não abre a visão do workspace); recolhido, o ponto mostra o
+/// estado mais urgente dos projetos escondidos.
+fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize, recolhido: bool, ponto: Option<Color32>) -> (egui::Response, egui::Response) {
+    let p = cores();
+    let (rect, resposta) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
+    let area_seta = egui::Rect::from_min_size(rect.min, egui::vec2(24.0, rect.height()));
+    let seta = ui.interact(area_seta, ui.id().with(("recolher-workspace", nome)), egui::Sense::click());
+    let seta = seta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if recolhido { "Mostrar os projetos" } else { "Recolher os projetos" });
+    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let em_cima = resposta.hovered() || seta.hovered();
+    if ativo || em_cima {
+        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), if ativo { p.realce } else { p.realce.gamma_multiply(0.6) });
+    }
+    let (fonte, cor) = match (ativo, em_cima) {
+        (true, _) => (tema::forte(11.5), p.texto),
+        (false, true) => (egui::FontId::proportional(11.5), p.texto),
+        (false, false) => (egui::FontId::proportional(11.5), p.suave),
+    };
+    // O ativo leva também a marca de 3 px à esquerda (no Leitura o realce
+    // do ativo e o do mouse em cima ficam quase iguais).
+    if ativo {
+        let marca = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 5.0), egui::vec2(3.0, rect.height() - 10.0));
+        ui.painter().rect_filled(marca, CornerRadius::same(2), p.destaque);
+    }
+    // A contagem sempre aparece: o cabeçalho parece um item da lista. Sobre o
+    // realce ela vai na cor do texto (o suave ali fica abaixo de 4,5:1); a
+    // diferença para o nome vem do peso.
+    let quantos = if projetos == 1 { "1 projeto".to_string() } else { format!("{projetos} projetos") };
+    let cor_quantos = if ativo || em_cima { p.texto } else { p.suave };
+    let g_quantos = ui.painter().layout_no_wrap(quantos, egui::FontId::proportional(11.0), cor_quantos);
+    // A seta desenhada (a fonte não tem ▸/▾): para a direita recolhido, para baixo aberto.
+    let c = rect.left_center() + egui::vec2(12.0, 0.0);
+    let cor_seta = if seta.hovered() { p.texto } else { p.suave };
+    let pontas = if recolhido {
+        vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 3.5)]
+    } else {
+        vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(pontas, cor_seta, Stroke::NONE));
+    let reserva_ponto = if recolhido && ponto.is_some() { 14.0 } else { 0.0 };
+    let largura = rect.width() - 24.0 - 14.0 - g_quantos.size().x - reserva_ponto - 8.0;
+    let texto = tema::cortar(ui.painter(), nome, egui::text::TextFormat::simple(fonte, cor), largura, 1, false);
+    ui.painter().galley(rect.left_center() + egui::vec2(24.0, -texto.size().y / 2.0), texto, cor);
+    let pos = rect.right_center() - egui::vec2(14.0 + g_quantos.size().x, g_quantos.size().y / 2.0);
+    ui.painter().galley(pos, g_quantos, cor_quantos);
+    if recolhido && let Some(cor) = ponto {
+        ui.painter().circle_filled(egui::pos2(pos.x - 10.0, rect.center().y), 4.0, cor);
+    }
+    if resposta.has_focus() {
+        ui.painter().rect_stroke(rect, CornerRadius::same(tema::RAIO_CONTROLE), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
+    }
+    (resposta, seta)
+}
+
+/// A cor do texto (para medir antes de desenhar).
+fn p_texto() -> Color32 {
+    cores().texto
+}
+
+/// O nome de cada projeto do recorte nos cartões do quadro: com o workspace
+/// na frente ("trabalho-x · loja-web") quando o nome se repete no recorte,
+/// como na linha do tempo.
+fn rotulos_de_projeto(projetos: &[Projeto], no_escopo: &HashSet<i64>) -> HashMap<i64, String> {
+    let no_recorte: Vec<&Projeto> = projetos.iter().filter(|p| no_escopo.contains(&p.id)).collect();
+    no_recorte
+        .iter()
+        .map(|p| {
+            let repetido = no_recorte.iter().filter(|o| o.nome == p.nome).count() > 1;
+            (p.id, if repetido && !p.workspace.is_empty() { format!("{} · {}", p.workspace, p.nome) } else { p.nome.clone() })
+        })
+        .collect()
+}
+
+/// "Mostrar tempo dos agentes" no "⋯", com a marca quando ligada. Sem o
+/// núcleo, inativa e dizendo o último valor conhecido.
+fn opcao_tempo(ui: &mut egui::Ui, tempo: bool, pode: bool) -> bool {
+    if pode {
+        tema::opcao_menu(ui, "Mostrar tempo dos agentes", tempo)
+    } else {
+        tema::opcao_menu_com(ui, "Mostrar tempo dos agentes", Some(if tempo { "ligado" } else { "desligado" }), false)
+    }
+}
+
+/// O chip "Ver" nunca fica mais estreito que isto ("Ver: todos os p…").
+const CHIP_VER_MINIMO: f32 = 140.0;
+
+/// Como o grupo da direita da barra do registro cabe: a caixa do tempo na
+/// barra (com o rótulo que coube) ou no "⋯", e "Copiar texto" na barra ou no
+/// "⋯". `largura` é o que ele ocupa, para o chip "Ver" ficar com o resto.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ArranjoBarra {
+    caixa: Option<&'static str>,
+    copiar: bool,
+    mais: bool,
+    largura: f32,
+}
+
+impl Default for ArranjoBarra {
+    fn default() -> Self {
+        ArranjoBarra { caixa: Some("Mostrar tempo dos agentes"), copiar: true, mais: false, largura: 0.0 }
+    }
+}
+
+/// Larguras das peças do grupo da direita (medidas com as fontes de verdade).
+#[derive(Clone, Copy, Debug)]
+struct PecasBarra {
+    apresentar: f32,
+    copiar: f32,
+    mais: f32,
+    caixa: f32,
+    caixa_curta: f32,
+}
+
+/// Escolhe o arranjo que cabe em `livre` deixando ao menos o mínimo do chip
+/// "Ver" (o natural, se der). Na linha do tempo só há a caixa (com o rótulo
+/// curto, ou no "⋯"); na daily e na sprint a caixa sai primeiro para o "⋯",
+/// depois "Copiar texto". A sprint sempre tem o "⋯" (Markdown e Salvar).
+fn arranjar_barra(linha: bool, sprint: bool, tem_apresentar: bool, tem_copiar: bool, pecas: PecasBarra, livre: f32, chip: f32) -> ArranjoBarra {
+    let cabe = |largura: f32, chip: f32| livre - largura >= chip;
+    if linha {
+        for (rotulo, largura) in [("Mostrar tempo dos agentes", pecas.caixa), ("Tempo dos agentes", pecas.caixa_curta)] {
+            if cabe(largura, CHIP_VER_MINIMO.min(chip)) {
+                return ArranjoBarra { caixa: Some(rotulo), copiar: false, mais: false, largura };
+            }
+        }
+        return ArranjoBarra { caixa: None, copiar: false, mais: true, largura: pecas.mais };
+    }
+    let base = if tem_apresentar { pecas.apresentar } else { 0.0 };
+    let copiar = if tem_copiar { pecas.copiar } else { 0.0 };
+    let mais_sprint = if sprint { pecas.mais } else { 0.0 };
+    let opcoes = [
+        (Some("Mostrar tempo dos agentes"), true, sprint, base + copiar + pecas.caixa + mais_sprint),
+        (None, true, true, base + copiar + pecas.mais),
+        (None, false, true, base + pecas.mais),
+    ];
+    // Antes de tirar uma peça da barra, o chip encolhe até o mínimo.
+    for (caixa, com_copiar, mais, largura) in opcoes {
+        if cabe(largura, CHIP_VER_MINIMO.min(chip)) {
+            return ArranjoBarra { caixa, copiar: com_copiar, mais, largura };
+        }
+    }
+    let (caixa, copiar, mais, largura) = opcoes[2];
+    ArranjoBarra { caixa, copiar, mais, largura }
+}
+
+/// O traço que separa partes de um menu: 1 px de borda, 8 px de margem e 4 px em volta.
+fn linha_do_menu(ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    // A largura do menu (não a disponível, que alargaria o menu inteiro).
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.min_rect().width(), 1.0), egui::Sense::hover());
+    ui.painter().line_segment([r.left_center() + egui::vec2(8.0, 0.0), r.right_center() - egui::vec2(8.0, 0.0)], Stroke::new(1.0, cores().borda));
+    ui.add_space(4.0);
+}
+
 /// Recorta o terminal da imagem da janela e codifica em PNG.
 fn recortar_png(imagem: &egui::ColorImage, area: egui::Rect, ppp: f32) -> Result<Vec<u8>, String> {
     let [largura, altura] = imagem.size;
@@ -2828,6 +3377,7 @@ impl eframe::App for Colmeia {
             return;
         }
         self.receber_eventos(&ctx, agora);
+        self.receber_tempo(agora);
         self.receber_capturas(agora);
         self.receber_navegador(agora);
         self.atalhos(&ctx);
@@ -2843,6 +3393,7 @@ impl eframe::App for Colmeia {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
                 if let Some(a) = &mut self.apresentacao {
                     a.pedidos = pedido::resumir(&self.modelo);
+                    a.definir_tempo(ui.ctx(), self.perfil.as_ref().is_some_and(|p| p.tempo_agentes));
                     pedido = a.mostrar(ui, &mut self.favo, &self.modelo, agora);
                 }
             });
@@ -2892,10 +3443,10 @@ impl eframe::App for Colmeia {
 
         // Na demonstração, "rodando" é a carga de teste; no uso normal, os agentes ativos.
         let rodando = !self.demo || self.carga != "parada";
-        let escopo = self.escopo;
-        let base = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| escopo.contem(t.projeto_id)), rodando);
-        let estado = self.abelha.atualizar(base, |p| escopo.contem(p), agora);
-        let linha = abelha::linha_de_estado(estado, self.modelo.tarefas.iter().filter(|t| escopo.contem(t.projeto_id)));
+        let no_escopo: std::collections::HashSet<i64> = self.projetos_no_escopo().iter().map(|p| p.id).collect();
+        let base = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)), rodando);
+        let estado = self.abelha.atualizar(base, |p| no_escopo.contains(&p), agora);
+        let linha = abelha::linha_de_estado(estado, self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)));
 
         let mut abelha = (None, false);
         egui::Panel::left("lateral")
@@ -2932,21 +3483,20 @@ impl eframe::App for Colmeia {
                     Tela::Quadro => {
                         self.barra(ui, agora);
                         let pode = self.pode_mudar();
-                        acoes = quadro::mostrar(ui, &mut self.modelo.tarefas, self.escopo.projeto(), self.filtro.as_deref(), &self.terminais, pode);
+                        // O nome do projeto aparece no cartão fora da visão de um projeto só.
+                        let rotulos = self.escopo.projeto().is_none().then(|| rotulos_de_projeto(&self.modelo.projetos, &no_escopo));
+                        acoes = quadro::mostrar(ui, &mut self.modelo.tarefas, &no_escopo, rotulos.as_ref(), self.filtro.as_deref(), &self.terminais, pode);
                     }
                     Tela::Registro(aba) => {
                         self.barra(ui, agora);
                         let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
-                        let projetos: Vec<String> = match self.projeto_em_foco() {
-                            Some(p) => vec![p.nome.clone()],
-                            None => self.modelo.projetos.iter().map(|p| p.nome.clone()).collect(),
-                        };
                         self.registro.conectado = self.pode_mudar();
+                        self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
                         self.registro.pedidos = pedido::resumir(&self.modelo);
                         self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
                         // O conteúdo das páginas tem as próprias margens (24 nas laterais).
                         ui.add_space(4.0);
-                        acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.projeto(), &projetos);
+                        acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos);
                     }
                     Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
                     Tela::Lousa(ws) => {
@@ -3011,6 +3561,11 @@ impl eframe::App for Colmeia {
                     self.alternar_banco(true);
                 }
                 registro::Acao::VerTodos => self.mudar_escopo(Escopo::Perfil),
+                registro::Acao::Recorte(r) => self.mudar_escopo(Escopo::do_recorte(r)),
+                registro::Acao::AbrirQuadro(projeto) => {
+                    self.mudar_escopo(Escopo::Projeto(projeto));
+                    self.tela = Tela::Quadro;
+                }
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
                 registro::Acao::Apresentar { deck, periodo, tarefa } => {
                     self.fechar_caixa_pedido();
@@ -3093,7 +3648,7 @@ impl eframe::App for Colmeia {
             && let Some(caixa) = caixa_abelha
         {
             let ancora = egui::pos2(caixa.right() + 20.0, caixa.bottom());
-            let (clicada, area) = abelha::resumo(&ctx, ancora, &self.modelo.tarefas, |p| escopo.contem(p), &self.abelha.conclusoes, rodando, agora);
+            let (clicada, area) = abelha::resumo(&ctx, ancora, &self.modelo.tarefas, |p| no_escopo.contains(&p), &self.abelha.conclusoes, rodando, agora);
             if let Some((tarefa, agente)) = clicada {
                 self.abrir_tarefa(tarefa, agente);
             } else if area.clicked_elsewhere() && !abelha_clicada {
@@ -3131,4 +3686,56 @@ fn main() -> eframe::Result {
         .unwrap_or([1600.0, 900.0]);
     let opcoes = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size(tamanho), ..Default::default() };
     eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, problema)))))
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    const PECAS: PecasBarra = PecasBarra { apresentar: 120.0, copiar: 110.0, mais: 48.0, caixa: 220.0, caixa_curta: 160.0 };
+
+    #[test]
+    fn barra_do_registro_nunca_cobre_o_chip_ver() {
+        // Larga: tudo na barra, o chip inteiro.
+        let a = arranjar_barra(false, false, true, true, PECAS, 900.0, 200.0);
+        assert_eq!((a.caixa.is_some(), a.copiar, a.mais), (true, true, false));
+        // Meia tela: a caixa vai para o "⋯" (que aparece também na daily).
+        let a = arranjar_barra(false, false, true, true, PECAS, 450.0, 200.0);
+        assert_eq!((a.caixa, a.copiar, a.mais), (None, true, true));
+        assert!(450.0 - a.largura >= CHIP_VER_MINIMO);
+        // Mais estreita: "Copiar texto" também vai para o "⋯".
+        let a = arranjar_barra(false, true, true, true, PECAS, 330.0, 200.0);
+        assert_eq!((a.caixa, a.copiar, a.mais), (None, false, true));
+        assert!(330.0 - a.largura >= CHIP_VER_MINIMO);
+        // Na sprint o "⋯" está sempre lá.
+        assert!(arranjar_barra(false, true, true, true, PECAS, 2000.0, 200.0).mais);
+        // Linha do tempo: o rótulo curto antes de ir para o "⋯".
+        assert_eq!(arranjar_barra(true, false, false, false, PECAS, 380.0, 200.0).caixa, Some("Mostrar tempo dos agentes"));
+        assert_eq!(arranjar_barra(true, false, false, false, PECAS, 330.0, 200.0).caixa, Some("Tempo dos agentes"));
+        let a = arranjar_barra(true, false, false, false, PECAS, 250.0, 200.0);
+        assert_eq!((a.caixa, a.mais), (None, true));
+    }
+
+    #[test]
+    fn rotulo_do_projeto_no_quadro_diz_o_workspace_quando_o_nome_se_repete() {
+        let projeto = |id: i64, nome: &str, ws: &str| Projeto {
+            id,
+            nome: nome.into(),
+            workspace_id: 0,
+            workspace: ws.into(),
+            recolhido: false,
+            caminho: String::new(),
+            sem_git: false,
+            branch_padrao: String::new(),
+        };
+        let projetos = vec![projeto(1, "loja-web", "estudos"), projeto(2, "loja-web", "trabalho-x"), projeto(3, "pedidos-api", "trabalho-x")];
+        let todos: HashSet<i64> = [1, 2, 3].into();
+        let r = rotulos_de_projeto(&projetos, &todos);
+        assert_eq!(r[&1], "estudos · loja-web");
+        assert_eq!(r[&2], "trabalho-x · loja-web");
+        assert_eq!(r[&3], "pedidos-api");
+        // No workspace trabalho-x o nome não se repete.
+        let r = rotulos_de_projeto(&projetos, &[2, 3].into());
+        assert_eq!(r[&2], "loja-web");
+    }
 }

@@ -50,6 +50,8 @@ pub struct Projeto {
     /// O workspace: o id (para a lousa dele) e o nome.
     pub workspace_id: i64,
     pub workspace: String,
+    /// O workspace está recolhido na barra lateral.
+    pub recolhido: bool,
     pub caminho: String,
     /// Pasta de trabalho sem git: sem branches nem cópias isoladas.
     pub sem_git: bool,
@@ -63,6 +65,7 @@ impl From<api::Projeto> for Projeto {
             nome: p.nome,
             workspace_id: p.workspace_id,
             workspace: p.workspace,
+            recolhido: p.workspace_recolhido,
             caminho: p.caminho,
             sem_git: p.tipo == "pasta",
             branch_padrao: p.branch_padrao,
@@ -496,6 +499,24 @@ pub enum Evento {
         #[serde(default)]
         conexao_id: i64,
     },
+    /// A opção "Mostrar tempo dos agentes" do perfil mudou (nesta ou em outra tela).
+    #[serde(rename = "perfil.tempo_agentes")]
+    PerfilTempoAgentes {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        mostrar: bool,
+    },
+    /// Um workspace foi recolhido ou aberto na barra lateral (nesta ou em outra tela).
+    #[serde(rename = "workspace.recolhido")]
+    WorkspaceRecolhido {
+        seq: u64,
+        #[serde(default)]
+        workspace_id: i64,
+        #[serde(default)]
+        recolhido: bool,
+    },
     #[serde(other)]
     Desconhecido,
 }
@@ -525,7 +546,9 @@ impl Evento {
             | Evento::LousaMudou { seq, .. }
             | Evento::BancoAprovacao { seq, .. }
             | Evento::ConexaoMudou { seq, .. }
-            | Evento::BancoConsulta { seq, .. } => *seq,
+            | Evento::BancoConsulta { seq, .. }
+            | Evento::PerfilTempoAgentes { seq, .. }
+            | Evento::WorkspaceRecolhido { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -537,7 +560,7 @@ impl Evento {
             Evento::LousaMudou { agente_id, .. } => *agente_id != 0,
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
-            Evento::BancoAprovacao { .. } => false,
+            Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
             _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido),
         }
     }
@@ -598,6 +621,8 @@ impl Modelo {
             | Evento::AnexoRemovido { .. }
             | Evento::NotaAtualizada { .. }
             | Evento::NavegadorCaptura { .. }
+            // A tela principal aplica no perfil (e o registro busca de novo).
+            | Evento::PerfilTempoAgentes { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).
             | Evento::LousaMudou { .. } => {}
             Evento::PedidoMudou { pedido, .. } => {
@@ -649,6 +674,11 @@ impl Modelo {
                         let i = self.projetos.partition_point(|p| (&p.workspace, &p.nome) < (&projeto.workspace, &projeto.nome));
                         self.projetos.insert(i, projeto);
                     }
+                }
+            }
+            Evento::WorkspaceRecolhido { workspace_id, recolhido, .. } => {
+                for p in self.projetos.iter_mut().filter(|p| p.workspace_id == workspace_id) {
+                    p.recolhido = recolhido;
                 }
             }
             Evento::ProjetoRemovido { projeto_id, .. } => {
@@ -779,6 +809,7 @@ pub fn projetos_demo() -> Vec<Projeto> {
             nome: nome.into(),
             workspace_id: 1,
             workspace: "Empresa X".into(),
+            recolhido: false,
             caminho: String::new(),
             sem_git: false,
             branch_padrao: "main".into(),

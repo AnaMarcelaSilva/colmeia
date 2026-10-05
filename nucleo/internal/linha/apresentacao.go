@@ -45,17 +45,19 @@ var ordemGrupos = map[string]int{GrupoConcluidas: 0, GrupoRevisao: 1, GrupoAguar
 // que pararam com erro (como o "N erros" do dia na linha do tempo); Novas
 // conta todas as tarefas criadas no período.
 type NumerosCapa struct {
-	Concluidas    int               `json:"concluidas"`
-	Revisao       int               `json:"revisao"`
-	Aguardando    int               `json:"aguardando"`
-	Trabalhando   int               `json:"trabalhando"`
-	Erros         int               `json:"erros"`
-	Novas         int               `json:"novas"`
-	TempoS        int64             `json:"tempo_s"`
-	PorFerramenta []TempoFerramenta `json:"por_ferramenta"`
+	Concluidas  int `json:"concluidas"`
+	Revisao     int `json:"revisao"`
+	Aguardando  int `json:"aguardando"`
+	Trabalhando int `json:"trabalhando"`
+	Erros       int `json:"erros"`
+	Novas       int `json:"novas"`
+	// O tempo dos agentes só vai com a opção do perfil ligada.
+	TempoS        int64             `json:"tempo_s,omitempty"`
+	PorFerramenta []TempoFerramenta `json:"por_ferramenta,omitempty"`
 }
 
-// ParteCapa é uma coluna da capa: um dia na daily, um projeto na sprint.
+// ParteCapa é uma coluna da capa: um dia na daily (um projeto, quando a
+// daily tem mais de um), um projeto na sprint.
 type ParteCapa struct {
 	Titulo  string  `json:"titulo"`
 	Tarefas []int64 `json:"tarefas"`
@@ -77,7 +79,7 @@ type Feito struct {
 }
 
 type NumerosSlide struct {
-	TempoS   int64 `json:"tempo_s"`
+	TempoS   int64 `json:"tempo_s,omitempty"`
 	Sessoes  int   `json:"sessoes"`
 	Erros    int   `json:"erros"`
 	Capturas int   `json:"capturas"`
@@ -109,8 +111,13 @@ type Slide struct {
 	Status    string `json:"status"`
 	Grupo     string `json:"grupo"`
 	Removida  bool   `json:"removida"`
-	// Secao é o projeto, na sprint: a tela põe um slide divisor quando muda.
-	Secao string `json:"secao,omitempty"`
+	// Secao é o nome do projeto da tarefa ("estudos · loja-web" com mais de
+	// um workspace no recorte): com mais de uma seção, a tela põe um título
+	// (e um slide divisor) quando muda. SecaoID é o projeto e Workspace, o
+	// workspace dele quando o recorte tem mais de um.
+	Secao     string `json:"secao,omitempty"`
+	SecaoID   int64  `json:"secao_id,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
 	// Partes em que a tarefa aparece ("Ontem", "Hoje"), para as marcas do cabeçalho.
 	Partes  []string     `json:"partes"`
 	Feito   []Feito      `json:"feito"`
@@ -155,6 +162,8 @@ type Deck struct {
 	Slides    []Slide `json:"slides"`
 	Mais      int     `json:"mais"`
 	Vazio     bool    `json:"vazio"`
+	// TempoAgentes: os números e os textos podem ter o tempo dos agentes.
+	TempoAgentes bool `json:"tempo_agentes"`
 }
 
 // trabalho diz se o item conta como trabalho na tarefa (uma tarefa só criada
@@ -207,12 +216,11 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 	hoje := diaDe(agora, fuso)
 	ontem := diaDe(agora.AddDate(0, 0, -1), fuso)
 	escopo := ""
-	if len(c.NomesNoEscopo) > 0 {
-		escopo = " · " + lista(c.NomesNoEscopo)
+	if e := c.escopo(); e != "" {
+		escopo = " · " + e
 	}
 
-	d := Deck{Tipo: tipo, Slides: []Slide{}, Capa: Capa{Destaques: []string{}, Partes: []ParteCapa{}, Novas: []string{}}}
-	d.Capa.Numeros.PorFerramenta = []TempoFerramenta{}
+	d := Deck{Tipo: tipo, Slides: []Slide{}, Capa: Capa{Destaques: []string{}, Partes: []ParteCapa{}, Novas: []string{}}, TempoAgentes: c.MostrarTempo}
 	var inicio, fim string
 	// Na daily, as partes são os dias; na sprint, uma parte só.
 	partes := map[string]string{}
@@ -365,7 +373,7 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 
 	ordenados := make([]*Slide, 0, len(slides))
 	for _, s := range slides {
-		s.Feito = s.juntar()
+		s.Feito = s.juntar(c.MostrarTempo)
 		atual, existe := c.Tarefas[s.TarefaID]
 		s.Removida = !existe
 		s.Coluna = coluna[s.TarefaID]
@@ -388,15 +396,14 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		default:
 			s.Grupo = GrupoOutras
 		}
-		if tipo == "sprint" {
-			s.Secao = cmpOr(s.Projeto, "sem projeto")
-		}
+		s.Secao, s.SecaoID, s.Workspace = c.rotuloSecao(s.ProjetoID, s.Projeto), s.ProjetoID, c.workspaceDaSecao(s.ProjetoID)
 		ordenados = append(ordenados, s)
 	}
+	// Por projeto (na ordem da barra lateral), depois o grupo e o mais recente.
 	sort.Slice(ordenados, func(i, j int) bool {
 		a, b := ordenados[i], ordenados[j]
-		if a.Secao != b.Secao {
-			return a.Secao < b.Secao
+		if a.SecaoID != b.SecaoID || a.Secao != b.Secao {
+			return c.antesNaOrdem(a.SecaoID, b.SecaoID, a.Secao, b.Secao)
 		}
 		if ordemGrupos[a.Grupo] != ordemGrupos[b.Grupo] {
 			return ordemGrupos[a.Grupo] < ordemGrupos[b.Grupo]
@@ -437,7 +444,13 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		d.Mais = len(ordenados) - MaxSlides
 		ordenados = ordenados[:MaxSlides]
 	}
-	if tipo == "daily" {
+	// Na daily de um projeto, uma coluna por dia; com mais de um projeto
+	// (como na sprint), uma por projeto.
+	variasSecoes := false
+	for _, s := range ordenados {
+		variasSecoes = variasSecoes || s.SecaoID != ordenados[0].SecaoID || s.Secao != ordenados[0].Secao
+	}
+	if tipo == "daily" && !variasSecoes {
 		dias := make([]string, 0, len(partes))
 		for dia := range partes {
 			dias = append(dias, dia)
@@ -459,8 +472,10 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 			d.Capa.Partes = append(d.Capa.Partes, p)
 		}
 	} else {
+		var ultimaSecao int64 = -1
 		for _, s := range ordenados {
-			if n := len(d.Capa.Partes); n == 0 || d.Capa.Partes[n-1].Titulo != s.Secao {
+			if n := len(d.Capa.Partes); n == 0 || d.Capa.Partes[n-1].Titulo != s.Secao || ultimaSecao != s.SecaoID {
+				ultimaSecao = s.SecaoID
 				d.Capa.Partes = append(d.Capa.Partes, ParteCapa{Titulo: s.Secao, Tarefas: []int64{}})
 			}
 			p := &d.Capa.Partes[len(d.Capa.Partes)-1]
@@ -531,9 +546,9 @@ func encurtar(texto string, maximo int) string {
 
 // juntar monta "o que foi feito" de cada parte. A mesma frase repetida (seguida
 // ou não) vira uma linha com "(N vezes)", e as sessões de um agente viram uma
-// linha só: "Claude Code (dev) trabalhou 1h10 em 7 sessões". Parte sem tópico
-// não aparece.
-func (s *Slide) juntar() []Feito {
+// linha só: "Claude Code (dev) trabalhou 1h10 em 7 sessões" (sem o tempo dos
+// agentes, "Claude Code (dev): 7 sessões"). Parte sem tópico não aparece.
+func (s *Slide) juntar(mostrarTempo bool) []Feito {
 	type linha struct {
 		texto, agente           string
 		vezes                   int
@@ -580,12 +595,20 @@ func (s *Slide) juntar() []Feito {
 				f.Itens = append(f.Itens, texto+".")
 				continue
 			}
-			texto := l.agente + " trabalhou " + Duracao(l.trabalhando)
-			if l.vezes > 1 {
-				texto += fmt.Sprintf(" em %d sessões", l.vezes)
-			}
-			if l.aguardando >= 60 {
-				texto += " e esperou você " + Duracao(l.aguardando)
+			var texto string
+			switch {
+			case !mostrarTempo && l.vezes > 1:
+				texto = fmt.Sprintf("%s: %d sessões", l.agente, l.vezes)
+			case !mostrarTempo:
+				texto = l.agente + " terminou uma sessão"
+			default:
+				texto = l.agente + " trabalhou " + Duracao(l.trabalhando)
+				if l.vezes > 1 {
+					texto += fmt.Sprintf(" em %d sessões", l.vezes)
+				}
+				if l.aguardando >= 60 {
+					texto += " e esperou você " + Duracao(l.aguardando)
+				}
 			}
 			switch {
 			case l.primeiro == "":

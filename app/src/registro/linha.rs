@@ -141,10 +141,16 @@ enum Fileira {
 }
 
 impl Registro {
-    pub(super) fn pagina_linha(&mut self, ui: &mut egui::Ui, projeto: Option<i64>, acoes: &mut Vec<Acao>) {
+    pub(super) fn pagina_linha(&mut self, ui: &mut egui::Ui, recorte: api::Recorte, acoes: &mut Vec<Acao>) {
         let p = cores();
         let ctx = ui.ctx().clone();
-        let titulo = if projeto.is_some() { "Linha do tempo do projeto" } else { "Linha do tempo" };
+        let titulo = match recorte {
+            api::Recorte::Projeto(_) => "Linha do tempo do projeto",
+            api::Recorte::Workspace(_) => "Linha do tempo do workspace",
+            api::Recorte::Perfil => "Linha do tempo",
+        };
+        let um_projeto = matches!(recorte, api::Recorte::Projeto(_));
+        let filtrada = recorte != api::Recorte::Perfil;
         tema::cabecalho(ui, titulo, "Tudo o que aconteceu, dia a dia, agrupado por tarefa.");
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -170,18 +176,23 @@ impl Registro {
             }
         }
         if self.carregou && self.dias.is_empty() {
-            let (titulo, texto, botao) = match projeto {
-                Some(_) => ("Nada neste projeto ainda", "Crie uma tarefa no Quadro e a história dela aparece nesta página.", "Ver todos os projetos"),
-                None => ("Ainda não aconteceu nada aqui.", "Crie uma tarefa no Quadro e a história dela aparece nesta página.", "Ir ao Quadro"),
+            let (titulo, texto, botao) = match recorte {
+                api::Recorte::Projeto(_) => {
+                    ("Nada neste projeto ainda", "Crie uma tarefa no Quadro e a história dela aparece nesta página.", "Ver todos os projetos")
+                }
+                api::Recorte::Workspace(_) => {
+                    ("Nada neste workspace ainda", "Crie uma tarefa no Quadro e a história dela aparece nesta página.", "Ver todos os projetos")
+                }
+                api::Recorte::Perfil => ("Ainda não aconteceu nada aqui.", "Crie uma tarefa no Quadro e a história dela aparece nesta página.", "Ir ao Quadro"),
             };
             if comum::vazio(ui, titulo, texto, Some(botao)) {
-                acoes.push(if projeto.is_some() { Acao::VerTodos } else { Acao::IrParaQuadro });
+                acoes.push(if filtrada { Acao::VerTodos } else { Acao::IrParaQuadro });
             }
             return;
         }
 
         let dias: Vec<DiaVisual> = self.dias.iter().map(|d| agrupar(d, self.filtro)).collect();
-        let com_projeto = projeto.is_none();
+        let com_projeto = !um_projeto;
         // Fileiras com alturas fixas, calculadas sem montar texto.
         let mut fileiras: Vec<(f32, f32, Fileira)> = Vec::new();
         let mut y = 0.0;
@@ -397,6 +408,22 @@ enum Clique {
     Imagem(usize),
 }
 
+/// O texto da etiqueta do projeto: "trabalho-x · " em `suave` e o nome em `texto`.
+fn etiqueta_projeto(pintor: &egui::Painter, projeto: &str) -> std::sync::Arc<egui::Galley> {
+    let p = cores();
+    let fonte = tema::fonte_etiqueta();
+    let mut trabalho = egui::text::LayoutJob::default();
+    let (prefixo, nome) = match projeto.split_once(" · ") {
+        Some((ws, nome)) => (format!("{ws} · "), nome),
+        None => (String::new(), projeto),
+    };
+    if !prefixo.is_empty() {
+        trabalho.append(&prefixo, 0.0, egui::TextFormat::simple(fonte.clone(), p.suave));
+    }
+    trabalho.append(nome, 0.0, egui::TextFormat::simple(fonte, p.texto));
+    pintor.layout_job(trabalho)
+}
+
 /// Um cartão de tarefa: título (clicável), projeto e estado na primeira
 /// linha; os eventos em lista compacta; as miniaturas no fim.
 fn desenhar_cartao(ui: &mut egui::Ui, rect: Rect, c: &Cartao, expandido: bool, com_projeto: bool, cache: &mut comum::CacheImagens) -> Option<Clique> {
@@ -425,9 +452,13 @@ fn desenhar_cartao(ui: &mut egui::Ui, rect: Rect, c: &Cartao, expandido: bool, c
     direita -= pilula.largura(&pintor);
     pilula.pintar(&pintor, pos2(direita, meio - 11.0));
     if com_projeto && !c.projeto.is_empty() {
-        let largura = pintor.layout_no_wrap(c.projeto.to_string(), tema::fonte_etiqueta(), p.suave).size().x + 12.0;
-        direita -= largura + 8.0;
-        tema::etiqueta(&pintor, pos2(direita, meio - 9.5), c.projeto, tema::fonte_etiqueta(), p.suave);
+        let galeria = etiqueta_projeto(&pintor, c.projeto);
+        direita -= galeria.size().x + 12.0 + 8.0;
+        // O fundo da etiqueta de sempre; o nome do projeto em `texto` (o
+        // `suave` ali fica abaixo de 4,5:1 nos temas claros), o workspace na frente em `suave`.
+        let rect = Rect::from_min_size(pos2(direita, meio - 9.5), vec2(galeria.size().x + 12.0, 19.0));
+        pintor.rect_filled(rect, egui::CornerRadius::same(tema::RAIO_ETIQUETA), p.suave.gamma_multiply(0.14));
+        pintor.galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
     }
     let largura_titulo = (direita - 12.0 - linha1.left()).max(40.0);
     let galeria = pintor.layout_no_wrap(c.titulo.to_string(), forte(14.0), p.texto);

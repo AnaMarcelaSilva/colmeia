@@ -41,13 +41,13 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/terminais/{id}` | Só com `--demo`: WebSocket de um terminal de teste |
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
-| `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`) ou o aviso antes de capturar (`aviso_captura`) |
+| `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`), o aviso antes de capturar (`aviso_captura`) ou a exibição do tempo dos agentes no registro (`tempo_agentes`, desligada por padrão; gera o evento `perfil.tempo_agentes`, levado às telas só com o booleano) |
 | `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
-| `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=`, `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
-| `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto}`; aceita `projeto=` |
+| `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=` ou `workspace=` (nunca os dois: 400; de outro perfil: 404), `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
+| `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto, tempo_agentes}`; aceita `projeto=` ou `workspace=`. Com mais de um projeto no recorte, os blocos citam o projeto e o texto sai separado por projeto |
 | `GET /v1/perfis/{id}/resumo?tipo=sprint` | Sprint de `de` a `ate` (até 92 dias), ou `ultimos=N`, ou `mes=atual`; `formato=markdown` devolve `text/markdown` |
-| `GET /v1/perfis/{id}/apresentacao?tipo=daily\|sprint` | O deck da apresentação: capa (números com os nomes dos grupos: `concluidas`, `revisao`, `aguardando`, `trabalhando`, `erros` de sessão e `novas`; destaques; partes; tarefas novas) e um slide por tarefa (o que foi feito, números, anexos e a nota); aceita os mesmos parâmetros do resumo (`projeto=`, `de=`/`ate=`, `ultimos=`, `mes=`). Até 60 slides; o resto vira `mais` |
+| `GET /v1/perfis/{id}/apresentacao?tipo=daily\|sprint` | O deck da apresentação: capa (números com os nomes dos grupos: `concluidas`, `revisao`, `aguardando`, `trabalhando`, `erros` de sessão e `novas`; destaques; partes; tarefas novas) e um slide por tarefa (o que foi feito, números, anexos e a nota); aceita os mesmos parâmetros do resumo (`projeto=` ou `workspace=`, `de=`/`ate=`, `ultimos=`, `mes=`). Cada slide leva a seção (`secao`, `secao_id` e, com mais de um workspace, `workspace`), na ordem da barra lateral. Até 60 slides; o resto vira `mais` |
 | `POST /v1/tarefas/{id}/anexos` | Anexa uma imagem à tarefa (corpo `image/png` ou `image/jpeg`, até 8 MB; a foto vira PNG, sem EXIF, e é reduzida acima de 3840 px); `origem=captura\|colagem\|mensagem\|arquivo`, `agente=`, `legenda=` e `nome=` opcionais; devolve `{id, caminho, largura, altura}` |
 | `POST /v1/tarefas/{id}/videos` | Anexa um vídeo (`video/mp4`, `video/webm`, `video/x-matroska` ou `video/quicktime`, até 512 MB), copiado em fluxo para o disco; os primeiros bytes precisam bater com o tipo; `nome=` opcional |
 | `POST /v1/perfis/{id}/anexos` | O mesmo que o das imagens, sem tarefa; `lousa=1` marca o anexo de uma lousa (fora da linha do tempo e dos slides) |
@@ -85,6 +85,7 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET` / `PUT /v1/perfis/{id}/contas` | Contas de IA do perfil (`sistema` ou `separada`) |
 | `GET` / `POST /v1/perfis/{id}/workspaces` | Listar e criar workspaces |
 | `GET /v1/perfis/{id}/projetos` | Projetos do perfil, com o workspace |
+| `PATCH /v1/workspaces/{id}` | Recolher ou abrir o workspace na barra lateral (`recolhido`); a lista de projetos traz `workspace_recolhido` e as telas do perfil recebem o evento `workspace.recolhido` |
 | `POST /v1/workspaces/{id}/projetos` | Adicionar projeto: um repositório entra pela raiz, com a branch atual; outra pasta entra como pasta de trabalho |
 | `DELETE /v1/projetos/{id}` | Tirar o projeto da Colmeia: para os agentes e tira as cópias isoladas (a pasta não é tocada) |
 | `GET /v1/projetos/{id}/branches` | Branches locais do repositório (vazio numa pasta sem git) |
@@ -137,6 +138,8 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `conexao.mudou` | `acao` (`criada`, `alterada`, `removida`) e `conexao_id`: a tela relê a lista de conexões |
 | `banco.consulta` | `conexao_id`, `tarefa_id`, `agente_id`: houve consulta ou alteração (sem SQL nem resultado); a tela relê o histórico se estiver nele |
 | `banco.aprovacao` | Fora da corrente (leva o SQL, que só vai para a tela): `acao: "pedida"` com `aprovacao` (`id, conexao_id, conexao, tipo, agente_id, tarefa_id, agente, tarefa, sql, banco, limite, criada_hora, expira, expira_hora, precisa_senha`) ou `acao: "resolvida"` com `aprovacao_id`, `resultado` (`aprovada`, `recusada`, `expirou`, `cancelada`), `linhas`, `ms`, `hora` e `erro` |
+| `workspace.recolhido` | `workspace_id`, `recolhido`: o workspace foi recolhido ou aberto na barra lateral |
+| `perfil.tempo_agentes` | `perfil_id`, `mostrar`: a opção "Mostrar tempo dos agentes" mudou; as telas do perfil escondem na hora ou buscam de novo ([decisão 0010](decisoes/0010-tempo-dos-agentes-opcional.md)) |
 | `lousa.mudou` | `lousa_id`, `dono` (`workspace_id` ou `tarefa_id`), `elementos` (os itens inteiros, com o texto) e `removidos`; com `agente_id` e `evento` quando foi o agente (o evento `lousa.agente` no histórico não tem texto). Mudanças da tela não ficam no histórico ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)) |
 
 Aplicar a mesma mensagem duas vezes não muda nada (cria ou atualiza pelo id). Para não perder nada: a tela abre o WebSocket, pede o `/quadro` (que traz o `seq` já incluído nele) e aplica só as mensagens com `seq` maior. Quem publica nunca espera: cada tela tem uma fila de 256 mensagens e, se ela encher, recebe um único `recarregar`. Tipos desconhecidos são ignorados pela tela.

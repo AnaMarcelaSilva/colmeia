@@ -14,6 +14,10 @@ type Perfil struct {
 	CriadoEm string `json:"criado_em"`
 	// AvisoCaptura: mostrar o aviso de segredos antes de capturar um terminal.
 	AvisoCaptura bool `json:"aviso_captura"`
+	// TempoAgentes: a daily, a sprint, a linha do tempo e a apresentação
+	// mostram quanto os agentes trabalharam e esperaram. Desligado por padrão
+	// (é informação sensível); os tempos continuam gravados nos eventos.
+	TempoAgentes bool `json:"tempo_agentes"`
 }
 
 type Conta struct {
@@ -31,8 +35,10 @@ type Projeto struct {
 	ID          int64  `json:"id"`
 	WorkspaceID int64  `json:"workspace_id"`
 	Workspace   string `json:"workspace"`
-	Nome        string `json:"nome"`
-	Caminho     string `json:"caminho"`
+	// WorkspaceRecolhido: o workspace está recolhido na barra lateral.
+	WorkspaceRecolhido bool   `json:"workspace_recolhido"`
+	Nome               string `json:"nome"`
+	Caminho            string `json:"caminho"`
 	// Tipo é "git" (repositório) ou "pasta" (pasta de trabalho sem git, sem branches).
 	Tipo         string `json:"tipo"`
 	BranchPadrao string `json:"branch_padrao"`
@@ -84,7 +90,7 @@ func donoDoProjeto(ctx context.Context, tx *transacao, projeto int64) (int64, st
 // Perfis
 
 func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura FROM perfis ORDER BY nome`)
+	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis ORDER BY nome`)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +98,7 @@ func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
 	perfis := []Perfil{}
 	for linhas.Next() {
 		var p Perfil
-		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura); err != nil {
+		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes); err != nil {
 			return nil, err
 		}
 		perfis = append(perfis, p)
@@ -142,7 +148,8 @@ func (b *Banco) DefinirTema(ctx context.Context, perfil int64, tema string) erro
 // Perfil devolve um perfil pelo id.
 func (b *Banco) Perfil(ctx context.Context, id int64) (Perfil, error) {
 	var p Perfil
-	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura FROM perfis WHERE id = ?`, id).Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura)
+	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis WHERE id = ?`, id).
+		Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNaoEncontrado
 	}
@@ -160,6 +167,21 @@ func (b *Banco) DefinirAvisoCaptura(ctx context.Context, perfil int64, mostrar b
 			return ErrNaoEncontrado
 		}
 		return registrar(ctx, tx, "perfil.aviso_captura", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "mostrar": mostrar})
+	})
+}
+
+// DefinirTempoAgentes liga ou desliga a exibição do tempo dos agentes no
+// registro (daily, sprint, linha do tempo e apresentação) deste perfil.
+func (b *Banco) DefinirTempoAgentes(ctx context.Context, perfil int64, mostrar bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET tempo_agentes = ? WHERE id = ?`, mostrar, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.tempo_agentes", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "mostrar": mostrar})
 	})
 }
 
@@ -267,6 +289,24 @@ func (b *Banco) CriarWorkspace(ctx context.Context, perfil int64, nome string) (
 	return w, err
 }
 
+// RecolherWorkspace guarda se o workspace fica recolhido na barra lateral.
+func (b *Banco) RecolherWorkspace(ctx context.Context, workspace int64, recolhido bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		var perfil int64
+		err := tx.QueryRowContext(ctx, `SELECT perfil_id FROM workspaces WHERE id = ?`, workspace).Scan(&perfil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE workspaces SET recolhido = ? WHERE id = ?`, recolhido, workspace); err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "workspace.recolhido", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "workspace": workspace, "recolhido": recolhido})
+	})
+}
+
 // Projetos
 
 func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, error) {
@@ -274,7 +314,7 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 		return nil, err
 	}
 	linhas, err := b.db.QueryContext(ctx, `
-		SELECT p.id, p.workspace_id, w.nome, p.nome, p.caminho, p.tipo, p.branch_padrao
+		SELECT p.id, p.workspace_id, w.nome, w.recolhido, p.nome, p.caminho, p.tipo, p.branch_padrao
 		FROM projetos p JOIN workspaces w ON w.id = p.workspace_id
 		WHERE w.perfil_id = ? ORDER BY w.nome, p.nome`, perfil)
 	if err != nil {
@@ -284,7 +324,7 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 	lista := []Projeto{}
 	for linhas.Next() {
 		var p Projeto
-		if err := linhas.Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao); err != nil {
+		if err := linhas.Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao); err != nil {
 			return nil, err
 		}
 		lista = append(lista, p)
@@ -295,9 +335,9 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 func (b *Banco) Projeto(ctx context.Context, id int64) (Projeto, error) {
 	var p Projeto
 	err := b.db.QueryRowContext(ctx, `
-		SELECT p.id, p.workspace_id, w.nome, p.nome, p.caminho, p.tipo, p.branch_padrao
+		SELECT p.id, p.workspace_id, w.nome, w.recolhido, p.nome, p.caminho, p.tipo, p.branch_padrao
 		FROM projetos p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = ?`, id).
-		Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao)
+		Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNaoEncontrado
 	}

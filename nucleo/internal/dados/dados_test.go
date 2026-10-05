@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -360,5 +362,106 @@ func TestEventosAntigosGanhamOEscopo(t *testing.T) {
 	}
 	if err := b.VerificarHistorico(ctx); err != nil {
 		t.Errorf("a migração quebrou o histórico: %v", err)
+	}
+}
+
+func TestEventosDeUmWorkspace(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	estudos, _ := b.CriarWorkspace(ctx, perfil.ID, "estudos")
+	trabalho, _ := b.CriarWorkspace(ctx, perfil.ID, "trabalho-x")
+	loja, _ := b.CriarProjeto(ctx, estudos.ID, "loja-web", "/tmp/loja-web", "pasta", "")
+	cliente, _ := b.CriarProjeto(ctx, estudos.ID, "cliente-x", "/tmp/cliente-x", "pasta", "")
+	outraLoja, _ := b.CriarProjeto(ctx, trabalho.ID, "loja-web", "/tmp/outra-loja", "pasta", "")
+	for _, p := range []Projeto{loja, cliente, outraLoja} {
+		if _, err := b.CriarTarefa(ctx, p.ID, "Tarefa de "+p.Nome, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventos, err := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Workspace: estudos.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Os projetos e as tarefas do estudos (o workspace em si não tem projeto).
+	if len(eventos) != 4 {
+		t.Fatalf("eventos do estudos: %+v", eventos)
+	}
+	for _, e := range eventos {
+		if e.Escopo.Projeto != loja.ID && e.Escopo.Projeto != cliente.ID {
+			t.Errorf("evento de fora do workspace: %+v", e)
+		}
+	}
+	// Workspace e projeto juntos estreitam; de outro perfil, nada.
+	if so, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Workspace: trabalho.ID, Projeto: loja.ID}); len(so) != 0 {
+		t.Errorf("projeto fora do workspace: %+v", so)
+	}
+	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	if alheios, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: outro.ID, Workspace: estudos.ID}); len(alheios) != 0 {
+		t.Errorf("eventos de outro perfil: %+v", alheios)
+	}
+	// Uma consulta só, pelo índice do perfil (os projetos numa subconsulta).
+	var plano []string
+	linhas, err := b.db.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT id FROM eventos WHERE perfil_id = ? AND projeto_id IN (SELECT id FROM projetos WHERE workspace_id = ?) ORDER BY id DESC`, perfil.ID, estudos.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer linhas.Close()
+	for linhas.Next() {
+		var id, pai, livre int
+		var detalhe string
+		linhas.Scan(&id, &pai, &livre, &detalhe)
+		plano = append(plano, detalhe)
+	}
+	if junto := strings.Join(plano, " | "); !strings.Contains(junto, "eventos_por_perfil") {
+		t.Errorf("a consulta não usa o índice do perfil: %s", junto)
+	}
+}
+
+func TestPreferenciaDoTempoDosAgentes(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	if p, _ := b.Perfil(ctx, perfil.ID); p.TempoAgentes {
+		t.Error("o tempo dos agentes começa ligado")
+	}
+	if err := b.DefinirTempoAgentes(ctx, perfil.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); !p.TempoAgentes {
+		t.Error("não ficou ligado")
+	}
+	if lista, _ := b.ListarPerfis(ctx); len(lista) != 1 || !lista[0].TempoAgentes {
+		t.Errorf("perfis: %+v", lista)
+	}
+	if err := b.DefinirTempoAgentes(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.tempo_agentes"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), fmt.Sprintf(`"mostrar":true,"perfil":%d`, perfil.ID)) {
+		t.Errorf("evento da preferência: %+v", eventos)
+	}
+}
+
+func TestRecolherWorkspace(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "P", "")
+	w, err := b.CriarWorkspace(ctx, perfil.ID, "W")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.CriarProjeto(ctx, w.ID, "loja-web", t.TempDir(), "pasta", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecolherWorkspace(ctx, w.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	lista, err := b.ListarProjetos(ctx, perfil.ID)
+	if err != nil || len(lista) != 1 || !lista[0].WorkspaceRecolhido {
+		t.Fatalf("o projeto deveria vir com o workspace recolhido: %+v, %v", lista, err)
+	}
+	if err := b.RecolherWorkspace(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("workspace inexistente: %v", err)
 	}
 }

@@ -297,3 +297,21 @@ func TestAgenteNasceNoTamanhoDaTela(t *testing.T) {
 		t.Errorf("um tamanho absurdo mudou o terminal: %q", got)
 	}
 }
+
+func TestRecolherWorkspace(t *testing.T) {
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/workspaces", map[string]string{"nome": "W"})
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]bool{"recolhido": true}); status != http.StatusOK {
+		t.Fatalf("recolher: status %d", status)
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]string{}); status != http.StatusBadRequest {
+		t.Errorf("sem o campo: status %d, esperado 400", status)
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]any{"recolhido": true, "nome": "x"}); status != http.StatusBadRequest {
+		t.Errorf("campo desconhecido: status %d, esperado 400", status)
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/99", map[string]bool{"recolhido": true}); status != http.StatusNotFound {
+		t.Errorf("workspace inexistente: status %d, esperado 404", status)
+	}
+}

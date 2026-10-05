@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -77,32 +78,104 @@ func periodo(r *http.Request, obrigatorio bool) (de, ate time.Time, err error) {
 	return
 }
 
+// recorte é de onde a linha do tempo, a daily, a sprint e a apresentação
+// olham: o perfil inteiro (os dois zerados), um workspace ou um projeto.
+type recorte struct {
+	Projeto, Workspace int64
+}
+
+// recorteDoPedido lê projeto= ou workspace= (nunca os dois).
+func recorteDoPedido(r *http.Request) (recorte, error) {
+	q := r.URL.Query()
+	ler := func(campo string) (int64, error) {
+		v := q.Get(campo)
+		if v == "" {
+			return 0, nil
+		}
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			return 0, dados.ErrInvalido{Motivo: campo + " inválido"}
+		}
+		return id, nil
+	}
+	var rc recorte
+	var err error
+	if rc.Projeto, err = ler("projeto"); err != nil {
+		return rc, err
+	}
+	if rc.Workspace, err = ler("workspace"); err != nil {
+		return rc, err
+	}
+	if rc.Projeto != 0 && rc.Workspace != 0 {
+		return rc, dados.ErrInvalido{Motivo: "Use projeto ou workspace, não os dois."}
+	}
+	return rc, nil
+}
+
+func (rc recorte) filtro(perfil int64) dados.FiltroEventos {
+	return dados.FiltroEventos{Perfil: perfil, Projeto: rc.Projeto, Workspace: rc.Workspace}
+}
+
+func (rc recorte) desde(perfil int64, desde string) dados.FiltroEventos {
+	f := rc.filtro(perfil)
+	f.Desde = desde
+	return f
+}
+
+func (rc recorte) ate(perfil int64, ate string) dados.FiltroEventos {
+	f := rc.filtro(perfil)
+	f.Ate = ate
+	return f
+}
+
 // contextoDaLinha junta o que a linha do tempo precisa saber do estado atual
-// do perfil (ou de um projeto dele).
-func (s *Servidor) contextoDaLinha(ctx context.Context, perfil, projeto int64) (linha.Contexto, error) {
-	c := linha.Contexto{Agora: time.Now(), Fuso: time.Local, Projetos: map[int64]string{}, Tarefas: map[int64]linha.TarefaAtual{}, Ativos: map[int64]linha.Ativo{}}
-	projetos, err := s.Banco.ListarProjetos(ctx, perfil)
+// do perfil (ou de um workspace ou projeto dele). Um projeto ou workspace
+// que não é do perfil é "não encontrado". As consultas são as mesmas em
+// qualquer recorte: nada é lido projeto por projeto.
+func (s *Servidor) contextoDaLinha(ctx context.Context, perfil dados.Perfil, rc recorte) (linha.Contexto, error) {
+	c := linha.Contexto{Agora: time.Now(), Fuso: time.Local, Projetos: map[int64]string{}, Tarefas: map[int64]linha.TarefaAtual{}, Ativos: map[int64]linha.Ativo{},
+		Workspaces: map[int64]string{}, Ordem: map[int64]int{}, MostrarTempo: perfil.TempoAgentes}
+	projetos, err := s.Banco.ListarProjetos(ctx, perfil.ID)
 	if err != nil {
 		return c, err
 	}
-	achou := projeto == 0
-	for _, p := range projetos {
+	noRecorte := map[int64]bool{}
+	workspaces := map[int64]bool{}
+	nomeWorkspace := ""
+	for i, p := range projetos {
 		c.Projetos[p.ID] = p.Nome
-		if projeto == 0 || p.ID == projeto {
+		c.Workspaces[p.ID] = p.Workspace
+		// A mesma ordem da barra lateral: workspace e nome.
+		c.Ordem[p.ID] = i
+		if (rc.Projeto == 0 || p.ID == rc.Projeto) && (rc.Workspace == 0 || p.WorkspaceID == rc.Workspace) {
+			noRecorte[p.ID] = true
+			workspaces[p.WorkspaceID] = true
 			c.NomesNoEscopo = append(c.NomesNoEscopo, p.Nome)
+			nomeWorkspace = p.Workspace
 		}
-		achou = achou || p.ID == projeto
 	}
-	if !achou {
+	if (rc.Projeto != 0 || rc.Workspace != 0) && len(noRecorte) == 0 {
 		return c, dados.ErrNaoEncontrado
 	}
-	c.VariosProjetos = projeto == 0 && len(projetos) > 1
-	tarefas, err := s.Banco.ListarTarefasDoPerfil(ctx, perfil)
+	c.VariosProjetos = len(noRecorte) > 1
+	c.VariosWorkspaces = len(workspaces) > 1
+	quantos := fmt.Sprintf("%d projetos", len(noRecorte))
+	switch {
+	case rc.Projeto != 0:
+		c.Escopo = c.NomesNoEscopo[0]
+	case rc.Workspace != 0 && len(noRecorte) == 1:
+		c.Escopo = nomeWorkspace + " · " + c.NomesNoEscopo[0]
+	case rc.Workspace != 0:
+		c.Escopo = nomeWorkspace + " · " + quantos
+	case len(noRecorte) > 1:
+		c.Escopo = "todos os projetos · " + quantos
+	}
+	tarefas, err := s.Banco.ListarTarefasDoPerfil(ctx, perfil.ID)
 	if err != nil {
 		return c, err
 	}
 	for _, t := range tarefas {
-		if projeto == 0 || t.ProjetoID == projeto {
+		if noRecorte[t.ProjetoID] || (rc.Projeto == 0 && rc.Workspace == 0) {
 			c.Tarefas[t.ID] = linha.TarefaAtual{ID: t.ID, Titulo: t.Titulo, Coluna: t.Coluna, ProjetoID: t.ProjetoID}
 		}
 	}
@@ -116,24 +189,12 @@ func (s *Servidor) contextoDaLinha(ctx context.Context, perfil, projeto int64) (
 			c.Ativos[sessao.ID] = ativo
 		}
 	}
-	c.AnexosRemovidos, err = s.Banco.AnexosRemovidos(ctx, perfil)
+	c.AnexosRemovidos, err = s.Banco.AnexosRemovidos(ctx, perfil.ID)
 	if err != nil {
 		return c, err
 	}
-	c.Pedidos, err = s.Banco.TextosDosPedidos(ctx, perfil)
+	c.Pedidos, err = s.Banco.TextosDosPedidos(ctx, perfil.ID)
 	return c, err
-}
-
-func projetoDoPedido(r *http.Request) (int64, error) {
-	v := r.URL.Query().Get("projeto")
-	if v == "" {
-		return 0, nil
-	}
-	id, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || id <= 0 {
-		return 0, dados.ErrInvalido{Motivo: "projeto inválido"}
-	}
-	return id, nil
 }
 
 func inicioDoDia(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -151,7 +212,7 @@ func (s *Servidor) linhaDoTempo(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	projeto, err := projetoDoPedido(r)
+	rc, err := recorteDoPedido(r)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -176,12 +237,13 @@ func (s *Servidor) linhaDoTempo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	c, err := s.contextoDaLinha(r.Context(), perfil, projeto)
+	c, err := s.contextoDaLinha(r.Context(), p, rc)
 	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	filtro := dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Antes: antes, Limite: limite}
+	filtro := rc.filtro(perfil)
+	filtro.Antes, filtro.Limite = antes, limite
 	if !de.IsZero() {
 		filtro.Desde, filtro.Ate = inicioDoDia(de), inicioDoDia(ate.AddDate(0, 0, 1))
 	}
@@ -198,7 +260,7 @@ func (s *Servidor) linhaDoTempo(w http.ResponseWriter, r *http.Request) {
 	if t, err := time.Parse(time.RFC3339Nano, p.CriadoEm); err == nil {
 		criado = t.Local().Format("02/01/2006")
 	}
-	responderJSON(w, map[string]any{"dias": linha.Montar(eventos, c), "proximo": proximo, "perfil_criado_em": criado})
+	responderJSON(w, map[string]any{"dias": linha.Montar(eventos, c), "proximo": proximo, "perfil_criado_em": criado, "tempo_agentes": c.MostrarTempo})
 }
 
 // resumo monta a daily (tipo=daily) ou a sprint (tipo=sprint&de=&ate=), em
@@ -209,11 +271,12 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	if _, err := s.Banco.Perfil(r.Context(), perfil); err != nil {
+	p, err := s.Banco.Perfil(r.Context(), perfil)
+	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	projeto, err := projetoDoPedido(r)
+	rc, err := recorteDoPedido(r)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -224,7 +287,7 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, dados.ErrInvalido{Motivo: "formato precisa ser json ou markdown"})
 		return
 	}
-	c, err := s.contextoDaLinha(r.Context(), perfil, projeto)
+	c, err := s.contextoDaLinha(r.Context(), p, rc)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -233,7 +296,7 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 	case "daily":
 		hoje := time.Now()
 		inicio := time.Date(hoje.Year(), hoje.Month(), hoje.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -linha.JanelaDaily)
-		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Desde: inicioDoDia(inicio)})
+		eventos, err := s.Banco.ListarEventos(r.Context(), rc.desde(perfil, inicioDoDia(inicio)))
 		if err != nil {
 			responderErro(w, err)
 			return
@@ -251,7 +314,7 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// O histórico até o fim do período: o anterior diz onde cada tarefa estava.
-		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Ate: inicioDoDia(ate.AddDate(0, 0, 1))})
+		eventos, err := s.Banco.ListarEventos(r.Context(), rc.ate(perfil, inicioDoDia(ate.AddDate(0, 0, 1))))
 		if err != nil {
 			responderErro(w, err)
 			return
@@ -282,11 +345,12 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	if _, err := s.Banco.Perfil(r.Context(), perfil); err != nil {
+	p, err := s.Banco.Perfil(r.Context(), perfil)
+	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	projeto, err := projetoDoPedido(r)
+	rc, err := recorteDoPedido(r)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -296,7 +360,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, dados.ErrInvalido{Motivo: "tipo precisa ser daily ou sprint"})
 		return
 	}
-	c, err := s.contextoDaLinha(r.Context(), perfil, projeto)
+	c, err := s.contextoDaLinha(r.Context(), p, rc)
 	if err != nil {
 		responderErro(w, err)
 		return
@@ -305,7 +369,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 	if tipo == "daily" {
 		hoje := time.Now()
 		inicio := time.Date(hoje.Year(), hoje.Month(), hoje.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -linha.JanelaDaily)
-		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Desde: inicioDoDia(inicio)})
+		eventos, err := s.Banco.ListarEventos(r.Context(), rc.desde(perfil, inicioDoDia(inicio)))
 		if err != nil {
 			responderErro(w, err)
 			return
@@ -317,7 +381,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 			responderErro(w, err)
 			return
 		}
-		eventos, err := s.Banco.ListarEventos(r.Context(), dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Ate: inicioDoDia(ate.AddDate(0, 0, 1))})
+		eventos, err := s.Banco.ListarEventos(r.Context(), rc.ate(perfil, inicioDoDia(ate.AddDate(0, 0, 1))))
 		if err != nil {
 			responderErro(w, err)
 			return

@@ -364,6 +364,20 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": "banco.consulta", "conexao_id": d.ConexaoID, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+	case "workspace.recolhido":
+		var d struct {
+			Workspace int64 `json:"workspace"`
+			Recolhido bool  `json:"recolhido"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "workspace_id": d.Workspace, "recolhido": d.Recolhido}
+	case "perfil.tempo_agentes":
+		// Só o booleano: as outras telas do perfil escondem ou mostram na hora.
+		var d struct {
+			Mostrar bool `json:"mostrar"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "mostrar": d.Mostrar}
 	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
 		var d struct {
 			Descricao string `json:"descricao"`

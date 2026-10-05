@@ -308,14 +308,32 @@ fn seta(pintor: &egui::Painter, centro: Pos2, cor: Color32) {
 /// Filtro em forma de chip arredondado: "Rótulo: valor ▾". Destacado quando o
 /// filtro está em uso, para ficar claro que a lista está filtrada.
 pub fn chip(ui: &mut egui::Ui, rotulo: &str, valor: &str, em_uso: bool) -> Response {
+    chip_com_largura(ui, rotulo, valor, em_uso, f32::INFINITY)
+}
+
+/// A largura do chip sem corte (para reservar o espaço antes de desenhar).
+pub fn largura_chip(ui: &egui::Ui, rotulo: &str, valor: &str) -> f32 {
+    let p = cores();
+    let fonte = FontId::proportional(13.0);
+    let rotulo = if valor.is_empty() { rotulo.to_owned() } else { format!("{rotulo}: ") };
+    let r = ui.painter().layout_no_wrap(rotulo, fonte, p.suave).size().x;
+    let v = ui.painter().layout_no_wrap(valor.to_owned(), forte(13.0), p.texto).size().x;
+    14.0 + r + v + 10.0 + 7.0 + 14.0
+}
+
+/// O chip em até `maximo` de largura: o valor se corta com "…" (quem chama
+/// põe o valor inteiro na dica); o rótulo e a seta nunca.
+pub fn chip_com_largura(ui: &mut egui::Ui, rotulo: &str, valor: &str, em_uso: bool, maximo: f32) -> Response {
     let p = cores();
     let fonte = FontId::proportional(13.0);
     // Sem valor, o chip vira um botão de menu: só o rótulo, na cor do texto.
     let (rotulo, cor_rotulo) = if valor.is_empty() { (rotulo.to_owned(), p.texto) } else { (format!("{rotulo}: "), p.suave) };
     let texto_rotulo = ui.painter().layout_no_wrap(rotulo, fonte.clone(), cor_rotulo);
-    let texto_valor = ui.painter().layout_no_wrap(valor.to_owned(), forte(13.0), if em_uso { p.destaque } else { p.texto });
+    let cor_valor = if em_uso { p.destaque } else { p.texto };
     // Respiro: 14 antes do texto, 10 entre o texto e a seta, 14 depois da seta.
-    let largura = 14.0 + texto_rotulo.size().x + texto_valor.size().x + 10.0 + 7.0 + 14.0;
+    let fixo = 14.0 + texto_rotulo.size().x + 10.0 + 7.0 + 14.0;
+    let texto_valor = cortar(ui.painter(), valor, egui::TextFormat::simple(forte(13.0), cor_valor), (maximo - fixo).max(24.0), 1, true);
+    let largura = fixo + texto_valor.size().x;
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let fundo = if em_uso {
@@ -391,6 +409,73 @@ pub fn opcao_menu(ui: &mut egui::Ui, texto: &str, marcada: bool) -> bool {
         ui.painter().circle_filled(pos2(rect.right() - 16.0, rect.center().y), 3.5, p.destaque);
     }
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Item de menu numa árvore (o menu "Ver": o perfil, os workspaces e os
+/// projetos de cada um): o `opcao_menu` com recuo por nível e um detalhe
+/// suave depois do texto ("· 2 projetos").
+pub fn opcao_menu_arvore(ui: &mut egui::Ui, texto: &str, detalhe: Option<&str>, nivel: u8, marcada: bool) -> bool {
+    let p = cores();
+    let fonte = if marcada { forte(13.5) } else { FontId::proportional(13.5) };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), fonte, p.texto);
+    let detalhe = detalhe.map(|d| ui.painter().layout_no_wrap(d.to_owned(), FontId::proportional(12.0), p.suave));
+    let recuo = 16.0 * nivel as f32;
+    let largura = (galeria.size().x + detalhe.as_ref().map_or(0.0, |d| d.size().x + 6.0) + recuo + 56.0).max(ui.min_rect().width());
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
+    if resposta.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_ETIQUETA), p.realce);
+    }
+    let x = rect.left() + 14.0 + recuo;
+    let largura_texto = galeria.size().x;
+    ui.painter().galley(pos2(x, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    if let Some(d) = detalhe {
+        ui.painter().galley(pos2(x + largura_texto + 6.0, rect.center().y - d.size().y / 2.0), d, p.suave);
+    }
+    if marcada {
+        ui.painter().circle_filled(pos2(rect.right() - 16.0, rect.center().y), 3.5, p.destaque);
+    }
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Link dentro de uma linha de texto: ocupa só a altura do texto (a linha não
+/// cresce por causa dele) e a área de clique passa um pouco acima e abaixo.
+pub fn link_em_linha(ui: &mut egui::Ui, texto: &str) -> Response {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), p.destaque);
+    let (rect, _) = ui.allocate_exact_size(vec2(galeria.size().x + 8.0, galeria.size().y), Sense::hover());
+    let resposta = ui.interact(rect.expand2(vec2(0.0, 5.0)), ui.id().with(("link-em-linha", texto)), Sense::click());
+    let pos = pos2(rect.left() + 4.0, rect.top());
+    let base = pos.y + galeria.size().y;
+    let largura = galeria.size().x;
+    ui.painter().galley(pos, galeria, p.destaque);
+    if resposta.hovered() {
+        ui.painter().line_segment([pos2(pos.x, base + 1.0), pos2(pos.x + largura, base + 1.0)], Stroke::new(1.0, p.destaque));
+    }
+    if resposta.has_focus() {
+        ui.painter().rect_stroke(rect.expand2(vec2(0.0, 3.0)), CornerRadius::same(RAIO_ETIQUETA), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
+    }
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Link: texto clicável em `destaque`, sem moldura. Com o mouse em cima,
+/// sublinhado (nunca fundo de realce, que tira o contraste nos temas claros);
+/// com o foco do teclado, o contorno de foco. Inativo, fica suave e sem clique.
+pub fn link_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response {
+    let p = cores();
+    let cor = if ativo { p.destaque } else { p.suave };
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), cor);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 8.0, 24.0), if ativo { Sense::click() } else { Sense::hover() });
+    let pos = pos2(rect.left() + 4.0, rect.center().y - galeria.size().y / 2.0);
+    let base = pos.y + galeria.size().y;
+    let largura = galeria.size().x;
+    ui.painter().galley(pos, galeria, cor);
+    if ativo && resposta.hovered() {
+        ui.painter().line_segment([pos2(pos.x, base + 1.0), pos2(pos.x + largura, base + 1.0)], Stroke::new(1.0, p.destaque));
+    }
+    if resposta.has_focus() {
+        ui.painter().rect_stroke(rect, CornerRadius::same(RAIO_ETIQUETA), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
+    }
+    if ativo { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta }
 }
 
 /// Campo de texto com rótulo em cima, no estilo da Colmeia.
@@ -947,11 +1032,22 @@ pub fn caixa_marcar_com(ui: &mut egui::Ui, texto: &str, marcada: &mut bool, ativ
     if ativa {
         return caixa_marcar(ui, texto, marcada);
     }
+    // Inativa, ela mostra o último valor conhecido (marcada ou não), apagada:
+    // nunca diz o contrário do que a página mostra. A borda `suave` a 0.6 passa
+    // de 3:1 sobre o fundo (elemento que não é texto).
     let p = cores();
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), p.suave);
     let (rect, resposta) = ui.allocate_exact_size(vec2(16.0 + 8.0 + galeria.size().x, 24.0_f32.max(galeria.size().y)), Sense::hover());
     let caixa = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(16.0, 16.0));
-    ui.painter().rect(caixa, CornerRadius::same(4), Color32::TRANSPARENT, Stroke::new(1.5, p.borda.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+    let apagada = p.suave.gamma_multiply(0.6);
+    if *marcada {
+        ui.painter().rect_filled(caixa, CornerRadius::same(4), apagada);
+        let cor = if claro() { Color32::WHITE } else { p.fundo };
+        let visto = vec![caixa.left_center() + vec2(3.5, 0.5), caixa.center() + vec2(-1.0, 3.5), caixa.right_center() + vec2(-3.5, -3.5)];
+        ui.painter().add(Shape::line(visto, Stroke::new(2.0, cor)));
+    } else {
+        ui.painter().rect(caixa, CornerRadius::same(4), Color32::TRANSPARENT, Stroke::new(1.5, apagada), egui::StrokeKind::Inside);
+    }
     ui.painter().galley(pos2(caixa.right() + 8.0, rect.center().y - galeria.size().y / 2.0), galeria, p.suave);
     resposta
 }
@@ -1206,6 +1302,26 @@ pub fn campo_multilinha_com(
     so_leitura: bool,
     fonte: FontId,
 ) -> Response {
+    campo_multilinha_base(ui, texto, linhas, altura_maxima, id, so_leitura, fonte, Some(egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Enter)))
+}
+
+/// Campo de uma mensagem curta para o agente ("Pedir ao agente"): Shift+Enter
+/// quebra a linha; o Enter fica para quem mostra o campo enviar (veja `teclas`).
+pub fn campo_mensagem(ui: &mut egui::Ui, texto: &mut String, linhas: usize, altura_maxima: f32, id: egui::Id, so_leitura: bool) -> Response {
+    campo_multilinha_base(ui, texto, linhas, altura_maxima, id, so_leitura, FontId::proportional(13.5), Some(crate::teclas::quebra_de_linha()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn campo_multilinha_base(
+    ui: &mut egui::Ui,
+    texto: &mut String,
+    linhas: usize,
+    altura_maxima: f32,
+    id: egui::Id,
+    so_leitura: bool,
+    fonte: FontId,
+    quebra: Option<egui::KeyboardShortcut>,
+) -> Response {
     let p = cores();
     let com_foco = ui.memory(|m| m.has_focus(id));
     let largura = ui.available_width();
@@ -1228,6 +1344,7 @@ pub fn campo_multilinha_com(
                             .desired_width(largura - 22.0)
                             .font(fonte)
                             .text_color(cor)
+                            .return_key(quebra)
                             .interactive(!so_leitura),
                     )
                 })
@@ -1643,6 +1760,20 @@ mod testes {
                 let r = contraste(c, p.superficie_alta);
                 assert!(r >= 4.5, "{cor} no tema {nome}: {r:.2}");
             }
+        }
+    }
+
+    #[test]
+    fn link_e_legivel_sobre_o_fundo_e_os_cartoes() {
+        // O link não ganha fundo de realce ao passar o mouse: sobre o realce
+        // ele ficaria abaixo de 4,5:1 nos temas claros.
+        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+            for (onde, fundo) in [("fundo", p.fundo), ("superficie_alta", p.superficie_alta)] {
+                let r = contraste(p.destaque, fundo);
+                assert!(r >= 4.5, "link sobre {onde} no tema {nome}: {r:.2}");
+            }
+            // O cabeçalho do workspace na lateral vai para `texto` com o mouse em cima.
+            assert!(contraste(p.texto, p.realce) >= 4.5, "texto sobre o realce no tema {nome}");
         }
     }
 

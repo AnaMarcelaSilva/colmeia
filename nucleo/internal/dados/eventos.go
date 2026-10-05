@@ -10,6 +10,9 @@ import (
 type FiltroEventos struct {
 	Perfil  int64
 	Projeto int64 // 0: todos os projetos do perfil
+	// Workspace: só os projetos desse workspace (0: não filtra). Uma consulta
+	// só, com os projetos lidos numa subconsulta, nunca uma por projeto.
+	Workspace int64
 	// Antes pagina de trás para frente: só eventos com id menor (0: sem limite).
 	Antes int64
 	// Desde e Ate limitam o momento (RFC 3339, UTC); vazio não limita.
@@ -28,6 +31,10 @@ func (b *Banco) ListarEventos(ctx context.Context, f FiltroEventos) ([]Evento, e
 	if f.Projeto != 0 {
 		consulta += ` AND projeto_id = ?`
 		args = append(args, f.Projeto)
+	}
+	if f.Workspace != 0 {
+		consulta += ` AND projeto_id IN (SELECT id FROM projetos WHERE workspace_id = ?)`
+		args = append(args, f.Workspace)
 	}
 	if f.Antes > 0 {
 		consulta += ` AND id < ?`

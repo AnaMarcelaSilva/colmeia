@@ -28,6 +28,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/perfis/{id}/workspaces", s.listarWorkspaces)
 	mux.HandleFunc("POST /v1/perfis/{id}/workspaces", s.criarWorkspace)
 	mux.HandleFunc("GET /v1/perfis/{id}/projetos", s.listarProjetos)
+	mux.HandleFunc("PATCH /v1/workspaces/{id}", s.atualizarWorkspace)
 	mux.HandleFunc("POST /v1/workspaces/{id}/projetos", s.criarProjeto)
 	mux.HandleFunc("DELETE /v1/projetos/{id}", s.removerProjeto)
 	mux.HandleFunc("GET /v1/projetos/{id}/branches", s.listarBranches)
@@ -117,6 +118,7 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 	var pedido struct {
 		Tema         *string `json:"tema"`
 		AvisoCaptura *bool   `json:"aviso_captura"`
+		TempoAgentes *bool   `json:"tempo_agentes"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -133,6 +135,36 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 			responderErro(w, err)
 			return
 		}
+	}
+	if pedido.TempoAgentes != nil {
+		if err := s.Banco.DefinirTempoAgentes(r.Context(), id, *pedido.TempoAgentes); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	responderJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Servidor) atualizarWorkspace(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		Recolhido *bool `json:"recolhido"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.Recolhido == nil {
+		responderErro(w, dados.ErrInvalido{Motivo: "Diga se o workspace fica recolhido."})
+		return
+	}
+	if err := s.Banco.RecolherWorkspace(r.Context(), id, *pedido.Recolhido); err != nil {
+		responderErro(w, err)
+		return
 	}
 	responderJSON(w, map[string]any{"ok": true})
 }

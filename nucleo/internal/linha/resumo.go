@@ -47,6 +47,8 @@ type ResumoDaily struct {
 	Hoje    ParteDaily  `json:"hoje"`
 	Texto   string      `json:"texto"`
 	Vazio   bool        `json:"vazio"`
+	// TempoAgentes: o texto pode ter o tempo dos agentes (a opção do perfil).
+	TempoAgentes bool `json:"tempo_agentes"`
 }
 
 // lista junta "a, b e c", com "e mais N" depois de maxPorBloco.
@@ -60,10 +62,11 @@ func lista(nomes []string) string {
 	return strings.Join(nomes[:len(nomes)-1], ", ") + " e " + nomes[len(nomes)-1]
 }
 
-// nomeNoTexto: o título, com o projeto quando há vários no escopo.
-func (m *montador) nomeNoTexto(tarefa, projeto int64) string {
+// nomeNoTexto: o título, com o projeto quando há vários no escopo (e o
+// texto não está separado por projeto).
+func (m *montador) nomeNoTexto(tarefa, projeto int64, comProjeto bool) string {
 	nome := m.titulo(tarefa)
-	if p := m.nomeProjeto(projeto); m.c.VariosProjetos && p != "" {
+	if p := m.nomeProjeto(projeto); comProjeto && p != "" {
 		nome += " (" + p + ")"
 	}
 	return nome
@@ -102,12 +105,15 @@ func resumoDe(item Item, texto string) ItemResumo {
 
 // Daily monta o "o que fiz ontem, o que faço hoje" a partir dos eventos dos
 // últimos dias (JanelaDaily + hoje) e das tarefas abertas agora.
+//
+// No recorte com mais de um projeto (um workspace, o perfil inteiro), os
+// blocos citam o projeto junto da tarefa e o texto sai separado por
+// projeto, na ordem da barra lateral, para falar um de cada vez.
 func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 	m := novoMontador(c)
 	itens := m.montar(eventos)
 	fuso := m.c.Fuso
 	hoje := diaDe(c.Agora, fuso)
-	ontemDeFato := diaDe(c.Agora.In(fuso).AddDate(0, 0, -1), fuso)
 	limite := diaDe(c.Agora.In(fuso).AddDate(0, 0, -JanelaDaily), fuso)
 
 	// O último dia antes de hoje com atividade de verdade (não só uma captura ou um projeto novo).
@@ -118,6 +124,54 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 			ultimo = dia
 		}
 	}
+	todos := func(int64) bool { return true }
+	r := m.daily(itens, ultimo, todos, c.VariosProjetos)
+	r.TempoAgentes = c.MostrarTempo
+	if !c.VariosProjetos || r.Vazio {
+		return r
+	}
+	// O texto por projeto: os projetos com algo no texto, na ordem da lateral.
+	vistos := map[int64]bool{}
+	var projetos []int64
+	marcar := func(id int64) {
+		if !vistos[id] {
+			vistos[id] = true
+			projetos = append(projetos, id)
+		}
+	}
+	for _, item := range itens {
+		if dia := diaDe(item.quando, fuso); dia == hoje || dia == ultimo {
+			marcar(item.ProjetoID)
+		}
+	}
+	for _, t := range c.Tarefas {
+		marcar(t.ProjetoID)
+	}
+	sort.Slice(projetos, func(i, j int) bool {
+		a, b := projetos[i], projetos[j]
+		return c.antesNaOrdem(a, b, m.nomeProjeto(a), m.nomeProjeto(b))
+	})
+	var partes []string
+	for _, id := range projetos {
+		so := m.daily(itens, ultimo, func(p int64) bool { return p == id }, false)
+		if so.Vazio {
+			continue
+		}
+		partes = append(partes, c.rotuloSecao(id, m.nomeProjeto(id))+"\n"+so.Texto)
+	}
+	if len(partes) > 0 {
+		r.Texto = strings.Join(partes, "\n\n")
+	}
+	return r
+}
+
+// daily monta os blocos e o texto da daily com os itens dos projetos que
+// `incluir` aceita; `ultimo` é o dia anterior com atividade ("" se não há).
+func (m *montador) daily(itens []Item, ultimo string, incluir func(projeto int64) bool, comProjeto bool) ResumoDaily {
+	c := m.c
+	fuso := m.c.Fuso
+	hoje := diaDe(c.Agora, fuso)
+	ontemDeFato := diaDe(c.Agora.In(fuso).AddDate(0, 0, -1), fuso)
 
 	// Blocos sempre como lista (vazia, nunca null): a tela espera uma lista.
 	r := ResumoDaily{Hoje: ParteDaily{Titulo: "Hoje", Blocos: []Bloco{}}}
@@ -127,10 +181,10 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 		var concluidas, avancaram, erros juntador
 		var segundos int64
 		for _, item := range itens {
-			if diaDe(item.quando, fuso) != ultimo {
+			if diaDe(item.quando, fuso) != ultimo || !incluir(item.ProjetoID) {
 				continue
 			}
-			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID)
+			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID, comProjeto)
 			switch item.Tipo {
 			case TipoConcluiu:
 				concluidas.por(item.TarefaID, resumoDe(item, nome), nome)
@@ -186,14 +240,16 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 		j.por(id, item, nome)
 	}
 	for _, item := range itens {
-		if diaDe(item.quando, fuso) == hoje && item.Tipo == TipoConcluiu {
-			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID)
+		if diaDe(item.quando, fuso) == hoje && item.Tipo == TipoConcluiu && incluir(item.ProjetoID) {
+			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID, comProjeto)
 			pegar(&jaHoje, item.TarefaID, resumoDe(item, nome), nome)
 		}
 	}
 	abertas := make([]TarefaAtual, 0, len(c.Tarefas))
 	for _, t := range c.Tarefas {
-		abertas = append(abertas, t)
+		if incluir(t.ProjetoID) {
+			abertas = append(abertas, t)
+		}
 	}
 	sort.Slice(abertas, func(i, j int) bool { return abertas[i].ID < abertas[j].ID })
 	for _, colunaDaVez := range []string{"aguardando", "trabalhando"} {
@@ -201,7 +257,7 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 			if t.Coluna != colunaDaVez || (t.Coluna == "trabalhando" && soTerminaisParados(c.Ativos, t.ID)) {
 				continue
 			}
-			nome := m.nomeNoTexto(t.ID, t.ProjetoID)
+			nome := m.nomeNoTexto(t.ID, t.ProjetoID, comProjeto)
 			item := ItemResumo{Texto: nome, TarefaID: t.ID, Tipo: t.Coluna}
 			if t.Coluna == "aguardando" {
 				pegar(&esperando, t.ID, item, nome)
@@ -212,10 +268,10 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 	}
 	var segundosHoje int64
 	for _, item := range itens {
-		if diaDe(item.quando, fuso) != hoje {
+		if diaDe(item.quando, fuso) != hoje || !incluir(item.ProjetoID) {
 			continue
 		}
-		nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID)
+		nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID, comProjeto)
 		switch item.Tipo {
 		case TipoCriou:
 			pegar(&criadas, item.TarefaID, resumoDe(item, nome), nome)
@@ -225,12 +281,12 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 		segundosHoje += item.trabalhando
 	}
 	for _, item := range itens {
-		if diaDe(item.quando, fuso) != hoje {
+		if diaDe(item.quando, fuso) != hoje || !incluir(item.ProjetoID) {
 			continue
 		}
 		switch item.Tipo {
 		case TipoMoveu, TipoSessao, TipoInterrompido:
-			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID)
+			nome := m.nomeNoTexto(item.TarefaID, item.ProjetoID, comProjeto)
 			pegar(&avancaram, item.TarefaID, resumoDe(item, nome), nome)
 		}
 	}
@@ -280,8 +336,8 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 		desde = "Desde " + rotuloDoDia(r.Ontem.Dia, ontemDeFato, fuso, false)
 	}
 	r.Periodo = desde
-	if len(c.NomesNoEscopo) > 0 {
-		r.Periodo += " · " + lista(c.NomesNoEscopo)
+	if e := c.escopo(); e != "" {
+		r.Periodo += " · " + e
 	}
 	return r
 }
@@ -325,13 +381,17 @@ func rotuloDoDia(dia, ontem string, fuso *time.Location, maiuscula bool) string 
 // Sprint
 
 type SecaoSprint struct {
+	// Projeto é o nome da seção ("estudos · loja-web" com mais de um
+	// workspace no recorte); ProjetoID e Workspace dizem qual é.
 	Projeto    string       `json:"projeto"`
+	ProjetoID  int64        `json:"projeto_id,omitempty"`
+	Workspace  string       `json:"workspace,omitempty"`
 	Concluidas []ItemResumo `json:"concluidas"`
 	Andamento  []ItemResumo `json:"andamento"`
 	Criadas    []ItemResumo `json:"criadas"`
 	Removidas  []ItemResumo `json:"removidas"`
 	Erros      []ItemResumo `json:"erros"`
-	TempoS     int64        `json:"tempo_s"`
+	TempoS     int64        `json:"tempo_s,omitempty"`
 }
 
 type TempoFerramenta struct {
@@ -351,12 +411,13 @@ type ResumoSprint struct {
 	Ate           string            `json:"ate"`
 	Periodo       string            `json:"periodo"`
 	Secoes        []SecaoSprint     `json:"secoes"`
-	TempoTotalS   int64             `json:"tempo_total_s"`
-	PorFerramenta []TempoFerramenta `json:"por_ferramenta"`
+	TempoTotalS   int64             `json:"tempo_total_s,omitempty"`
+	PorFerramenta []TempoFerramenta `json:"por_ferramenta,omitempty"`
 	Capturas      []Captura         `json:"capturas"`
 	Texto         string            `json:"texto"`
 	Markdown      string            `json:"markdown"`
 	Vazio         bool              `json:"vazio"`
+	TempoAgentes  bool              `json:"tempo_agentes"`
 }
 
 // Sprint resume o período [de, ate] (datas no fuso, inclusive). `eventos` é o
@@ -367,21 +428,19 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 	itens := m.montar(eventos)
 	fuso := m.c.Fuso
 	inicio, fim := de.Format("2006-01-02"), ate.Format("2006-01-02")
-	r := ResumoSprint{De: de.Format("02/01/2006"), Ate: ate.Format("02/01/2006"), Secoes: []SecaoSprint{}, PorFerramenta: []TempoFerramenta{}, Capturas: []Captura{}}
+	r := ResumoSprint{De: de.Format("02/01/2006"), Ate: ate.Format("02/01/2006"), Secoes: []SecaoSprint{}, Capturas: []Captura{}, TempoAgentes: c.MostrarTempo}
 	r.Periodo = fmt.Sprintf("De %s a %s", de.Format("02/01"), ate.Format("02/01"))
-	if len(c.NomesNoEscopo) > 0 {
-		r.Periodo += " · " + lista(c.NomesNoEscopo)
+	if e := c.escopo(); e != "" {
+		r.Periodo += " · " + e
 	}
 
-	secoes := map[string]*SecaoSprint{}
-	secao := func(projeto string) *SecaoSprint {
-		if projeto == "" {
-			projeto = "sem projeto"
-		}
+	// Uma seção por projeto (pelo id: dois workspaces podem ter um loja-web cada).
+	secoes := map[int64]*SecaoSprint{}
+	secao := func(projeto int64, nome string) *SecaoSprint {
 		if s, ok := secoes[projeto]; ok {
 			return s
 		}
-		s := &SecaoSprint{Projeto: projeto}
+		s := &SecaoSprint{Projeto: c.rotuloSecao(projeto, cmpOr(nome, m.nomeProjeto(projeto))), ProjetoID: projeto, Workspace: c.workspaceDaSecao(projeto)}
 		secoes[projeto] = s
 		return s
 	}
@@ -405,7 +464,7 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		if dia < inicio {
 			continue
 		}
-		s := secao(item.Projeto)
+		s := secao(item.ProjetoID, item.Projeto)
 		nome := m.titulo(item.TarefaID)
 		switch item.Tipo {
 		case TipoConcluiu:
@@ -444,16 +503,17 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		if col != "trabalhando" && col != "aguardando" && col != "revisao" {
 			continue
 		}
-		s := secao(m.nomeProjeto(projetoDa[id]))
+		s := secao(projetoDa[id], "")
 		s.Andamento = append(s.Andamento, ItemResumo{Texto: m.titulo(id) + " (" + nomesColuna[col] + ")", Tipo: col, TarefaID: id})
 	}
-	nomes := make([]string, 0, len(secoes))
-	for nome := range secoes {
-		nomes = append(nomes, nome)
+	ordem := make([]*SecaoSprint, 0, len(secoes))
+	for _, s := range secoes {
+		ordem = append(ordem, s)
 	}
-	sort.Strings(nomes)
-	for _, nome := range nomes {
-		s := secoes[nome]
+	sort.Slice(ordem, func(i, j int) bool {
+		return c.antesNaOrdem(ordem[i].ProjetoID, ordem[j].ProjetoID, ordem[i].Projeto, ordem[j].Projeto)
+	})
+	for _, s := range ordem {
 		if len(s.Concluidas)+len(s.Andamento)+len(s.Criadas)+len(s.Removidas)+len(s.Erros) == 0 && s.TempoS == 0 {
 			continue
 		}

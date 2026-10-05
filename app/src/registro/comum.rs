@@ -163,8 +163,9 @@ pub fn grupos() -> [(&'static str, &'static str, Color32, Marca); 6] {
 type Numero = (String, &'static str, Option<(Color32, Marca)>);
 
 /// Os números do período, na ordem e com os nomes dos grupos (zeros
-/// escondidos, menos Concluídas e o tempo).
-pub fn numeros_visiveis(n: &api::NumerosCapa) -> Vec<Numero> {
+/// escondidos, menos Concluídas e o tempo). Sem `com_tempo` (a opção do
+/// perfil desligada), o tempo de agente não aparece nem como "0".
+pub fn numeros_visiveis(n: &api::NumerosCapa, com_tempo: bool) -> Vec<Numero> {
     let p = cores();
     let mut lista = vec![(n.concluidas.to_string(), "Concluídas", Some((p.destaque, Marca::Cheia)))];
     for (valor, rotulo, cor, marca) in [
@@ -177,8 +178,18 @@ pub fn numeros_visiveis(n: &api::NumerosCapa) -> Vec<Numero> {
             lista.push((valor.to_string(), rotulo, Some((cor, marca))));
         }
     }
-    lista.push((if n.tempo_s < 60 { "0".to_string() } else { duracao(n.tempo_s) }, "Tempo de agente", None));
+    // O mesmo formato das frases: "<1 min" quando houve tempo abaixo de um
+    // minuto (o "0" passaria a ideia de que o agente não trabalhou); sem
+    // tempo nenhum, o número não aparece.
+    if com_tempo && n.tempo_s > 0 {
+        lista.push((texto_tempo(n.tempo_s), "Tempo de agente", None));
+    }
     lista
+}
+
+/// O número do tempo de agente: "<1 min" abaixo de um minuto.
+pub fn texto_tempo(segundos: i64) -> String {
+    if segundos < 60 { "<1 min".to_string() } else { duracao(segundos) }
 }
 
 /// "1 tarefa nova", "3 tarefas novas" (vazio se nenhuma).
@@ -191,11 +202,11 @@ pub fn texto_novas(n: usize) -> String {
 }
 
 /// Largura da fileira de números, para centralizar ou decidir a quebra.
-pub fn largura_numeros(pintor: &egui::Painter, n: &api::NumerosCapa, tamanho: f32, com_novas: bool) -> f32 {
+pub fn largura_numeros(pintor: &egui::Painter, n: &api::NumerosCapa, tamanho: f32, com_novas: bool, com_tempo: bool) -> f32 {
     let p = cores();
     let rotulo = if tamanho >= 48.0 { 16.0 } else { 13.0 };
     let vao = if tamanho >= 48.0 { 56.0 } else { 40.0 };
-    let itens = numeros_visiveis(n);
+    let itens = numeros_visiveis(n, com_tempo);
     let soma: f32 = itens
         .iter()
         .map(|(valor, nome, ponto)| {
@@ -207,6 +218,35 @@ pub fn largura_numeros(pintor: &egui::Painter, n: &api::NumerosCapa, tamanho: f3
     let novas = if com_novas { texto_novas(n.novas) } else { String::new() };
     let extra = if novas.is_empty() { 0.0 } else { vao + pintor.layout_no_wrap(novas, FontId::proportional(13.5), p.suave).size().x };
     soma + vao * (itens.len() as f32 - 1.0) + extra
+}
+
+/// Uma seção do deck (um projeto): os slides dele, na ordem do deck.
+pub struct SecaoDeck<'a> {
+    /// O id do projeto (0 de um núcleo antigo, que só mandava o nome).
+    pub id: i64,
+    /// O nome da seção como o núcleo manda ("estudos · loja-web").
+    pub rotulo: &'a str,
+    /// O nome do projeto e o workspace (vazio com um workspace só no recorte).
+    pub projeto: &'a str,
+    pub workspace: &'a str,
+    pub slides: Vec<&'a api::Slide>,
+}
+
+/// As seções do deck, na ordem em que aparecem (o núcleo já ordena por
+/// projeto, como a barra lateral). Dois projetos com o mesmo nome em
+/// workspaces diferentes são seções diferentes (pelo id).
+pub fn secoes_do_deck(deck: &api::Deck) -> Vec<SecaoDeck<'_>> {
+    let mut secoes: Vec<SecaoDeck> = Vec::new();
+    for s in &deck.slides {
+        match secoes.last_mut() {
+            Some(ultima) if ultima.id == s.secao_id && ultima.rotulo == s.secao => ultima.slides.push(s),
+            _ => {
+                let projeto = if s.projeto.is_empty() { s.secao.as_str() } else { s.projeto.as_str() };
+                secoes.push(SecaoDeck { id: s.secao_id, rotulo: &s.secao, projeto, workspace: &s.workspace, slides: vec![s] });
+            }
+        }
+    }
+    secoes
 }
 
 /// Uma imagem que chegou da thread: o anexo e a imagem decodificada.
@@ -371,22 +411,27 @@ pub fn vazio(ui: &mut egui::Ui, titulo: &str, texto: &str, botao: Option<&str>) 
 
 /// Fileira de números grandes da Daily, da Sprint, da capa e do slide final:
 /// os mesmos números, com os mesmos nomes, nas três telas.
-pub fn numeros(ui: &mut egui::Ui, n: &api::NumerosCapa, tamanho: f32, com_novas: bool) {
+pub fn numeros(ui: &mut egui::Ui, n: &api::NumerosCapa, tamanho: f32, com_novas: bool, com_tempo: bool) {
     let p = cores();
-    ui.horizontal(|ui| {
+    // A fileira quebra por item inteiro quando a largura não dá: o texto de
+    // um item nunca quebra por dentro.
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = if tamanho >= 48.0 { 56.0 } else { 40.0 };
+        ui.spacing_mut().item_spacing.y = 16.0;
         let mut ultima = None;
-        for (valor, rotulo, ponto) in numeros_visiveis(n) {
+        for (valor, rotulo, ponto) in numeros_visiveis(n, com_tempo) {
             ultima = Some(tema::metrica(ui, &valor, rotulo, ponto, tamanho));
         }
         let novas = texto_novas(n.novas);
         if com_novas && !novas.is_empty() {
-            // Na linha dos rótulos, embaixo.
+            // Na linha dos rótulos, embaixo; sem lugar, vai inteiro para a linha de baixo.
             let altura = ultima.map_or(0.0, |r| r.rect.height());
-            ui.vertical(|ui| {
-                ui.add_space((altura - 18.0).max(0.0));
-                ui.label(egui::RichText::new(novas).color(p.suave).size(13.5));
-            });
+            let g = ui.painter().layout_no_wrap(novas, egui::FontId::proportional(13.5), p.suave);
+            if ui.available_width() < g.size().x {
+                ui.end_row();
+            }
+            let (rect, _) = ui.allocate_exact_size(vec2(g.size().x, altura.max(g.size().y)), Sense::hover());
+            ui.painter().galley(pos2(rect.left(), rect.bottom() - g.size().y), g, p.suave);
         }
     });
 }
@@ -629,6 +674,17 @@ pub fn sombra_rolagem(pintor: &egui::Painter, area: Rect, deslocamento: f32) {
 
 /// Grade de cartões (2 colunas a partir de 1100 px, 1 abaixo), com a altura
 /// do maior em cada linha. Devolve o clique.
+/// Colunas da grade de cartões numa largura (2 a partir de 1100 px).
+pub fn colunas_da_grade(largura: f32) -> usize {
+    if largura >= 1100.0 { 2 } else { 1 }
+}
+
+/// A largura de um cartão (de uma coluna) da grade.
+pub fn largura_coluna(largura: f32) -> f32 {
+    let colunas = colunas_da_grade(largura);
+    (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32
+}
+
 pub fn grade(
     ui: &mut egui::Ui,
     slides: &[&api::Slide],
@@ -639,8 +695,8 @@ pub fn grade(
     caixa_aberta: Option<i64>,
 ) -> Option<CliqueCartao> {
     let largura = ui.available_width();
-    let colunas = if largura >= 1100.0 { 2 } else { 1 };
-    let largura_cartao = (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32;
+    let colunas = colunas_da_grade(largura);
+    let largura_cartao = largura_coluna(largura);
     let mut clicada = None;
     for linha in slides.chunks(colunas) {
         let altura = linha.iter().map(|s| altura_cartao(ui, s, largura_cartao)).fold(0.0, f32::max);

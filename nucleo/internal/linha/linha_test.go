@@ -79,6 +79,7 @@ func contexto() Contexto {
 		},
 		Ativos:        map[int64]Ativo{9: {Estado: "trabalhando", Tarefa: 1}},
 		NomesNoEscopo: []string{"loja-web"},
+		MostrarTempo:  true,
 	}
 }
 
@@ -143,8 +144,12 @@ func TestDailyComVariosProjetosCitaOProjeto(t *testing.T) {
 	c := contexto()
 	c.VariosProjetos = true
 	d := Daily(semana(t), c)
-	if !strings.Contains(d.Texto, "concluí Corrigir desconto (loja-web)") {
-		t.Errorf("sem o projeto: %s", d.Texto)
+	// Os blocos citam o projeto; o texto sai separado por projeto.
+	if d.Ontem == nil || d.Ontem.Blocos[0].Itens[0].Texto != "Corrigir desconto (loja-web)" {
+		t.Errorf("sem o projeto nos blocos: %+v", d.Ontem)
+	}
+	if !strings.HasPrefix(d.Texto, "loja-web\nNa sexta (25/09): concluí Corrigir desconto;") {
+		t.Errorf("texto sem o projeto em cima: %s", d.Texto)
 	}
 }
 

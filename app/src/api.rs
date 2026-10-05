@@ -17,6 +17,10 @@ pub struct Perfil {
     /// Mostrar o aviso de segredos antes de capturar um terminal.
     #[serde(default = "verdadeiro")]
     pub aviso_captura: bool,
+    /// Mostrar o tempo dos agentes na daily, na sprint, na linha do tempo e
+    /// na apresentação (desligado por padrão; um núcleo antigo não manda).
+    #[serde(default)]
+    pub tempo_agentes: bool,
 }
 
 fn verdadeiro() -> bool {
@@ -52,6 +56,9 @@ pub struct Projeto {
     #[serde(default)]
     pub workspace_id: i64,
     pub workspace: String,
+    /// O workspace está recolhido na barra lateral.
+    #[serde(default)]
+    pub workspace_recolhido: bool,
     pub nome: String,
     pub caminho: String,
     /// "git" ou "pasta" (pasta de trabalho sem git).
@@ -294,6 +301,9 @@ pub struct PaginaLinha {
     /// Próxima página (eventos mais antigos); 0 quando acabou.
     pub proximo: i64,
     pub perfil_criado_em: String,
+    /// A página pode ter o tempo dos agentes (a opção do perfil, quando foi montada).
+    #[serde(default)]
+    pub tempo_agentes: bool,
 }
 
 /// Uma lista que pode vir como `null` (um núcleo antigo manda assim quando
@@ -308,6 +318,8 @@ fn lista_ou_nulo<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) ->
 pub struct Daily {
     pub texto: String,
     pub vazio: bool,
+    #[serde(default)]
+    pub tempo_agentes: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -329,6 +341,8 @@ pub struct Sprint {
     pub texto: String,
     pub markdown: String,
     pub vazio: bool,
+    #[serde(default)]
+    pub tempo_agentes: bool,
 }
 
 /// O que o núcleo devolve ao receber uma imagem.
@@ -462,8 +476,16 @@ pub struct Slide {
     pub grupo: String,
     #[serde(default)]
     pub removida: bool,
+    /// O projeto da tarefa ("estudos · loja-web" com mais de um workspace):
+    /// com mais de uma seção, a página e a apresentação separam por ela.
     #[serde(default)]
     pub secao: String,
+    /// O id do projeto da seção (dois workspaces podem ter o mesmo nome).
+    #[serde(default)]
+    pub secao_id: i64,
+    /// O workspace, quando o recorte tem mais de um.
+    #[serde(default)]
+    pub workspace: String,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub partes: Vec<String>,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
@@ -510,6 +532,9 @@ pub struct Deck {
     pub mais: usize,
     #[serde(default)]
     pub vazio: bool,
+    /// Os números e os textos podem ter o tempo dos agentes.
+    #[serde(default)]
+    pub tempo_agentes: bool,
 }
 
 // Lousa (quadro livre) do workspace e da tarefa.
@@ -864,25 +889,50 @@ pub fn definir_aviso_captura(perfil: i64, mostrar: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "aviso_captura": mostrar }))).map(|_| ())
 }
 
+/// Recolhe ou abre o workspace na barra lateral (guardado no núcleo).
+pub fn recolher_workspace(workspace: i64, recolhido: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/workspaces/{workspace}"), Some(json!({ "recolhido": recolhido }))).map(|_| ())
+}
+
+pub fn definir_tempo_agentes(perfil: i64, mostrar: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "tempo_agentes": mostrar }))).map(|_| ())
+}
+
+/// De onde a linha do tempo, a daily, a sprint e a apresentação olham: o
+/// perfil inteiro, um workspace (todos os projetos dele) ou um projeto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Recorte {
+    Perfil,
+    Workspace(i64),
+    Projeto(i64),
+}
+
+impl Recorte {
+    /// O pedaço da consulta ("&workspace=2"), vazio no perfil.
+    pub fn consulta(&self) -> String {
+        match self {
+            Recorte::Perfil => String::new(),
+            Recorte::Workspace(id) => format!("&workspace={id}"),
+            Recorte::Projeto(id) => format!("&projeto={id}"),
+        }
+    }
+}
+
 pub fn quadro(perfil: i64) -> Result<Quadro, String> {
     chamar("GET", &format!("/v1/perfis/{perfil}/quadro"), None)
 }
 
 /// Uma página da linha do tempo; `antes` é o `proximo` da anterior (0 = a primeira).
-pub fn linha_do_tempo(perfil: i64, projeto: Option<i64>, antes: i64) -> Result<PaginaLinha, String> {
-    let mut caminho = format!("/v1/perfis/{perfil}/linha-do-tempo?limite=200");
-    if let Some(p) = projeto {
-        caminho += &format!("&projeto={p}");
-    }
+pub fn linha_do_tempo(perfil: i64, recorte: Recorte, antes: i64) -> Result<PaginaLinha, String> {
+    let mut caminho = format!("/v1/perfis/{perfil}/linha-do-tempo?limite=200{}", recorte.consulta());
     if antes > 0 {
         caminho += &format!("&antes={antes}");
     }
     chamar("GET", &caminho, None)
 }
 
-pub fn daily(perfil: i64, projeto: Option<i64>) -> Result<Daily, String> {
-    let projeto = projeto.map(|p| format!("&projeto={p}")).unwrap_or_default();
-    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=daily{projeto}"), None)
+pub fn daily(perfil: i64, recorte: Recorte) -> Result<Daily, String> {
+    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=daily{}", recorte.consulta()), None)
 }
 
 /// Período de uma sprint. As datas relativas são calculadas pelo núcleo, que sabe o fuso.
@@ -894,9 +944,8 @@ pub enum PeriodoSprint {
     Datas(String, String),
 }
 
-pub fn sprint(perfil: i64, projeto: Option<i64>, periodo: &PeriodoSprint) -> Result<Sprint, String> {
-    let projeto = projeto.map(|p| format!("&projeto={p}")).unwrap_or_default();
-    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=sprint&{}{projeto}", consulta_periodo(periodo)), None)
+pub fn sprint(perfil: i64, recorte: Recorte, periodo: &PeriodoSprint) -> Result<Sprint, String> {
+    chamar("GET", &format!("/v1/perfis/{perfil}/resumo?tipo=sprint&{}{}", consulta_periodo(periodo), recorte.consulta()), None)
 }
 
 fn consulta_periodo(periodo: &PeriodoSprint) -> String {
@@ -996,8 +1045,8 @@ pub fn limpar_mensagens(agente: i64) -> Result<(), String> {
 }
 
 /// O deck da daily ou da sprint (`periodo` só na sprint).
-pub fn apresentacao(perfil: i64, projeto: Option<i64>, periodo: Option<&PeriodoSprint>) -> Result<Deck, String> {
-    let projeto = projeto.map(|p| format!("&projeto={p}")).unwrap_or_default();
+pub fn apresentacao(perfil: i64, recorte: Recorte, periodo: Option<&PeriodoSprint>) -> Result<Deck, String> {
+    let projeto = recorte.consulta();
     let caminho = match periodo {
         None => format!("/v1/perfis/{perfil}/apresentacao?tipo=daily{projeto}"),
         Some(p) => format!("/v1/perfis/{perfil}/apresentacao?tipo=sprint&{}{projeto}", consulta_periodo(p)),
@@ -1633,6 +1682,25 @@ pub fn responder_aprovacao(id: &str, aprovar: bool, motivo: &str, senha: &str, g
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn recorte_vira_consulta() {
+        assert_eq!(Recorte::Perfil.consulta(), "");
+        assert_eq!(Recorte::Workspace(2).consulta(), "&workspace=2");
+        assert_eq!(Recorte::Projeto(7).consulta(), "&projeto=7");
+    }
+
+    #[test]
+    fn sem_tempo_os_campos_ficam_em_zero() {
+        // O núcleo com a opção desligada não manda os tempos.
+        let deck: Deck = serde_json::from_value(json!({"tipo": "daily", "titulo": "Daily", "capa": {"numeros": {"concluidas": 1}},
+            "slides": [{"tarefa_id": 1, "titulo": "A", "numeros": {"sessoes": 2}, "secao": "estudos · loja-web", "secao_id": 3, "workspace": "estudos"}]}))
+        .unwrap();
+        assert!(!deck.tempo_agentes && deck.capa.numeros.tempo_s == 0 && deck.capa.numeros.por_ferramenta.is_empty());
+        assert_eq!((deck.slides[0].numeros.tempo_s, deck.slides[0].numeros.sessoes, deck.slides[0].secao_id), (0, 2, 3));
+        let perfil: Perfil = serde_json::from_value(json!({"id": 1, "nome": "P", "tema": "escuro"})).unwrap();
+        assert!(!perfil.tempo_agentes && perfil.aviso_captura);
+    }
 
     #[test]
     fn daily_com_blocos_nulos_ainda_e_lida() {

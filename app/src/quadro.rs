@@ -4,7 +4,7 @@
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{self, Color32, DragAndDrop, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dados::{Coluna, Tarefa};
 use crate::tema::{self, EstadoVisual, RAIO_CARTAO, RAIO_SUPERFICIE, cores, forte};
@@ -38,19 +38,24 @@ fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
     66.0 + projeto + 19.0 * avisos + 40.0 * t.agentes.len() as f32
 }
 
-/// `projeto` = None mostra o perfil inteiro, com o nome do projeto em cada cartão.
+/// `no_escopo` são os projetos à mostra (um, os de um workspace ou todos do
+/// perfil); `rotulos` põe o nome do projeto em cada cartão (por id: com o
+/// workspace na frente quando o nome se repete no recorte), None na visão
+/// de um projeto só.
 /// Sem `pode_mudar` (núcleo fora), nada se arrasta nem se remove.
+#[allow(clippy::too_many_arguments)]
 pub fn mostrar(
     ui: &mut egui::Ui,
     tarefas: &mut Vec<Tarefa>,
-    projeto: Option<i64>,
+    no_escopo: &HashSet<i64>,
+    rotulos: Option<&HashMap<i64, String>>,
     filtro: Option<&str>,
     terminais: &HashMap<i64, TerminalAgente>,
     pode_mudar: bool,
 ) -> Vec<Acao> {
     let mut acoes = Vec::new();
-    let com_projeto = projeto.is_none();
     let mut mover: Option<(i64, Coluna)> = None;
+    let com_projeto = rotulos.is_some();
 
     let area = ui.available_rect_before_wrap();
     let largura = (area.width() - 4.0 * 10.0) / 5.0;
@@ -68,7 +73,7 @@ pub fn mostrar(
         let visiveis: Vec<usize> = tarefas
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.coluna == coluna && projeto.is_none_or(|p| t.projeto_id == p) && filtro.is_none_or(|b| t.branch == b))
+            .filter(|(_, t)| t.coluna == coluna && no_escopo.contains(&t.projeto_id) && filtro.is_none_or(|b| t.branch == b))
             .map(|(i, _)| i)
             .collect();
 
@@ -104,7 +109,7 @@ pub fn mostrar(
                 // Virtualização: pula o que está fora da parte visível.
                 if y + h >= janela.min.y && y <= janela.max.y {
                     let rect = Rect::from_min_size(origem + vec2(0.0, y), vec2(largura, h));
-                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, com_projeto, pode_mudar) {
+                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, rotulos, pode_mudar) {
                         acoes.push(a);
                     }
                 }
@@ -137,7 +142,14 @@ fn linha_cortada(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, 
     altura
 }
 
-fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, TerminalAgente>, com_projeto: bool, pode_mudar: bool) -> Option<Acao> {
+fn cartao(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    t: &Tarefa,
+    terminais: &HashMap<i64, TerminalAgente>,
+    rotulos: Option<&HashMap<i64, String>>,
+    pode_mudar: bool,
+) -> Option<Acao> {
     let p = cores();
     let arrastado = DragAndDrop::payload::<Arrastando>(ui.ctx()).is_some_and(|p| p.0 == t.id);
     let em_cima = ui.rect_contains_pointer(rect) && !arrastado;
@@ -155,8 +167,9 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, terminais: &HashMap<i64, Te
     let x = rect.left() + 14.0;
     let largura = rect.width() - 28.0;
     let mut y = rect.top() + 12.0;
-    if com_projeto {
-        linha_cortada(pintor, pos2(x, y), &t.projeto, FontId::proportional(11.5), p.suave, largura);
+    if let Some(rotulos) = rotulos {
+        let rotulo = rotulos.get(&t.projeto_id).map_or(t.projeto.as_str(), String::as_str);
+        linha_cortada(pintor, pos2(x, y), rotulo, FontId::proportional(11.5), p.suave, largura);
         y += 16.0;
     }
     linha_cortada(pintor, pos2(x, y), &t.titulo, forte(13.5), p.texto, largura);

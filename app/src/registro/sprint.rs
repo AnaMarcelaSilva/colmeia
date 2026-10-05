@@ -1,21 +1,24 @@
-//! Página da sprint: o período, os números (com o tempo por ferramenta), as
-//! tarefas por projeto na ordem do deck e a galeria das capturas.
+//! Página da sprint: o período, os números (com o tempo por ferramenta, se a
+//! opção do perfil estiver ligada), as tarefas por projeto na ordem do deck
+//! (com a fileira de saltos e os links de cada projeto, como na daily) e a
+//! galeria das capturas.
 
 use eframe::egui::{self, CornerRadius, FontId, Rect, RichText, Sense, pos2, vec2};
 
 use super::comum::{self, desenhar_miniatura};
-use super::{Acao, Periodo, Registro};
+use super::daily::{fileira_de_saltos, sem_atividade, titulo_secao};
+use super::{Acao, Escopo, Periodo, Registro};
 use crate::api;
 use crate::tema::{self, cores};
 
 impl Registro {
-    pub(super) fn pagina_sprint(&mut self, ui: &mut egui::Ui, projetos: &[String], acoes: &mut Vec<Acao>) {
+    pub(super) fn pagina_sprint(&mut self, ui: &mut egui::Ui, escopo: &Escopo, acoes: &mut Vec<Acao>) {
         let p = cores();
         let ctx = ui.ctx().clone();
         let deck = self.deck_sprint.clone();
         match &deck {
-            Some(d) => tema::cabecalho(ui, &d.titulo, &d.periodo),
-            None => tema::cabecalho(ui, "Sprint", &super::daily::escopo(projetos)),
+            Some(d) => super::daily::cabecalho(ui, &d.titulo, &d.periodo, escopo, acoes),
+            None => super::daily::cabecalho(ui, "Sprint", &escopo.nome, escopo, acoes),
         }
         ui.add_space(12.0);
         let opcoes = [Periodo::Dias7, Periodo::Dias14, Periodo::Mes, Periodo::Escolher];
@@ -60,60 +63,76 @@ impl Registro {
             }
             return;
         };
+        let com_tempo = self.com_tempo(&deck);
         let topo = ui.cursor().top();
-        let saida = egui::ScrollArea::vertical().id_salt("pagina-sprint").auto_shrink(false).show(ui, |ui| {
+        let mut rolagem = egui::ScrollArea::vertical().id_salt("pagina-sprint").auto_shrink(false);
+        if std::mem::take(&mut self.ao_topo[1]) {
+            rolagem = rolagem.vertical_scroll_offset(0.0);
+        }
+        let saida = rolagem.show(ui, |ui| {
             // A barra de rolagem fica numa faixa só dela, sem nada por baixo.
             ui.set_max_width(ui.available_width() - comum::MARGEM_ROLAGEM);
             if deck.slides.is_empty() && deck.capa.novas.is_empty() {
                 let periodo = deck.titulo.trim_start_matches("Sprint · ").replace(" a ", " e ");
-                ui.label(RichText::new(format!("Nada aconteceu entre {periodo}.")).color(p.suave).size(13.5));
+                let onde = if escopo.recorte == api::Recorte::Perfil { String::new() } else { format!(" em {}", escopo.nome) };
+                ui.label(RichText::new(format!("Nada aconteceu{onde} entre {periodo}.")).color(p.suave).size(13.5));
                 ui.add_space(12.0);
                 let (rotulo, proximo) = match self.periodo {
                     Periodo::Dias7 => (Some("Ver 14 dias"), Periodo::Dias14),
                     Periodo::Dias14 => (Some("Ver este mês"), Periodo::Mes),
                     _ => (None, self.periodo),
                 };
-                if let Some(rotulo) = rotulo
-                    && tema::botao_secundario(ui, rotulo).clicked()
-                {
-                    self.periodo = proximo;
-                    self.sprint = None;
-                    self.deck_sprint = None;
-                    self.pedir_sprint(&ctx);
-                }
+                ui.horizontal(|ui| {
+                    if let Some(rotulo) = rotulo
+                        && tema::botao_secundario(ui, rotulo).clicked()
+                    {
+                        self.periodo = proximo;
+                        self.sprint = None;
+                        self.deck_sprint = None;
+                        self.pedir_sprint(&ctx);
+                    }
+                    if escopo.recorte != api::Recorte::Perfil && tema::botao_secundario(ui, "Ver todos os projetos").clicked() {
+                        acoes.push(Acao::Recorte(api::Recorte::Perfil));
+                    }
+                });
                 return;
             }
-            // A barra por ferramenta ao lado dos números quando cabe; senão, numa linha própria.
-            let ferramentas = &deck.capa.numeros.por_ferramenta;
-            let largura_numeros = comum::largura_numeros(ui.painter(), &deck.capa.numeros, 32.0, true);
+            // A barra por ferramenta ao lado dos números quando cabe; senão,
+            // numa linha própria. Sem o tempo dos agentes, ela não existe.
+            let sem_lista = Vec::new();
+            let ferramentas = if com_tempo { &deck.capa.numeros.por_ferramenta } else { &sem_lista };
+            let largura_numeros = comum::largura_numeros(ui.painter(), &deck.capa.numeros, 32.0, true, com_tempo);
             if ferramentas.is_empty() {
-                comum::numeros(ui, &deck.capa.numeros, 32.0, true);
+                comum::numeros(ui, &deck.capa.numeros, 32.0, true, com_tempo);
             } else if largura_numeros + 40.0 + LARGURA_BARRA <= ui.available_width() {
                 ui.horizontal(|ui| {
-                    comum::numeros(ui, &deck.capa.numeros, 32.0, true);
+                    comum::numeros(ui, &deck.capa.numeros, 32.0, true, com_tempo);
                     ui.add_space(40.0 - ui.spacing().item_spacing.x);
                     por_ferramenta(ui, ferramentas);
                 });
             } else {
-                comum::numeros(ui, &deck.capa.numeros, 32.0, true);
+                comum::numeros(ui, &deck.capa.numeros, 32.0, true, com_tempo);
                 ui.add_space(4.0);
                 por_ferramenta(ui, ferramentas);
             }
-            ui.add_space(32.0);
-            let mut secoes: Vec<&str> = deck.slides.iter().map(|s| s.secao.as_str()).collect();
-            secoes.dedup();
+            let secoes = comum::secoes_do_deck(&deck);
             let com_titulo = secoes.len() > 1;
-            for secao in secoes {
-                let slides: Vec<&api::Slide> = deck.slides.iter().filter(|s| s.secao == secao).collect();
-                if com_titulo {
-                    ui.horizontal(|ui| {
-                        ui.label(tema::texto_forte(secao, 17.0).color(p.texto));
-                        let n = slides.len();
-                        ui.label(RichText::new(if n == 1 { "· 1 tarefa".to_string() } else { format!("· {n} tarefas") }).color(p.suave).size(13.5));
-                    });
-                    ui.add_space(8.0);
+            if com_titulo {
+                ui.add_space(20.0);
+                if let Some(id) = fileira_de_saltos(ui, &secoes) {
+                    self.rolar_secao = Some(id);
                 }
-                let clique = comum::grade(ui, &slides, false, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
+                ui.add_space(28.0);
+            } else {
+                ui.add_space(32.0);
+            }
+            let com_projeto = !com_titulo && escopo.varios();
+            for secao in &secoes {
+                if com_titulo {
+                    titulo_secao(ui, secao, secao.slides.len(), &mut self.rolar_secao, self.conectado, acoes);
+                    ui.add_space(12.0);
+                }
+                let clique = comum::grade(ui, &secao.slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
                 if let Some(c) = clique {
                     let periodo = self.periodo_atual();
                     acoes.push(super::acao_do_clique(c, &deck, periodo));
@@ -122,8 +141,9 @@ impl Registro {
             }
             if deck.mais > 0 {
                 ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(13.5));
-                ui.add_space(12.0);
             }
+            sem_atividade(ui, escopo, &secoes, deck.mais > 0);
+            ui.add_space(12.0);
             self.galeria(ui, acoes);
             ui.add_space(24.0);
         });

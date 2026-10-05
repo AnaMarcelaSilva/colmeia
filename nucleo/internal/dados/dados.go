@@ -221,6 +221,10 @@ func migrar(db *sql.DB) error {
 		{"tarefas", "coluna_auto", "INTEGER NOT NULL DEFAULT 0"},
 		// Mostrar o aviso de segredos antes de capturar um terminal.
 		{"perfis", "aviso_captura", "INTEGER NOT NULL DEFAULT 1"},
+		// Mostrar o tempo dos agentes no registro (desligado por padrão).
+		{"perfis", "tempo_agentes", "INTEGER NOT NULL DEFAULT 0"},
+		// Workspace recolhido na barra lateral.
+		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
 		{"eventos", "perfil_id", "INTEGER"},
 		{"eventos", "projeto_id", "INTEGER"},
@@ -401,7 +405,7 @@ func preencherEscopo(db *sql.DB) error {
 		switch tipo {
 		case "perfil.criado":
 			e.Perfil = d.ID
-		case "perfil.tema", "perfil.contas":
+		case "perfil.tema", "perfil.contas", "workspace.recolhido":
 			e.Perfil = d.Perfil
 		case "workspace.criado":
 			perfilDoWorkspace[d.ID] = d.PerfilID

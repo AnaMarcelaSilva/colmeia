@@ -123,27 +123,35 @@ pub fn regioes(tamanho: Vec2, com_anexos: bool, com_abas: bool) -> Regioes {
 enum Pagina {
     Capa,
     Tarefa(usize),
-    /// Divisor da sprint: o projeto e quantas tarefas.
-    Divisor(String, usize),
+    /// Divisor de projeto (com mais de um no deck): o nome, o workspace
+    /// (vazio com um workspace só) e quantas tarefas.
+    Divisor {
+        projeto: String,
+        workspace: String,
+        n: usize,
+    },
     Mais,
     Fim,
 }
 
 /// Monta a sequência de páginas do deck (sem os slides escondidos com H).
+/// Com mais de um projeto (na daily e na sprint), cada projeto começa com um divisor.
 fn montar_paginas(deck: &api::Deck, escondidos: &HashSet<i64>) -> Vec<Pagina> {
     let mut paginas = vec![Pagina::Capa];
-    let mut secoes: Vec<&str> = deck.slides.iter().filter(|s| !escondidos.contains(&s.tarefa_id)).map(|s| s.secao.as_str()).collect();
+    let secao = |s: &api::Slide| (s.secao_id, s.secao.clone());
+    let mut secoes: Vec<(i64, String)> = deck.slides.iter().filter(|s| !escondidos.contains(&s.tarefa_id)).map(secao).collect();
     secoes.dedup();
-    let com_divisor = deck.tipo == "sprint" && secoes.len() > 1;
+    let com_divisor = secoes.len() > 1;
     let mut secao_atual = None;
     for (i, s) in deck.slides.iter().enumerate() {
         if escondidos.contains(&s.tarefa_id) {
             continue;
         }
-        if com_divisor && secao_atual != Some(s.secao.as_str()) {
-            let n = deck.slides.iter().filter(|x| x.secao == s.secao && !escondidos.contains(&x.tarefa_id)).count();
-            paginas.push(Pagina::Divisor(s.secao.clone(), n));
-            secao_atual = Some(s.secao.as_str());
+        if com_divisor && secao_atual.as_ref() != Some(&secao(s)) {
+            let n = deck.slides.iter().filter(|x| secao(x) == secao(s) && !escondidos.contains(&x.tarefa_id)).count();
+            let projeto = if s.projeto.is_empty() { s.secao.clone() } else { s.projeto.clone() };
+            paginas.push(Pagina::Divisor { projeto, workspace: s.workspace.clone(), n });
+            secao_atual = Some(secao(s));
         }
         paginas.push(Pagina::Tarefa(i));
     }
@@ -232,11 +240,20 @@ enum Tom {
 /// Linhas da nota no slide: pelo menos estas, e até estas quando sobra espaço.
 const LINHAS_NOTA: (usize, usize) = (4, 14);
 
+/// A nota é o roteiro da fala: o maior texto da coluna.
+const FONTE_NOTA: f32 = 22.0;
+
+/// "O que foi feito" recolhido: só a linha que abre a lista.
+const ALTURA_FEITO_RECOLHIDO: f32 = 30.0;
+
 /// Altura que "O que foi feito" ocupa sem limite (as mesmas contas do slide).
-fn altura_feito(slide: &api::Slide, s: f32) -> f32 {
+fn altura_feito(slide: &api::Slide, s: f32, aberto: bool) -> f32 {
     let px = |v: f32| (v * s).round();
     if slide.feito.is_empty() {
         return 0.0;
+    }
+    if !aberto {
+        return px(ALTURA_FEITO_RECOLHIDO);
     }
     let so_periodo = slide.feito.len() == 1 && slide.feito[0].parte == "No período";
     let linha = px(28.0);
@@ -259,14 +276,108 @@ fn altura_feito(slide: &api::Slide, s: f32) -> f32 {
 /// Quantas linhas da nota (fonte 18) cabem na altura livre, com o estado da
 /// gravação embaixo.
 fn linhas_que_cabem(pintor: &egui::Painter, livre: f32) -> usize {
-    let linha = pintor.layout_no_wrap("Ág".into(), FontId::proportional(18.0), Color32::WHITE).size().y.max(1.0);
+    let linha = pintor.layout_no_wrap("Ág".into(), FontId::proportional(FONTE_NOTA), Color32::WHITE).size().y.max(1.0);
     let cabem = ((livre - RODAPE_NOTA - 20.0) / linha).floor().max(0.0) as usize;
     cabem.clamp(LINHAS_NOTA.0, LINHAS_NOTA.1)
 }
 
+/// A nota lida no slide, com o markdown da lousa (títulos, negrito, itálico,
+/// código, listas e tabelas simples), em até `linhas`. `pelo_fim` mostra o
+/// fim quando não cabe (a resposta do agente vem no fim), com "…" em cima.
+fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f32, linhas: usize, pelo_fim: bool) -> std::sync::Arc<egui::Galley> {
+    use lousa::markdown::{Bloco, Marcador, Trecho, ler};
+    let blocos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
+    let montar = |blocos: &[Bloco], cortado: bool, max: usize| {
+        let p = cores();
+        let normal = FontId::proportional(FONTE_NOTA);
+        let mut job = egui::text::LayoutJob::default();
+        let trechos = |job: &mut egui::text::LayoutJob, lista: &[Trecho], negrito: bool| {
+            for t in lista {
+                let mut f = egui::TextFormat::simple(if t.negrito || negrito { forte(FONTE_NOTA) } else { normal.clone() }, cor);
+                if t.codigo {
+                    f.font_id = FontId::monospace(FONTE_NOTA - 3.0);
+                    f.background = p.superficie;
+                }
+                f.italics = t.italico;
+                job.append(&t.texto, 0.0, f);
+            }
+        };
+        if cortado {
+            job.append("…\n", 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
+        }
+        for (i, b) in blocos.iter().enumerate() {
+            if i > 0 {
+                job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
+            }
+            match b {
+                Bloco::Titulo(_, t) => trechos(&mut job, t, true),
+                Bloco::Paragrafo(ls) => {
+                    for (j, l) in ls.iter().enumerate() {
+                        if j > 0 {
+                            job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
+                        }
+                        trechos(&mut job, l, false);
+                    }
+                }
+                Bloco::Item { nivel, marcador, trechos: t } => {
+                    let recuo = "    ".repeat(*nivel as usize);
+                    let marca = match marcador {
+                        Marcador::Ponto => "•".to_string(),
+                        Marcador::Numero(n) => format!("{n}."),
+                        Marcador::Caixa(true) => "[x]".to_string(),
+                        Marcador::Caixa(false) => "[ ]".to_string(),
+                    };
+                    job.append(&format!("{recuo}{marca} "), 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
+                    trechos(&mut job, t, false);
+                }
+                Bloco::Codigo(c) => {
+                    let mut f = egui::TextFormat::simple(FontId::monospace(FONTE_NOTA - 4.0), cor);
+                    f.background = p.superficie;
+                    job.append(c.trim_end(), 0.0, f);
+                }
+                Bloco::Tabela { cabecalho, linhas: ls, .. } => {
+                    for (j, l) in cabecalho.iter().chain(ls.iter()).enumerate() {
+                        if j > 0 {
+                            job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
+                        }
+                        for (k, celula) in l.iter().enumerate() {
+                            if k > 0 {
+                                job.append("  ·  ", 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
+                            }
+                            trechos(&mut job, celula, j == 0 && cabecalho.is_some());
+                        }
+                    }
+                }
+                Bloco::Vazio => {}
+            }
+        }
+        job.wrap = egui::text::TextWrapping { max_width: largura.max(10.0), max_rows: max, break_anywhere: false, overflow_character: Some('…') };
+        pintor.layout_job(job)
+    };
+    let linhas = linhas.max(1);
+    if pelo_fim {
+        // Tira blocos do começo até o resto caber.
+        for inicio in 0..blocos.len() {
+            let g = montar(&blocos[inicio..], inicio > 0, usize::MAX);
+            if g.rows.len() <= linhas {
+                return g;
+            }
+        }
+    }
+    montar(&blocos, false, linhas)
+}
+
 pub struct Apresentacao {
     perfil: i64,
-    projeto: Option<i64>,
+    /// O escopo em que ela abriu: o R atualiza nele, mesmo que a barra
+    /// lateral mude depois.
+    recorte: api::Recorte,
+    /// A opção "Mostrar tempo dos agentes" do perfil (a tela principal põe a
+    /// cada quadro, por `definir_tempo`).
+    mostrar_tempo: bool,
+    /// A opção foi desligada com um deck que tinha o tempo: o deck saiu da
+    /// memória e um novo, sem o tempo, está a caminho (a tela diz "Atualizando…").
+    tirando_tempo: bool,
     /// None é a daily.
     periodo: Option<api::PeriodoSprint>,
     deck: Option<api::Deck>,
@@ -292,6 +403,8 @@ pub struct Apresentacao {
     conflito: Option<Conflito>,
     focar_nota: bool,
     estado_nota: HashMap<i64, EstadoNota>,
+    /// "O que foi feito" aberto (começa recolhido; vale para todos os slides).
+    feito_aberto: bool,
     // Anexos
     principal: HashMap<i64, usize>,
     imagens: CacheImagens,
@@ -371,21 +484,36 @@ pub fn juntar_nota(base: &str, minha: &str, atual: &str) -> Option<String> {
     Some(format!("{}{}", minha.trim_end(), acrescentado))
 }
 
+/// Quantas células a capa usa para N partes: até 6 (3 por fileira); com
+/// mais, a sexta diz quais projetos ficaram de fora.
+fn celulas_capa(partes: usize) -> usize {
+    partes.min(6)
+}
+
+/// O rótulo da coluna da capa: "estudos › cliente-x · 1" (o núcleo separa o
+/// workspace com " · "; na tela o caminho usa "›" e o "·" fica só antes da contagem).
+fn rotulo_parte(titulo: &str, n: usize) -> String {
+    format!("{} · {n}", titulo.replacen(" · ", " › ", 1))
+}
+
 impl Apresentacao {
     #[allow(clippy::too_many_arguments)]
     pub fn nova(
         ctx: &egui::Context,
         perfil: i64,
-        projeto: Option<i64>,
+        recorte: api::Recorte,
         periodo: Option<api::PeriodoSprint>,
         deck: Option<api::Deck>,
         inicio: Inicio,
         tela_cheia: bool,
         tema_base: tema::Escolha,
+        mostrar_tempo: bool,
     ) -> Self {
         let mut a = Apresentacao {
             perfil,
-            projeto,
+            recorte,
+            mostrar_tempo,
+            tirando_tempo: false,
             periodo,
             deck: None,
             erro: None,
@@ -403,6 +531,7 @@ impl Apresentacao {
             conflito: None,
             focar_nota: false,
             estado_nota: HashMap::new(),
+            feito_aberto: false,
             principal: HashMap::new(),
             imagens: CacheImagens::new(Some(ALTURA_IMAGEM), MAX_IMAGENS, "slide"),
             miniaturas: CacheImagens::new(Some(128), 64, "slide-miniatura"),
@@ -430,14 +559,48 @@ impl Apresentacao {
             palco: None,
         };
         match deck {
-            Some(d) => a.trocar_deck(d, None),
-            None => a.pedir_deck(ctx, None),
+            // Um deck com o tempo e a opção desligada nunca entra na tela.
+            Some(d) if !(d.tempo_agentes && !mostrar_tempo) => a.trocar_deck(d, None),
+            _ => a.pedir_deck(ctx, None),
         }
         a
     }
 
     pub fn daily(&self) -> bool {
         self.periodo.is_none()
+    }
+
+    /// A opção do perfil. Desligada com um deck que tinha o tempo, as frases
+    /// dele (que vêm prontas do núcleo) saem da tela na hora: o deck sai da
+    /// memória e um novo é pedido no mesmo escopo, mantendo o slide. Ligada,
+    /// busca de novo para trazer o tempo.
+    pub fn definir_tempo(&mut self, ctx: &egui::Context, mostrar: bool) {
+        if mostrar == self.mostrar_tempo {
+            return;
+        }
+        self.mostrar_tempo = mostrar;
+        if self.deck.is_none() && !self.buscando {
+            return;
+        }
+        let atual = self.tarefa_atual();
+        if !mostrar && self.deck.as_ref().is_some_and(|d| d.tempo_agentes) {
+            self.fechar_caixa();
+            self.salvar_nota(ctx);
+            self.deck = None;
+            self.tirando_tempo = true;
+            self.inicio = match atual {
+                Some(t) => Inicio::Tarefa(t),
+                None => Inicio::Capa,
+            };
+        }
+        if self.buscando {
+            // A resposta que está a caminho pode ter o tempo: ela é descartada
+            // ou trocada por uma busca nova ao chegar.
+            self.buscar_de_novo = true;
+        } else {
+            self.pedir_deck(ctx, atual);
+        }
+        ctx.request_repaint();
     }
 
     /// Um evento de nota ou anexo chegou: diz se foi a própria apresentação
@@ -527,8 +690,12 @@ impl Apresentacao {
     }
 
     fn pedir_deck(&mut self, ctx: &egui::Context, manter: Option<i64>) {
-        let (perfil, projeto, periodo) = (self.perfil, self.projeto, self.periodo.clone());
+        let (perfil, projeto, periodo) = (self.perfil, self.recorte, self.periodo.clone());
         self.buscando = true;
+        // Nos testes nada fala com um núcleo: a resposta é posta no canal à mão.
+        if cfg!(test) {
+            return;
+        }
         registro::em_segundo_plano(&self.canal.0, ctx, move || Mensagem::Deck { resultado: api::apresentacao(perfil, projeto, periodo.as_ref()), manter });
     }
 
@@ -680,6 +847,14 @@ impl Apresentacao {
                 Mensagem::Deck { resultado: Ok(deck), manter } => {
                     self.buscando = false;
                     self.erro = None;
+                    // Pedido antes de a opção ser desligada: nunca entra na tela.
+                    if !self.mostrar_tempo && deck.tempo_agentes {
+                        self.buscar_de_novo = false;
+                        let manter = manter.or(self.tarefa_atual());
+                        self.pedir_deck(ctx, manter);
+                        continue;
+                    }
+                    self.tirando_tempo = false;
                     // Mais mudanças chegaram durante a busca: busca de novo, no slide de agora.
                     let manter = if std::mem::take(&mut self.buscar_de_novo) {
                         let atual = self.tarefa_atual();
@@ -1122,7 +1297,8 @@ impl Apresentacao {
                 ui.painter().text(tela.center(), egui::Align2::CENTER_CENTER, texto, FontId::proportional(18.0), p.erro);
             }
             (None, None) => {
-                ui.painter().text(tela.center(), egui::Align2::CENTER_CENTER, "Montando a apresentação…", FontId::proportional(18.0), p.suave);
+                let texto = if self.tirando_tempo { "Atualizando sem o tempo dos agentes…" } else { "Montando a apresentação…" };
+                ui.painter().text(tela.center(), egui::Align2::CENTER_CENTER, texto, FontId::proportional(18.0), p.suave);
             }
             (Some(_), _) => {
                 let pagina = self.paginas.get(self.atual).cloned().unwrap_or(Pagina::Capa);
@@ -1132,9 +1308,9 @@ impl Apresentacao {
                         self.capa(ui, &r, tela);
                     }
                     Pagina::Tarefa(i) => self.slide_tarefa(ui, &r, i, modelo, agora),
-                    Pagina::Divisor(secao, n) => {
+                    Pagina::Divisor { projeto, workspace, n } => {
                         favo.desenhar(ui.painter(), tela);
-                        self.divisor(ui, tela, &secao, n, r.escala);
+                        self.divisor(ui, tela, &projeto, &workspace, n, r.escala);
                     }
                     Pagina::Mais => {
                         favo.desenhar(ui.painter(), tela);
@@ -1207,11 +1383,11 @@ impl Apresentacao {
 
         let numeros = Rect::from_min_size(pos2(esquerda, tela.top() + px(240.0)), vec2(largura, px(110.0)));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(numeros));
-        registro::numeros(&mut filho, &deck.capa.numeros, px(64.0).max(48.0), true);
+        registro::numeros(&mut filho, &deck.capa.numeros, px(64.0).max(48.0), true, self.com_tempo());
 
         // Destaques: até 2 linhas cada (o núcleo já põe o verbo antes dos títulos).
         let mut y = tela.top() + px(384.0);
-        for d in deck.capa.destaques.iter().take(3) {
+        for d in deck.capa.destaques.iter().filter(|d| !d.is_empty()).take(3) {
             let g = registro::texto_em_linhas(&pintor, d, FontId::proportional(px(22.0)), p.texto, largura - 24.0, 2);
             let primeira = g.rows.first().map_or(px(28.0), |l| l.rect().height());
             pintor.circle_filled(pos2(esquerda + 4.0, y + primeira / 2.0), 4.0, p.destaque);
@@ -1220,23 +1396,44 @@ impl Apresentacao {
             y += altura + px(12.0);
         }
 
-        // Partes em colunas: os dias na daily, os projetos na sprint (até 3).
-        // Cada tarefa: a marca do estado, o título em até 2 linhas e a palavra
-        // do estado, para não depender só da cor do ponto.
+        // Partes em colunas: os dias na daily, os projetos na sprint. Até 3
+        // por fileira e até 2 fileiras; passando de 6, a última célula diz
+        // quais projetos ficaram de fora (nunca as tarefas de um projeto sob
+        // o rótulo de outro). Cada tarefa: a marca do estado, o título em até
+        // 2 linhas e a palavra do estado, para não depender só da cor do ponto.
         let topo = (y + px(28.0)).max(tela.top() + px(500.0));
         let base = r.acoes.top() - px(24.0);
         let partes: Vec<&api::ParteCapa> = deck.capa.partes.iter().filter(|p| !p.tarefas.is_empty()).collect();
-        let colunas = partes.len().clamp(1, 3);
+        let celulas = celulas_capa(partes.len());
+        let colunas = celulas.clamp(1, 3);
+        let fileiras = celulas.div_ceil(3).max(1);
         let vao = px(48.0);
+        let vao_fileira = px(24.0);
         let largura_coluna = (largura - vao * (colunas as f32 - 1.0)) / colunas as f32;
+        let altura_fileira = ((base - topo) - vao_fileira * (fileiras as f32 - 1.0)) / fileiras as f32;
         let fonte = FontId::proportional(px(20.0));
         let raio = px(5.0);
         let mut ir_para = None;
-        for (c, parte) in partes.iter().take(3).enumerate() {
-            let x = esquerda + c as f32 * (largura_coluna + vao);
-            let rotulo = if c == 2 && partes.len() > 3 { format!("{} · +{} projetos", parte.titulo, partes.len() - 3) } else { parte.titulo.clone() };
-            pintor.text(pos2(x, topo), egui::Align2::LEFT_TOP, rotulo, forte(px(17.0)), p.suave);
-            let mut y = topo + px(32.0);
+        for c in 0..celulas {
+            let x = esquerda + (c % 3) as f32 * (largura_coluna + vao);
+            let topo_celula = topo + (c / 3) as f32 * (altura_fileira + vao_fileira);
+            let base_celula = topo_celula + altura_fileira;
+            if c + 1 == celulas && partes.len() > celulas {
+                // A última célula: os projetos que não couberam, pelo nome.
+                let fora = &partes[c..];
+                let titulo = if fora.len() == 1 { "E mais 1 projeto".to_string() } else { format!("E mais {} projetos", fora.len()) };
+                pintor.text(pos2(x, topo_celula), egui::Align2::LEFT_TOP, titulo, forte(px(17.0)), p.suave);
+                let nomes: Vec<String> = fora.iter().map(|p| rotulo_parte(&p.titulo, p.tarefas.len())).collect();
+                let linhas = (((base_celula - topo_celula - px(32.0)) / px(26.0)).floor().max(1.0)) as usize;
+                let g = tema::cortar(&pintor, &nomes.join(", "), egui::TextFormat::simple(fonte.clone(), p.texto), largura_coluna, linhas, false);
+                pintor.galley(pos2(x, topo_celula + px(32.0)), g, p.texto);
+                continue;
+            }
+            let parte = partes[c];
+            let rotulo = rotulo_parte(&parte.titulo, parte.tarefas.len());
+            let g_rotulo = tema::cortar(&pintor, &rotulo, egui::TextFormat::simple(forte(px(17.0)), p.suave), largura_coluna, 1, false);
+            pintor.galley(pos2(x, topo_celula), g_rotulo, p.suave);
+            let mut y = topo_celula + px(32.0);
             let linha_mais = px(30.0);
             for (n, tarefa) in parte.tarefas.iter().enumerate() {
                 let Some(slide) = deck.slides.iter().find(|s| s.tarefa_id == *tarefa) else { continue };
@@ -1248,7 +1445,7 @@ impl Apresentacao {
                 let g = tema::cortar(&pintor, &slide.titulo, egui::TextFormat::simple(fonte.clone(), p.texto), largura_titulo, 2, false);
                 let restam = parte.tarefas.len() - n;
                 // Sem lugar para esta e as que faltam: "+N" no lugar dela.
-                if y + g.size().y + px(8.0) > base || (restam > 1 && y + g.size().y + px(8.0) + linha_mais > base) {
+                if y + g.size().y + px(8.0) > base_celula || (restam > 1 && y + g.size().y + px(8.0) + linha_mais > base_celula) {
                     pintor.text(
                         pos2(x + px(22.0), y + linha_mais / 2.0),
                         egui::Align2::LEFT_CENTER,
@@ -1290,14 +1487,27 @@ impl Apresentacao {
         }
     }
 
-    fn divisor(&self, ui: &mut egui::Ui, tela: Rect, secao: &str, n: usize, s: f32) {
+    /// O tempo dos agentes aparece (a opção do perfil e o deck que veio com ele).
+    fn com_tempo(&self) -> bool {
+        self.mostrar_tempo && self.deck.as_ref().is_some_and(|d| d.tempo_agentes)
+    }
+
+    /// Divisor de projeto: o logo, o workspace suave em cima (com mais de um
+    /// no deck), o nome do projeto e quantas tarefas.
+    fn divisor(&self, ui: &mut egui::Ui, tela: Rect, projeto: &str, workspace: &str, n: usize, s: f32) {
         let p = cores();
         let pintor = ui.painter();
-        let c = tela.center() - vec2(0.0, 60.0 * s);
+        let com_workspace = !workspace.is_empty();
+        let c = tela.center() - vec2(0.0, if com_workspace { 80.0 } else { 60.0 } * s);
         tema::logo(pintor, c, 28.0 * s);
-        pintor.text(c + vec2(0.0, 28.0 * s + 24.0 * s), egui::Align2::CENTER_TOP, secao, forte(64.0 * s), p.texto);
+        let mut y = c.y + 28.0 * s + 24.0 * s;
+        if com_workspace {
+            pintor.text(pos2(c.x, y), egui::Align2::CENTER_TOP, workspace, FontId::proportional(22.0 * s), p.suave);
+            y += 34.0 * s;
+        }
+        pintor.text(pos2(c.x, y), egui::Align2::CENTER_TOP, projeto, forte(64.0 * s), p.texto);
         let texto = if n == 1 { "1 tarefa".to_string() } else { format!("{n} tarefas") };
-        pintor.text(c + vec2(0.0, 28.0 * s + 24.0 * s + 80.0 * s), egui::Align2::CENTER_TOP, texto, FontId::proportional(22.0 * s), p.suave);
+        pintor.text(pos2(c.x, y + 80.0 * s), egui::Align2::CENTER_TOP, texto, FontId::proportional(22.0 * s), p.suave);
     }
 
     fn pagina_mais(&self, ui: &mut egui::Ui, tela: Rect, s: f32) {
@@ -1317,10 +1527,11 @@ impl Apresentacao {
         ui.painter().text(c, egui::Align2::CENTER_CENTER, titulo, forte(48.0 * s), p.texto);
         ui.painter().text(c + vec2(0.0, 44.0 * s), egui::Align2::CENTER_CENTER, "Esc volta", FontId::proportional(18.0 * s), p.suave);
         // Centralizados: a largura da fileira é medida antes.
-        let largura = registro::largura_numeros(ui.painter(), &deck.capa.numeros, 32.0, false);
+        let com_tempo = self.com_tempo();
+        let largura = registro::largura_numeros(ui.painter(), &deck.capa.numeros, 32.0, false, com_tempo);
         let area = Rect::from_min_size(pos2(tela.center().x - largura / 2.0, c.y + 44.0 * s + 40.0 * s), vec2(largura + 8.0, 90.0));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(area));
-        registro::numeros(&mut filho, &deck.capa.numeros, 32.0, false);
+        registro::numeros(&mut filho, &deck.capa.numeros, 32.0, false, com_tempo);
     }
 
     /// O slide de uma tarefa: cabeçalho, título, o que foi feito, números,
@@ -1447,7 +1658,8 @@ impl Apresentacao {
         // do espaço dos números e da nota: com a lista cheia, os dois ficam
         // no pé da coluna; com poucos tópicos, sobem junto.
         let n = &slide.numeros;
-        let tem_numeros = n.tempo_s >= 60 || n.sessoes > 0 || n.erros > 0 || n.capturas > 0;
+        let com_tempo = self.com_tempo();
+        let tem_numeros = (com_tempo && n.tempo_s > 0) || n.sessoes > 0 || n.erros > 0 || n.capturas > 0;
         let altura_numeros = if tem_numeros { px(64.0) } else { 0.0 };
         // A linha do pedido ao agente, acima da nota.
         let resumo = self.pedidos.get(&slide.tarefa_id).cloned();
@@ -1456,7 +1668,7 @@ impl Apresentacao {
         // A nota usa o espaço que os tópicos deixam (pelo menos 4 linhas): o
         // agente complementa no fim, e a resposta precisa aparecer no slide.
         // Respondido um pedido, se ainda não couber, o começo sai ("…" em cima).
-        let livre = area.height() - altura_feito(slide, s) - altura_numeros - vao_numeros - altura_pedido - px(20.0);
+        let livre = area.height() - altura_feito(slide, s, self.feito_aberto) - altura_numeros - vao_numeros - altura_pedido - px(20.0);
         let linhas_nota = linhas_que_cabem(&pintor, livre);
         let pelo_fim = resumo.as_ref().is_some_and(|r| r.pedido.estado == "respondido");
         let altura_nota = self.altura_nota(&pintor, slide, s, largura, linhas_nota) + altura_pedido;
@@ -1464,13 +1676,32 @@ impl Apresentacao {
         let limite = area.bottom() - altura_nota - vao_nota - altura_numeros - vao_numeros;
 
         let mut y = area.top();
+        // Recolhido por padrão: o que o agente fez é apoio; a fala é a nota.
         if !slide.feito.is_empty() {
-            pintor.text(pos2(area.left(), y), egui::Align2::LEFT_TOP, "O que foi feito", forte(15.0), p.suave);
-            y += px(22.0) + px(12.0);
+            let itens: usize = slide.feito.iter().map(|f| f.itens.len() + f.mais).sum();
+            let rotulo = format!("O que foi feito · {itens} {}", if itens == 1 { "item" } else { "itens" });
+            let g = pintor.layout_no_wrap(rotulo, FontId::proportional(13.5), p.suave);
+            let caixa = Rect::from_min_size(pos2(area.left(), y), g.size() + vec2(16.0, 4.0));
+            let resposta = ui.interact(caixa, Id::new(("feito", slide.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let cor = if resposta.hovered() { p.texto } else { p.suave };
+            // A seta desenhada: a fonte não tem ▸/▾.
+            let c = pos2(caixa.left() + 5.0, caixa.top() + g.size().y / 2.0);
+            let pontas = if self.feito_aberto {
+                vec![c + vec2(-4.0, -2.5), c + vec2(4.0, -2.5), c + vec2(0.0, 3.0)]
+            } else {
+                vec![c + vec2(-2.5, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.5, 4.0)]
+            };
+            pintor.add(egui::Shape::convex_polygon(pontas, cor, Stroke::NONE));
+            pintor.galley(caixa.min + vec2(16.0, 0.0), g, cor);
+            if resposta.clicked() {
+                self.feito_aberto = !self.feito_aberto;
+            }
+            y += if self.feito_aberto { px(22.0) + px(12.0) } else { px(ALTURA_FEITO_RECOLHIDO) };
         }
+        let feito: &[api::Feito] = if self.feito_aberto { &slide.feito } else { &[] };
         let so_periodo = slide.feito.len() == 1 && slide.feito[0].parte == "No período";
         let linha = px(28.0);
-        for f in &slide.feito {
+        for f in feito {
             if y + linha > limite {
                 break;
             }
@@ -1507,8 +1738,8 @@ impl Apresentacao {
         if tem_numeros {
             let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(numeros).layout(egui::Layout::left_to_right(egui::Align::Min)));
             filho.spacing_mut().item_spacing.x = px(40.0);
-            if n.tempo_s >= 60 {
-                tema::metrica(&mut filho, &registro::duracao(n.tempo_s), "Tempo de agente", None, px(28.0));
+            if com_tempo && n.tempo_s > 0 {
+                tema::metrica(&mut filho, &registro::texto_tempo(n.tempo_s), "Tempo de agente", None, px(28.0));
             }
             if n.sessoes > 0 {
                 tema::metrica(&mut filho, &n.sessoes.to_string(), if n.sessoes == 1 { "Sessão" } else { "Sessões" }, None, px(28.0));
@@ -1553,7 +1784,7 @@ impl Apresentacao {
             (Some(a), true) => (a.texto.as_str(), 20.0),
             _ => (slide.nota.as_str(), 0.0),
         };
-        let g = registro::texto_em_linhas(pintor, &registro::sem_linhas_vazias(texto), FontId::proportional(18.0), cores().texto, largura - 15.0, linhas);
+        let g = nota_formatada(pintor, texto, cores().texto, largura - 15.0, linhas, false);
         prefixo + g.size().y + RODAPE_NOTA
     }
 
@@ -1582,7 +1813,7 @@ impl Apresentacao {
             let id = Id::new(("nota-slide", tarefa));
             let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(area.min, vec2(area.width(), area.height() - rodape))));
             let mut texto = self.nota.as_ref().map(|n| n.1.clone()).unwrap_or_default();
-            let resposta = tema::campo_multilinha_com(&mut filho, &mut texto, 3, area.height() - rodape - 20.0, id, false, FontId::proportional(18.0));
+            let resposta = tema::campo_multilinha_com(&mut filho, &mut texto, 3, area.height() - rodape - 20.0, id, false, FontId::proportional(FONTE_NOTA));
             if texto.chars().count() > MAX_NOTA {
                 texto = texto.chars().take(MAX_NOTA).collect();
             }
@@ -1607,13 +1838,11 @@ impl Apresentacao {
             } else if self.nota_agente.contains(&tarefa) {
                 ui.painter().text(pos2(x, y), egui::Align2::LEFT_TOP, "O agente acrescentou à nota; vai junto quando você salvar", fonte_estado, p.destaque);
             } else if !self.tela_cheia {
-                ui.painter().text(
-                    pos2(x, y),
-                    egui::Align2::LEFT_TOP,
-                    "A nota aparece no slide para quem está vendo · Esc ou clique fora salva",
-                    fonte_estado,
-                    p.suave,
-                );
+                // Sem lugar para tudo, sai o "Ctrl+Enter, " (o Esc já explica).
+                let longa = "A nota aparece no slide para quem está vendo · Ctrl+Enter, Esc ou clique fora salva";
+                let cabe = ui.painter().layout_no_wrap(longa.into(), fonte_estado.clone(), p.suave).size().x <= area.right() - x;
+                let dica = if cabe { longa } else { "A nota aparece no slide para quem está vendo · Esc ou clique fora salva" };
+                ui.painter().text(pos2(x, y), egui::Align2::LEFT_TOP, dica, fonte_estado, p.suave);
             }
             return;
         }
@@ -1634,13 +1863,8 @@ impl Apresentacao {
                 pintor.text(pos2(corpo.left() + 15.0, y), egui::Align2::LEFT_TOP, prefixo, fonte_estado.clone(), p.suave);
                 y += 20.0;
             }
-            let limpo = registro::sem_linhas_vazias(texto);
             // A nota de outro período não é a que o agente complementou.
-            let g = if pelo_fim && !slide.nota.is_empty() {
-                tema::cortar_pelo_fim(pintor, &limpo, egui::TextFormat::simple(FontId::proportional(18.0), cor), corpo.width() - 15.0, linhas)
-            } else {
-                registro::texto_em_linhas(pintor, &limpo, FontId::proportional(18.0), cor, corpo.width() - 15.0, linhas)
-            };
+            let g = nota_formatada(pintor, texto, cor, corpo.width() - 15.0, linhas, pelo_fim && !slide.nota.is_empty());
             let altura = g.size().y;
             pintor.rect_filled(Rect::from_min_size(pos2(corpo.left(), y), vec2(3.0, altura)), CornerRadius::same(2), p.destaque);
             pintor.galley(pos2(corpo.left() + 15.0, y), g, cor);
@@ -2312,12 +2536,16 @@ mod testes {
         serde_json::from_value(serde_json::json!({
             "tipo": "sprint", "titulo": "Sprint", "mais": 2,
             "slides": [
-                {"tarefa_id": 1, "titulo": "A", "secao": "loja-web"},
-                {"tarefa_id": 2, "titulo": "B", "secao": "loja-web"},
-                {"tarefa_id": 3, "titulo": "C", "secao": "cliente-x"}
+                {"tarefa_id": 1, "titulo": "A", "secao": "loja-web", "secao_id": 1, "projeto": "loja-web"},
+                {"tarefa_id": 2, "titulo": "B", "secao": "loja-web", "secao_id": 1, "projeto": "loja-web"},
+                {"tarefa_id": 3, "titulo": "C", "secao": "cliente-x", "secao_id": 2, "projeto": "cliente-x"}
             ]
         }))
         .unwrap()
+    }
+
+    fn divisor(projeto: &str, workspace: &str, n: usize) -> Pagina {
+        Pagina::Divisor { projeto: projeto.into(), workspace: workspace.into(), n }
     }
 
     #[test]
@@ -2328,10 +2556,10 @@ mod testes {
             paginas,
             vec![
                 Pagina::Capa,
-                Pagina::Divisor("loja-web".into(), 2),
+                divisor("loja-web", "", 2),
                 Pagina::Tarefa(0),
                 Pagina::Tarefa(1),
-                Pagina::Divisor("cliente-x".into(), 1),
+                divisor("cliente-x", "", 1),
                 Pagina::Tarefa(2),
                 Pagina::Mais,
                 Pagina::Fim
@@ -2341,11 +2569,29 @@ mod testes {
         let escondidos: HashSet<i64> = [3].into();
         let paginas = montar_paginas(&d, &escondidos);
         assert_eq!(paginas, vec![Pagina::Capa, Pagina::Tarefa(0), Pagina::Tarefa(1), Pagina::Mais, Pagina::Fim]);
-        // Na daily não há divisor.
+        // A daily com mais de um projeto também tem divisor; com um projeto só, não.
         let mut daily = d.clone();
         daily.tipo = "daily".into();
         daily.mais = 0;
-        assert_eq!(montar_paginas(&daily, &HashSet::new()).len(), 5);
+        assert_eq!(montar_paginas(&daily, &HashSet::new()).len(), 7);
+        daily.slides.pop();
+        assert_eq!(montar_paginas(&daily, &HashSet::new()), vec![Pagina::Capa, Pagina::Tarefa(0), Pagina::Tarefa(1), Pagina::Fim]);
+        // Dois loja-web de workspaces diferentes são projetos diferentes.
+        let mut dois: api::Deck = serde_json::from_value(serde_json::json!({
+            "tipo": "daily", "titulo": "Daily",
+            "slides": [
+                {"tarefa_id": 1, "titulo": "A", "secao": "estudos · loja-web", "secao_id": 1, "projeto": "loja-web", "workspace": "estudos"},
+                {"tarefa_id": 2, "titulo": "B", "secao": "trabalho-x · loja-web", "secao_id": 3, "projeto": "loja-web", "workspace": "trabalho-x"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            montar_paginas(&dois, &HashSet::new()),
+            vec![Pagina::Capa, divisor("loja-web", "estudos", 1), Pagina::Tarefa(0), divisor("loja-web", "trabalho-x", 1), Pagina::Tarefa(1), Pagina::Fim]
+        );
+        dois.slides[1].secao_id = 1;
+        dois.slides[1].secao = "estudos · loja-web".into();
+        assert_eq!(montar_paginas(&dois, &HashSet::new()).len(), 4);
     }
 
     #[test]
@@ -2360,7 +2606,17 @@ mod testes {
     #[test]
     fn comeca_no_slide_pedido_e_mantem_a_tarefa_ao_atualizar() {
         let ctx = egui::Context::default();
-        let mut a = Apresentacao::nova(&ctx, 1, None, Some(api::PeriodoSprint::Ultimos(7)), Some(deck()), Inicio::Tarefa(3), false, tema::Escolha::Escuro);
+        let mut a = Apresentacao::nova(
+            &ctx,
+            1,
+            api::Recorte::Perfil,
+            Some(api::PeriodoSprint::Ultimos(7)),
+            Some(deck()),
+            Inicio::Tarefa(3),
+            false,
+            tema::Escolha::Escuro,
+            false,
+        );
         assert_eq!(a.tarefa_atual(), Some(3));
         // R com a tarefa 3 fora do deck: fica no vizinho e avisa.
         let mut sem_c = deck();
@@ -2370,7 +2626,56 @@ mod testes {
         assert!(a.aviso.as_ref().is_some_and(|(t, _, _)| t.contains("“C” saiu da sprint")));
         a.trocar_deck(deck(), Some(2));
         assert_eq!(a.tarefa_atual(), Some(2));
-        let capa = Apresentacao::nova(&ctx, 1, None, None, Some(deck()), Inicio::Capa, true, tema::Escolha::Escuro);
+        let capa = Apresentacao::nova(&ctx, 1, api::Recorte::Perfil, None, Some(deck()), Inicio::Capa, true, tema::Escolha::Escuro, false);
         assert_eq!(capa.atual, 0);
+    }
+
+    #[test]
+    fn desligar_o_tempo_tira_as_frases_do_deck_na_hora() {
+        let ctx = egui::Context::default();
+        let mut com_tempo = deck();
+        com_tempo.tempo_agentes = true;
+        com_tempo.capa.destaques = vec!["Agentes trabalharam 1 min".into()];
+        let mut a = Apresentacao::nova(
+            &ctx,
+            1,
+            api::Recorte::Perfil,
+            Some(api::PeriodoSprint::Ultimos(7)),
+            Some(com_tempo.clone()),
+            Inicio::Tarefa(2),
+            false,
+            tema::Escolha::Escuro,
+            true,
+        );
+        assert!(a.com_tempo() && a.tarefa_atual() == Some(2));
+        // Desligada com o deck aberto: o deck antigo sai da memória na hora.
+        a.definir_tempo(&ctx, false);
+        assert!(a.deck.is_none() && a.tirando_tempo && !a.com_tempo());
+        assert!(matches!(a.inicio, Inicio::Tarefa(2)));
+        // Uma resposta com o tempo (pedida antes) é descartada ao chegar.
+        assert!(a.buscando);
+        a.canal.0.send(Mensagem::Deck { resultado: Ok(com_tempo.clone()), manter: Some(2) }).unwrap();
+        a.receber(&ctx);
+        assert!(a.deck.is_none(), "o deck com o tempo entrou na tela");
+        // A resposta sem o tempo entra e volta ao mesmo slide.
+        let mut sem = deck();
+        sem.tempo_agentes = false;
+        a.canal.0.send(Mensagem::Deck { resultado: Ok(sem), manter: Some(2) }).unwrap();
+        a.receber(&ctx);
+        assert!(a.deck.as_ref().is_some_and(|d| !d.tempo_agentes) && !a.tirando_tempo);
+        assert_eq!(a.tarefa_atual(), Some(2));
+        // Aberta já com a opção desligada, um deck com o tempo não entra.
+        let b = Apresentacao::nova(&ctx, 1, api::Recorte::Perfil, None, Some(com_tempo), Inicio::Capa, false, tema::Escolha::Escuro, false);
+        assert!(b.deck.is_none());
+    }
+
+    #[test]
+    fn capa_nunca_junta_um_projeto_sob_o_rotulo_de_outro() {
+        assert_eq!(celulas_capa(2), 2);
+        assert_eq!(celulas_capa(4), 4);
+        assert_eq!(celulas_capa(6), 6);
+        assert_eq!(celulas_capa(9), 6);
+        assert_eq!(rotulo_parte("estudos · cliente-x", 1), "estudos › cliente-x · 1");
+        assert_eq!(rotulo_parte("loja-web", 3), "loja-web · 3");
     }
 }
