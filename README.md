@@ -1,270 +1,199 @@
 # Colmeia
 
-Um app desktop para coordenar vários agentes de IA de código (Claude Code, Codex e outros) num lugar só: um quadro de tarefas por projeto, o terminal de cada agente no painel da tarefa, uma abelha que avisa quando algo precisa de você e o registro do trabalho pronto para a daily e a sprint. Roda no Linux.
+Eu comecei a usar vários agentes de IA ao mesmo tempo, um escrevendo testes, outro mexendo numa tela, outro investigando um bug, e logo o gargalo virei eu. Era terminal demais, contexto copiado de um lado para o outro e nenhuma ideia de quem estava esperando por mim. A Colmeia nasceu disso.
+
+É um app desktop que junta tudo num lugar só. Cada projeto tem um quadro de tarefas, cada tarefa tem os seus agentes (Claude Code, Codex, Gemini CLI, OpenCode) com o terminal ali dentro, e uma abelha no canto avisa quando alguém precisa de você. No fim do dia, o que aconteceu já está registrado, pronto para a daily e para a sprint.
 
 ![O quadro de um projeto: um agente escrevendo testes, outro esperando a sua resposta e as tarefas em revisão e concluídas](docs/imagens/quadro.png)
 
-Quem trabalha com vários agentes vira o gargalo: copia contexto de um terminal para outro, perde o controle do que cada um está fazendo e mistura ambientes. A Colmeia junta:
-
-- **Isolamento por branch:** cada tarefa pode trabalhar numa cópia isolada do repositório (git worktree), na branch dela. Pastas sem git (análises, anotações) também entram como projeto.
-- **Quadro por projeto**, com cartões que andam sozinhos entre "Agente trabalhando" e "Aguardando você".
-- **A abelha**, que resume o que mais precisa de você (erro, aprovação pendente, trabalho em andamento) e comemora quando uma tarefa termina.
-- **Perfis separados** (Profissional, Estudo, Pessoal…), cada um com projetos, contas de IA, conexões de banco e tema próprios.
-- **Registro do trabalho** dia a dia, com a daily e a sprint prontas para falar ou apresentar.
+Roda no Linux, é de código aberto e gratuito.
 
 ![A abelha-robô da Colmeia nos cinco estados: dormindo, trabalhando, aguardando você, bugado e comemorando](docs/imagens/abelha.gif)
 
-É um projeto pessoal, de código aberto e gratuito. Não é projeto de nenhuma empresa nem tem vínculo com uma.
-
-## Conteúdo
-
-- [Instalação](#instalação)
-- [Primeiro uso](#primeiro-uso)
-- [Funcionalidades](#funcionalidades): [quadro e agentes](#quadro-e-agentes) · [linha do tempo, daily, sprint e apresentação](#linha-do-tempo-daily-sprint-e-apresentação) · [pedir ao agente, navegador e arquivos](#pedir-ao-agente-navegador-e-arquivos) · [lousa](#lousa) · [banco de dados](#banco-de-dados)
-- [Atalhos](#atalhos)
-- [Arquitetura](#arquitetura) · [Segurança](#segurança)
-- [Desenvolvimento e testes](#desenvolvimento-e-testes)
-- [Plataformas](#plataformas) · [Licença](#licença)
-
 ## Instalação
 
-Cada versão publicada tem os binários para Linux x86_64 na página de releases do GitHub (`colmeia-linux-x86_64.tar.gz`, com o `SHA256SUMS` ao lado):
+Cada versão publicada tem os binários para Linux x86_64 na página de releases, com o `SHA256SUMS` ao lado.
 
 ```bash
 sha256sum -c SHA256SUMS
 mkdir colmeia && tar -xzf colmeia-linux-x86_64.tar.gz -C colmeia
-./colmeia/instalar.sh   # ~/.local/bin, atalho e ícone; sem sudo
+./colmeia/instalar.sh   # instala em ~/.local/bin, com atalho e ícone, sem sudo
 ```
 
-Para compilar a partir do código, veja [Desenvolvimento e testes](#desenvolvimento-e-testes).
+Se preferir compilar, os passos estão em [Desenvolvimento](#desenvolvimento).
 
-A Colmeia tem duas partes: a **tela** (a janela) e o **núcleo**, um processo em segundo plano que é dono dos terminais. A tela inicia o núcleo sozinha. Por isso, **fechar a janela não para os agentes**, que seguem trabalhando (e usando a conta de IA); ao fechar com agentes rodando, a Colmeia pergunta se é para fechar só a janela ou parar todos. Para encerrar o núcleo e os agentes (que têm uns segundos para salvar a conversa): `colmeia-nucleo --encerrar`.
+Vale saber desde já que a Colmeia tem duas partes. A janela é só a tela. Quem cuida dos terminais é o núcleo, um processo em segundo plano que a janela inicia sozinha. Por isso fechar a janela não para os agentes, e eles seguem trabalhando (e gastando a sua conta de IA). Se houver agente rodando, a Colmeia pergunta se é para fechar só a janela ou parar tudo. Para encerrar o núcleo de vez, use `colmeia-nucleo --encerrar`.
 
-Os dados ficam em `~/.local/share/colmeia/`, só com acesso do seu usuário.
+Os seus dados ficam em `~/.local/share/colmeia/`, acessíveis só pelo seu usuário.
 
-## Primeiro uso
+## Primeiros passos
 
-1. **Criar perfil:** nome (Profissional, Estudo, Pessoal…) e tema (escuro, claro ou leitura).
-2. **Contas de IA:** a Colmeia mostra as ferramentas instaladas (Claude Code, Codex, Gemini CLI, OpenCode). Cada uma pode usar a conta do sistema ou uma conta só daquele perfil; nesse caso, o login é feito na primeira vez que o agente abrir.
-3. **Primeiro projeto:** um repositório git ou qualquer pasta de trabalho. Adicionar não altera nada na pasta.
-4. **Falar com o agente:** "+ Nova tarefa" cria uma tarefa no Backlog. Clique nela e use **"Adicionar agente"** (ou "+ Agente", no topo do painel da tarefa): o terminal do Claude Code abre ali, e a caixa de mensagem embaixo manda o que você escrever (Ctrl+Enter).
+Na primeira vez a Colmeia pede um perfil. Eu uso um para o trabalho e outro para estudo, cada um com os seus projetos, as suas contas de IA e o seu tema (escuro, claro ou leitura). Ela mostra as ferramentas de IA instaladas, e cada uma pode usar a conta do sistema ou uma conta só daquele perfil.
 
-O perfil se troca pelo seletor no topo da barra lateral. Arrastar move o cartão entre colunas; o "⋯" (ao passar o mouse) ou o botão direito no cartão, no projeto e no agente mostram as outras ações.
+Depois é só adicionar um projeto. Pode ser um repositório git ou qualquer pasta, e adicionar não muda nada nela.
 
-## Funcionalidades
+Para falar com um agente, crie uma tarefa em "+ Nova tarefa", abra a tarefa e clique em **Adicionar agente**. O terminal do Claude Code abre ali mesmo. Você pode digitar direto nele ou usar a caixa de mensagem embaixo, que envia com Ctrl+Enter, aceita imagens coladas e lembra das mensagens anteriores com a seta para cima.
+
+Arrastar move o cartão entre colunas, e o botão direito (ou o "⋯") mostra o resto das ações.
+
+## O que dá para fazer
 
 ### Quadro e agentes
 
-- **Onde o agente trabalha.** Numa tarefa de repositório git você escolhe entre uma **cópia isolada** (git worktree numa branch nova ou existente, em `~/.local/share/colmeia/copias/`) e **direto na pasta** do projeto. Numa pasta sem git, direto na pasta.
-- **Adicionar agente** abre a ferramenta escolhida no painel da tarefa com a conta de IA do perfil. Vários agentes por tarefa: o terminal em foco aparece em tempo real, os outros como miniaturas.
-- **Retomar conversa do Claude Code:** a Colmeia lista as conversas que o Claude Code guardou para a pasta da tarefa e abre a escolhida, para continuar ali uma conversa começada no IntelliJ ou num terminal. Se o Claude Code estiver aberto na mesma pasta fora da Colmeia, ela avisa para fechar lá antes.
-- **Um agente parado** (o programa terminou ou o núcleo foi reiniciado) mostra o que ficou na tela e o botão para iniciar de novo; o Claude Code volta na mesma conversa.
-- **Teclado completo no terminal** depois de clicar nele (Ctrl, Alt, setas com modificadores, F1–F12, Shift+Enter); Ctrl+V com uma imagem copiada repassa a colagem ao Claude Code.
-- **Caixa de mensagem:** Enter quebra a linha, Ctrl+Enter envia, Ctrl+V cola imagens (guardadas e anexadas à tarefa) e ↑ traz as mensagens anteriores, que ficam guardadas (até 200 por agente). Uma mensagem que parece ter senha ou chave não é guardada no histórico; "Limpar histórico de mensagens", no "⋯" do agente, apaga tudo.
-- **"Abrir no IntelliJ"** (ou no VS Code) e **"Abrir pasta"** ficam no topo do painel da tarefa.
+Numa tarefa de repositório git, o agente pode trabalhar direto na pasta do projeto ou numa cópia isolada, um git worktree na branch da tarefa. Assim dois agentes não pisam um no outro.
 
-**Em tempo real, sem consulta periódica.** Cada agente aparece com um estado, com a mesma cor e o mesmo texto no cartão, no painel, na abelha e na linha do tempo:
+Uma tarefa pode ter vários agentes. O que está em foco aparece em tempo real e os outros viram miniaturas. Se você começou uma conversa com o Claude Code no IntelliJ ou num terminal, **Retomar conversa** lista as que ele guardou para aquela pasta e continua de onde parou.
+
+O cartão mostra o que cada agente está fazendo, com a mesma cor e o mesmo texto no quadro, no painel e na abelha.
 
 | Estado | Como aparece |
 | --- | --- |
 | Trabalhando | ponto verde e a última linha do terminal |
 | Pede aprovação | "Parece pedir aprovação · desde 14:32" |
-| Sua vez | "Sua vez · desde 14:32" (terminou a resposta e espera você) |
-| Quer consultar o banco | um pedido de consulta esperando a sua aprovação |
-| Parado | "Parado desde 14:10" (terminal comum quieto) |
-| Terminou / interrompido / erro | "Terminou às 14:40", "Interrompido às 14:40", "Parou com erro (código 1) às 14:40" |
+| Sua vez | "Sua vez · desde 14:32" |
+| Quer consultar o banco | um pedido esperando a sua aprovação |
+| Parado | "Parado desde 14:10" |
+| Terminou ou deu erro | "Terminou às 14:40", "Parou com erro (código 1) às 14:40" |
 
-- **"Aguardando você" é uma leitura, não uma certeza.** Depois de 5 segundos sem saída, uma ferramenta de IA parece ter terminado a vez dela; se o fim do texto for um pedido de aprovação conhecido, ela "pede aprovação". Por isso a tela diz "parece" ([decisão 0005](docs/decisoes/0005-estado-do-agente-por-heuristica.md)).
-- **O cartão anda sozinho** entre "Agente trabalhando" e "Aguardando você" e sai do Backlog quando um agente de IA começa. Se você mover o cartão, a Colmeia não desfaz; nada vai para Revisão ou Concluído sozinho.
-- **Quando algo precisa de você** fora da tela, aparece um aviso no rodapé com "Abrir"; com a janela em segundo plano, o título vira "Colmeia · 2 esperando você".
-- **Sem o núcleo**, a faixa "Núcleo desconectado" aparece, o quadro continua visível e a tela tenta reconectar sozinha; "Tentar agora" inicia o núcleo de novo.
+O "sua vez" é uma leitura, não uma certeza. Depois de alguns segundos sem saída, a Colmeia entende que o agente terminou e espera você, e por isso a tela diz "parece" ([decisão 0005](docs/decisoes/0005-estado-do-agente-por-heuristica.md)). O cartão anda sozinho entre "Agente trabalhando" e "Aguardando você", mas nunca vai para Revisão ou Concluído sem você mandar.
 
-### Linha do tempo, daily, sprint e apresentação
+Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a janela em segundo plano, o título vira "Colmeia · 2 esperando você". Ctrl+Shift+P leva direto ao próximo agente que está esperando.
+
+### Linha do tempo, daily e sprint
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
 
-As páginas **Quadro · Linha do tempo · Daily · Sprint** ficam na barra de cima e seguem o escopo da barra lateral (o perfil inteiro ou um projeto).
+Tudo o que acontece nas tarefas vira um registro. A **linha do tempo** mostra um dia por vez, com um cartão por tarefa e as capturas em miniatura. A **daily** junta o que mudou desde o último dia com atividade, separado em concluídas, em revisão, esperando você, trabalhando e com erro, e "Copiar texto" entrega o resumo pronto para falar. A **sprint** cobre 7 ou 14 dias, o mês ou as datas que você escolher, e exporta em Markdown com as capturas.
 
-- **Linha do tempo:** um cabeçalho por dia, preso no topo ao rolar, com as conclusões, os erros e o tempo de agente do dia; dentro dele, um cartão por tarefa com os eventos em lista (repetições viram uma linha, como "Anotou na daily (2 vezes)") e as capturas em miniatura. Filtros: Só conclusões, Só erros e Com capturas.
-- **Daily:** os números do período ("ontem" é o último dia com atividade, até 7 dias atrás, e hoje) e um cartão por tarefa, agrupado em concluídas, em revisão, aguardando você, trabalhando e com erro. "Copiar texto" copia o texto pronto para falar.
-- **Sprint:** 7 ou 14 dias, este mês ou as datas que você escolher (até 92 dias), com o tempo de agente por ferramenta, as tarefas por projeto e a galeria das capturas; exporta em Markdown, com as capturas numa pasta ao lado.
-- **Capturar terminal** (Ctrl+Shift+S): a imagem do terminal em foco fica anexada à tarefa. Na primeira vez a Colmeia avisa que a captura guarda o que está visível, inclusive senhas.
+O **modo apresentação** (F5) foi pensado para a reunião. Ele passa a daily ou a sprint em tela cheia, com uma capa e um slide por tarefa. Cada slide tem a sua nota, que você escreve com N e que funciona como roteiro da fala, e aceita fotos e vídeos com A ou arrastando o arquivo para a janela. Fotos JPEG perdem o EXIF no caminho. Enquanto você apresenta, nenhum aviso aparece na tela.
 
 ![A linha do tempo: o cabeçalho do dia com os números e um cartão por tarefa, com as miniaturas](docs/imagens/linha-do-tempo.png)
 
-**Modo apresentação** (Apresentar ou F5) passa a daily ou a sprint inteira em tela cheia: uma capa com o resumo do período e um slide por tarefa, com o projeto, o estado, o que foi feito, os números, as fotos e vídeos e a nota. Clicar num cartão da Daily ou da Sprint abre a apresentação naquele slide, em janela, para preparar. Durante a apresentação nenhum aviso aparece (a tela pode estar sendo compartilhada).
-
-- **Notas:** N edita a nota da tarefa, que aparece no slide. Ela é salva ao sair do campo, ao trocar de slide e ao sair; cada daily tem as próprias notas. Uma nota que parece ter senha ou chave não é salva.
-- **Fotos e vídeos:** A, arrastar arquivos para a janela ou Ctrl+V anexam ao slide atual (png, jpg, mp4, webm, mkv, mov). O vídeo abre no reprodutor do sistema. Toda foto JPEG vira um PNG novo, sem o EXIF (localização e câmera).
-- **Novidades:** o que acontece durante a apresentação não mexe nos slides; "Novidades · R atualiza" refaz o deck no mesmo slide.
-
-![A página da daily, com os números do período e os cartões das tarefas](docs/imagens/daily.png)
-
 ### Pedir ao agente, navegador e arquivos
 
-- **Pedir ao agente.** Na Daily, na Sprint (botão no cartão ou botão direito) e no slide (P), você pede algo a mais ao agente de uma tarefa sem sair dali: "traga o total de testes gerados e complemente a nota", "capture prints das telas finalizadas". A caixa diz antes para qual agente vai; o pedido espera o agente terminar a vez e nunca entra no meio do que você digita. A resposta volta para a nota e as capturas viram anexos; "O agente respondeu · Ver" avisa quando terminou.
-- **Ferramentas da Colmeia para o agente (MCP).** Todo Claude Code que a Colmeia abre recebe ferramentas restritas à tarefa dele: ler a tarefa e a nota, complementar a nota, anexar uma imagem da pasta, abrir e capturar o navegador da tarefa, ler e acrescentar à lousa, listar e consultar bancos (com a sua aprovação) e concluir o pedido. Tudo aparece na linha do tempo. Codex, Gemini e OpenCode ainda não recebem essas ferramentas.
-- **Navegador da tarefa** (no topo do painel): um Chrome ou Chromium da Colmeia ao lado da janela, com perfil próprio (nunca o seu). "Navegador ▾" tem "Ir para endereço…", "Capturar navegador" (Ctrl+Shift+B) e "Fechar navegador". Só abre `http`, `https` e arquivos de dentro da pasta da tarefa, menos `.env` e chaves. Durante a apresentação, a janela aberta pelo agente fica fora da tela.
-- **Arquivos** (Ctrl+Shift+E): uma gaveta por cima do terminal com a árvore da pasta, só leitura, e a pré-visualização de texto e imagem; dali dá para abrir no editor ou citar o arquivo na mensagem. `.env`, chaves e certificados pedem confirmação antes de aparecer.
+Da daily, da sprint ou do slide (P), dá para pedir algo a mais ao agente de uma tarefa sem abrir o terminal, como "traga o total de testes e complemente a nota" ou "capture prints das telas prontas". O pedido espera o agente terminar o que está fazendo e a resposta volta para a nota.
+
+Isso funciona porque todo Claude Code que a Colmeia abre recebe ferramentas próprias (via MCP), presas à tarefa dele. Com elas o agente lê a tarefa e a nota, complementa a nota, anexa imagens, usa o navegador da tarefa, escreve na lousa e pede consultas ao banco. Codex, Gemini e OpenCode ainda não recebem essas ferramentas.
+
+O **navegador da tarefa** é um Chrome com perfil próprio, nunca o seu, que abre ao lado da janela e pode ser capturado com Ctrl+Shift+B. A gaveta de **arquivos** (Ctrl+Shift+E) mostra a pasta da tarefa só para leitura, com pré-visualização de texto e imagem, e pede confirmação antes de mostrar `.env` e chaves.
 
 ### Lousa
 
 ![A lousa do workspace: notas em markdown, um trecho de terminal, uma tabela, um cartão de tarefa e as ligações tracejadas entre eles](docs/imagens/lousa.png)
 
-Um quadro livre para pensar: um por workspace ("Lousa", abaixo do nome do workspace na barra lateral) e um por tarefa (o botão "Lousa" no painel da tarefa, Ctrl+Shift+Q).
+Cada workspace tem uma lousa, e cada tarefa também (Ctrl+Shift+Q). É um quadro livre para notas em markdown, trechos de código, imagens, vídeos e cartões de tarefa ao vivo, ligados por setas.
 
-- **Itens:** nota em markdown simples (títulos, negrito, listas, caixas, tabelas, blocos de código), texto solto, bloco de código, imagem, vídeo, cartão de tarefa ao vivo (o clique duplo abre a tarefa) e ligações tracejadas com rótulo.
-- **Criar e mexer:** clique duplo no vazio cria uma nota; N, T, C, I e K criam no lugar do mouse; puxar o círculo da borda de um item até outro liga os dois. Arrastar move, Shift soma à seleção, Ctrl+rodinha dá zoom, Ctrl+D duplica, Delete apaga, Ctrl+Z desfaz e Ctrl+C/V copiam itens entre lousas.
-- **Na tarefa,** a lousa cobre o terminal sem mudar o tamanho dele. Numa tarefa sem agente, uma faixa acima da lousa mantém "Adicionar agente" à vista; "Fechar lousa" volta à tarefa. O que o agente acrescenta chega na hora, marcado como novo.
-- **Apresentar** (F5 na lousa) leva os cartões ao palco, em tela cheia, seguindo as ligações. No slide da daily, a lousa da tarefa aparece na aba "Lousa".
-- Texto com cara de senha ou chave é recusado ([decisão 0008](docs/decisoes/0008-lousa-fora-da-corrente.md)).
+Clique duplo no vazio cria uma nota, e N, T, C, I e K criam outros itens onde está o mouse. Para ligar dois itens, puxe a bolinha que aparece na borda de um até o outro, ou selecione os dois com Shift e use o botão de ligação. O agente também escreve na lousa da tarefa, e o que ele acrescenta aparece na hora, marcado como novo. Com F5, a lousa vira apresentação, seguindo as setas.
 
 ### Banco de dados
 
 ![A tela de bancos: a árvore com a conexão loja-web-dev aberta até as colunas da tabela pedidos e o console com um SELECT e a grade de resultado](docs/imagens/banco.png)
 
-"Bancos de dados", na barra lateral (Ctrl+Shift+K), guarda as conexões do perfil: PostgreSQL, MySQL/MariaDB, SQL Server (experimental) e SQLite, agrupadas em pastas se você quiser, com TLS configurável.
+Cada perfil guarda as suas conexões de PostgreSQL, MySQL/MariaDB, SQLite e SQL Server (este ainda experimental), em Ctrl+Shift+K. A árvore vai da conexão às colunas, carregando aos poucos, e o console executa a instrução sob o cursor com Ctrl+Enter.
 
-- **A senha fica no chaveiro do sistema** (Secret Service, o do GNOME), nunca no banco da Colmeia, em log ou em evento. Sem chaveiro, ela é pedida ao conectar e fica só na memória até fechar a Colmeia; quando o chaveiro volta, a senha guardada nele é usada de novo. Se o servidor recusar a senha (trocada no servidor, por exemplo), clicar no erro da árvore ou em "Trocar senha…" no console pede a nova.
-- **Árvore** conexão › banco › esquema › Tabelas e Views › colunas (com PK e FK), carregada aos poucos, com filtro e contagem ("12 de 1007"). O clique duplo numa tabela mostra as 100 primeiras linhas; o botão direito tem "Gerar SELECT", "Testar", "Atualizar", "Editar…" e "Remover…".
-- **Console por conexão:** a barra e o topo da tela dizem em qual conexão você está. Ctrl+Enter executa a seleção ou a instrução sob o cursor (até o `;` ou uma linha em branco); o resultado vem numa grade com limite de linhas (500 por padrão, "Carregar mais"), tempo-limite, Esc para cancelar e o histórico de consultas da conexão.
-- **Só leitura por padrão.** Toda conexão começa só leitura (transação só de leitura; SQLite aberto só para leitura). Para alterar dados, ligue "Permitir alterações" na conexão; cada alteração ainda pede confirmação mostrando a instrução inteira (e avisa quando um UPDATE ou DELETE não tem WHERE). Prefira um usuário de banco só de leitura: a proteção da Colmeia não substitui a do banco.
-- **O agente só consulta, com a sua aprovação.** Numa conexão com "Agentes podem pedir consultas", o Claude Code da tarefa pode pedir uma consulta de leitura. A instrução aparece no painel da tarefa, o cartão fica em "Quer consultar o banco" e nada roda até você aprovar; recusar pode levar um motivo, e sem resposta em 5 minutos o pedido expira. O resultado (até 200 linhas) vai para o agente e para o provedor de IA dele.
-- A linha do tempo diz que houve consulta ou alteração ("Consultou o banco loja-web-dev (14 vezes)"), nunca o SQL nem o resultado ([decisão 0009](docs/decisoes/0009-bancos-chaveiro-e-somente-leitura.md)).
+A senha fica no chaveiro do sistema. Ela nunca vai para o banco da Colmeia nem para os logs. Sem chaveiro, a senha é pedida ao conectar e fica só na memória.
+
+Toda conexão começa somente leitura. Para alterar dados é preciso ligar "Permitir alterações", e mesmo assim cada alteração pede confirmação mostrando a instrução inteira. O agente pode pedir consultas de leitura numa conexão em que você liberou isso, mas nada roda até você aprovar na tela. A linha do tempo registra que houve consulta, nunca o SQL nem o resultado ([decisão 0009](docs/decisoes/0009-bancos-chaveiro-e-somente-leitura.md)).
 
 ## Atalhos
 
-A Colmeia reserva **Ctrl+Shift+letra** para ela: esses atalhos não chegam ao programa do terminal.
+A Colmeia usa **Ctrl+Shift+letra** para ela, e esses atalhos não chegam ao terminal.
 
 | Atalho | Ação |
 | --- | --- |
-| Ctrl+Shift+P | Abre o próximo agente que precisa de você (pedidos de consulta e erros primeiro) |
-| Ctrl+Shift+L / Ctrl+Shift+D | Linha do tempo / Daily (de novo volta ao quadro) |
-| Ctrl+Shift+K | Bancos de dados (de novo volta à tela anterior) |
-| Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal em foco / o navegador da tarefa |
+| Ctrl+Shift+P | Próximo agente que precisa de você |
+| Ctrl+Shift+L / Ctrl+Shift+D | Linha do tempo / Daily |
+| Ctrl+Shift+K | Bancos de dados |
+| Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
-| Ctrl+Esc | Volta do painel da tarefa (ou dos bancos) ao quadro |
-| Ctrl+Enter / ↑ ↓ (caixa de mensagem) | Envia / mensagens anteriores ao agente em foco |
-| F5 / Shift+F5 | Apresenta a daily, a sprint ou a lousa / retoma do último slide (ou do item selecionado) |
-| Ctrl+Enter / Esc (console de banco) | Executa a instrução sob o cursor ou a seleção / cancela a consulta |
-| Ctrl+F (bancos) | Filtro da árvore |
-| Ctrl+C / Ctrl+A (grade de resultado) | Copia a célula ou a linha em TSV / escolhe tudo o que foi carregado |
+| Ctrl+Esc | Volta ao quadro |
+| Ctrl+Enter, ↑ ↓ | Na caixa de mensagem, envia e navega pelas mensagens anteriores |
+| Ctrl+Enter, Esc | No console de banco, executa e cancela |
+| F5 / Shift+F5 | Apresenta / retoma do último slide |
 
-Na apresentação:
+Na apresentação, as setas, PgUp/PgDn e Espaço passam os slides, N edita a nota, A adiciona foto ou vídeo, P pede ao agente, L alterna entre anexos e lousa, H esconde o slide e ? mostra o resto.
 
-| Tecla | Ação |
-| --- | --- |
-| → PgDn Espaço Enter / ← PgUp Backspace | Próximo / anterior |
-| Home / End / C | Primeiro / último / capa |
-| N / A / P | Editar a nota / adicionar foto ou vídeo / pedir ao agente |
-| L | Alterna anexos e lousa no slide |
-| H / T | Esconder o slide / tema claro ou escuro (só nesta apresentação) |
-| R / F11 / ? | Atualizar / tela cheia / atalhos |
-| Esc | Fecha o que estiver aberto; senão, sai |
-
-## Arquitetura
+## Por dentro
 
 ```
 ┌─────────────────────────────┐        ┌────────────────────────────┐
 │ app/ (Rust + egui)          │        │ nucleo/ (Go)               │
-│ a tela: só mostra e pede    │ ─────▶ │ dono do estado, terminais, │
-│                             │  /v1   │ agentes, eventos e bancos  │
+│ a tela: só mostra e pede    │ ─────▶ │ estado, terminais, agentes │
+│                             │  /v1   │ eventos e bancos           │
 └─────────────────────────────┘        └────────────────────────────┘
-        canal local: socket Unix (diretório 0700) + token
+        socket Unix (diretório 0700) + token
 ```
 
-- **Núcleo separado da tela.** A tela só mostra e pede; o núcleo guarda o estado num SQLite com o histórico de eventos encadeado por hash, valida tudo e é dono dos terminais. O protocolo é versionado em `/v1`.
-- **Tudo por evento.** Um WebSocket por perfil leva à tela cada mudança na hora; a tela parada não faz pedidos nem redesenha ([decisão 0004](docs/decisoes/0004-eventos-por-websocket.md)). Só o terminal em foco é tempo real; as miniaturas recebem em ritmo menor.
-- **O núcleo também é o servidor MCP dos agentes**, por stdio, e controla o navegador da tarefa por pipe ([decisão 0007](docs/decisoes/0007-nucleo-mcp-e-navegador-por-pipe.md)).
+O núcleo, em Go, guarda tudo num SQLite com um histórico de eventos encadeado por hash, cuida dos terminais e valida cada pedido. A tela, em Rust com egui, só mostra e pede. As mudanças chegam por WebSocket, então a tela parada não consulta nada nem redesenha à toa, e só o terminal em foco roda em tempo real. O mesmo núcleo serve as ferramentas MCP dos agentes e controla o navegador por pipe.
 
-Os detalhes estão em [docs/arquitetura.md](docs/arquitetura.md), nas [decisões registradas](docs/decisoes/) e na [lista de dependências](docs/dependencias.md).
+A Colmeia não abre nenhuma porta de rede. O núcleo escuta num socket Unix dentro de uma pasta só sua, com um token novo a cada início, e cada agente tem um token que só vale para a tarefa dele. Nada passa por shell, os dados ficam com permissão só do usuário, e mensagens, notas e itens da lousa que parecem conter senha ou chave não são guardados.
 
-## Segurança
+Para quem quiser ir mais fundo, há a [arquitetura](docs/arquitetura.md), as [decisões registradas](docs/decisoes/), as [dependências](docs/dependencias.md) e o [modelo de segurança](SECURITY.md).
 
-- **Nenhuma porta de rede.** O núcleo escuta num socket Unix dentro de um diretório só do usuário, com um token gerado a cada início; cada agente tem um token próprio, que só vale para a tarefa dele; o navegador é controlado por pipe.
-- **Nada passa por shell**, os dados ficam com permissão só do usuário (`0700`/`0600`) e o núcleo recusa JSON com campos desconhecidos.
-- **Segredos:** as senhas dos bancos ficam no chaveiro do sistema, nunca no banco da Colmeia, em log, evento ou resposta; mensagens, notas e itens da lousa que parecem ter senha ou chave não são guardados.
-- **Agentes com limites:** o agente só lê nos bancos, e cada consulta precisa da sua aprovação.
+## Desenvolvimento
 
-O modelo completo, com o que a Colmeia protege e o que não, está em [SECURITY.md](SECURITY.md).
-
-## Desenvolvimento e testes
-
-Requisitos: Go 1.26+, Rust 1.88+ e as bibliotecas de sistema que o `eframe` usa (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo).
+Você precisa de Go 1.26+, Rust 1.88+ e das bibliotecas de sistema do `eframe` (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo).
 
 ```bash
 # Núcleo
 go -C nucleo build -o ../bin/colmeia-nucleo ./cmd/colmeia-nucleo
 
-# Tela (inicia o núcleo sozinha se ele não estiver rodando)
+# Tela (inicia o núcleo sozinha)
 COLMEIA_NUCLEO=$PWD/bin/colmeia-nucleo cargo run --release -p colmeia
 
-# Modo demonstração: cargas de teste nos terminais e cenários para a abelha
+# Modo demonstração, com cargas de teste e cenários para a abelha
 COLMEIA_DEMO=1 COLMEIA_NUCLEO=$PWD/bin/colmeia-nucleo cargo run --release -p colmeia
 
-# Vitrine do mascote
-cargo run --release -p mascote --example vitrine
-
-# Instalar o que foi compilado (~/.local/bin, atalho e ícone)
+# Instalar o que foi compilado
 ./scripts/instalar.sh
 ```
 
-Testes e verificações (o CI roda os mesmos, mais `govulncheck`, `cargo audit` e o gitleaks):
+Os testes são os mesmos que o CI roda, que ainda passa `govulncheck`, `cargo audit` e o gitleaks.
 
 ```bash
 go -C nucleo test -race ./...
 go -C nucleo vet ./... && gofmt -l nucleo
 cargo test --workspace
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
+```
 
-# Integração com MySQL e PostgreSQL de verdade, em contêineres de teste
+Os testes de integração com MySQL e PostgreSQL de verdade usam contêineres descartáveis.
+
+```bash
 docker run -d --name colmeia-teste-mysql -p 127.0.0.1:33061:3306 -e MYSQL_ROOT_PASSWORD=teste-raiz -e MYSQL_DATABASE=loja mysql:8
 docker run -d --name colmeia-teste-pg -p 127.0.0.1:54321:5432 -e POSTGRES_PASSWORD=teste-raiz -e POSTGRES_DB=loja postgres:16-alpine
 COLMEIA_TESTE_MYSQL=127.0.0.1:33061 COLMEIA_TESTE_PG=127.0.0.1:54321 go -C nucleo test -tags integracao ./internal/bancos/
 docker rm -f colmeia-teste-mysql colmeia-teste-pg
 ```
 
-Para mexer na tela sem tocar nos seus dados de verdade, use pastas de teste (`COLMEIA_DIR` e `COLMEIA_DADOS`), como explica o [CONTRIBUTING.md](CONTRIBUTING.md). As mudanças de cada versão estão no [CHANGELOG.md](CHANGELOG.md).
+Para testar sem tocar nos seus dados de verdade, aponte `COLMEIA_DIR` e `COLMEIA_DADOS` para pastas de teste, como explica o [CONTRIBUTING.md](CONTRIBUTING.md). O que mudou em cada versão está no [CHANGELOG.md](CHANGELOG.md).
 
-### Variáveis
+<details>
+<summary>Variáveis de ambiente</summary>
 
-| Variável | Quem lê | Para quê |
-| --- | --- | --- |
-| `COLMEIA_DIR` | núcleo e tela | Pasta do canal (socket e token); padrão `$XDG_RUNTIME_DIR/colmeia` |
-| `COLMEIA_DADOS` | núcleo | Pasta dos dados; padrão `~/.local/share/colmeia` |
-| `COLMEIA_NUCLEO` | tela | Caminho do `colmeia-nucleo`, se ele não estiver ao lado da tela nem no PATH |
-| `COLMEIA_DEMO=1` | tela | Inicia o núcleo em modo demonstração |
-| `COLMEIA_EDITOR` | tela | Comando do editor para "Abrir no…" |
-| `COLMEIA_NAVEGADOR` | núcleo | Chrome ou Chromium do navegador da tarefa (caminho ou nome no PATH) |
-| `COLMEIA_CHAVEIRO=memoria` | núcleo | Age como se não houvesse chaveiro: as senhas dos bancos ficam só na memória |
-| `COLMEIA_CHAVEIRO_SERVICO` | núcleo | Nome do serviço das senhas no chaveiro; padrão `Colmeia` (os testes usam outro) |
-| `COLMEIA_TEMA` | tela | `escuro`, `claro` ou `leitura`, só antes de entrar num perfil |
-| `COLMEIA_SEM_ABELHA=1` | tela | Desliga a abelha |
-| `COLMEIA_TAMANHO` | tela | Tamanho inicial da janela, como `1280x720` |
-| `COLMEIA_FPS=1` | tela | Mostra o contador de quadros e escreve cada quadro no stderr (para medir) |
-| `COLMEIA_TAREFA`, `COLMEIA_CARTOES`, `COLMEIA_CENARIO=erro` | tela | Só na demonstração: abrir uma tarefa, quantidade de cartões, cenário de erro |
-
-### Estrutura
-
-| Pasta | O que tem |
+| Variável | Para quê |
 | --- | --- |
-| `nucleo/` | Núcleo em Go: canal local, API `/v1`, dados, terminais e agentes, cópias isoladas, conversas do Claude Code, servidor MCP, navegador da tarefa e conexões de banco |
-| `app/` | Tela em Rust + egui, com as fontes Inter e JetBrains Mono embutidas |
-| `mascote/` | A abelha-robô, como biblioteca, e a vitrine em `examples/` |
-| `docs/` | Arquitetura, decisões, dependências e imagens |
-| `scripts/` | `medir.sh` (processador e memória) e `instalar.sh` |
-| `packaging/` | Atalho (`.desktop`) e ícone |
-| `arquivo/` | Os protótipos comparados na escolha da tecnologia da tela |
+| `COLMEIA_DIR` | Pasta do socket e do token (padrão `$XDG_RUNTIME_DIR/colmeia`) |
+| `COLMEIA_DADOS` | Pasta dos dados (padrão `~/.local/share/colmeia`) |
+| `COLMEIA_NUCLEO` | Caminho do `colmeia-nucleo`, se ele não estiver ao lado da tela nem no PATH |
+| `COLMEIA_DEMO=1` | Inicia o núcleo em modo demonstração |
+| `COLMEIA_EDITOR` | Editor usado em "Abrir no…" |
+| `COLMEIA_NAVEGADOR` | Chrome ou Chromium do navegador da tarefa |
+| `COLMEIA_CHAVEIRO=memoria` | Ignora o chaveiro e guarda as senhas só na memória |
+| `COLMEIA_CHAVEIRO_SERVICO` | Nome do serviço no chaveiro (padrão `Colmeia`) |
+| `COLMEIA_TEMA` | `escuro`, `claro` ou `leitura`, antes de escolher um perfil |
+| `COLMEIA_SEM_ABELHA=1` | Desliga a abelha |
+| `COLMEIA_TAMANHO` | Tamanho inicial da janela, como `1280x720` |
+| `COLMEIA_FPS=1` | Mostra o contador de quadros, para medir desempenho |
+
+</details>
+
+O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha, com uma vitrine em `cargo run --release -p mascote --example vitrine`), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` ficaram os protótipos que comparei antes de escolher Rust e egui para a tela.
 
 ## Plataformas
 
-| | Linux | macOS | Windows |
-| --- | --- | --- | --- |
-| Núcleo | sim | deve funcionar (não testado) | falta o canal por named pipe e os terminais por ConPTY |
-| Tela | sim | deve funcionar (não testado) | compila; falta o canal |
-
-No Linux, as senhas dos bancos vão para o chaveiro pelo Secret Service (o do GNOME, por exemplo); sem ele, ficam só na memória.
+O dia a dia é no Linux. No macOS deve funcionar, mas nunca testei. No Windows a tela compila, mas o núcleo ainda precisa do canal por named pipe e dos terminais por ConPTY.
 
 ## Licença
 
-Licença dupla, à sua escolha: [MIT](LICENSE-MIT) ou [Apache 2.0](LICENSE-APACHE). As fontes em `app/fontes/` seguem a SIL Open Font License 1.1.
+À sua escolha, [MIT](LICENSE-MIT) ou [Apache 2.0](LICENSE-APACHE). As fontes em `app/fontes/` seguem a SIL Open Font License 1.1.
