@@ -12,15 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/arquivos"
@@ -51,6 +50,12 @@ func Encontrar() (caminho, nome string, err error) {
 	for _, n := range Candidatos {
 		if c, err := exec.LookPath(n); err == nil {
 			return c, n, nil
+		}
+	}
+	// No Windows o Chrome e o Edge não ficam no PATH: os lugares de instalação.
+	for _, c := range instalados() {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c, filepath.Base(c), nil
 		}
 	}
 	return "", "", ErrSemNavegador
@@ -112,8 +117,9 @@ func ValidarURL(bruto, pasta string) (URL, error) {
 		if pasta == "" || (u.Host != "" && u.Host != "localhost") || u.Opaque != "" || u.RawQuery != "" {
 			return URL{}, ErrURL
 		}
-		rel, err := arquivos.Relativo(pasta, u.Path)
-		if err != nil || !filepath.IsAbs(u.Path) {
+		caminho := caminhoDoURL(u.Path)
+		rel, err := arquivos.Relativo(pasta, caminho)
+		if err != nil || !filepath.IsAbs(caminho) {
 			return URL{}, ErrURL
 		}
 		raiz, err := os.OpenRoot(pasta)
@@ -128,10 +134,30 @@ func ValidarURL(bruto, pasta string) (URL, error) {
 		if arquivos.Sensivel(filepath.Base(rel)) {
 			return URL{}, ErrSensivel
 		}
-		final := url.URL{Scheme: "file", Path: filepath.Join(pasta, rel), Fragment: u.Fragment}
+		final := url.URL{Scheme: "file", Path: caminhoNoURL(filepath.Join(pasta, rel)), Fragment: u.Fragment}
 		return URL{Endereco: final.String(), Descricao: "arquivo " + rel}, nil
 	}
 	return URL{}, ErrURL
+}
+
+// caminhoDoURL é o caminho de um file:// no sistema: no Windows o URL traz
+// "/C:/pasta/arquivo", e o caminho é "C:\pasta\arquivo".
+func caminhoDoURL(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
+}
+
+// caminhoNoURL é o inverso: o caminho do sistema no formato do file://.
+func caminhoNoURL(c string) string {
+	if runtime.GOOS != "windows" {
+		return c
+	}
+	return "/" + filepath.ToSlash(c)
 }
 
 // ArquivoDaPasta confere um file:// que a página pede ao navegador
@@ -144,11 +170,12 @@ func ArquivoDaPasta(endereco, pasta string) error {
 	if err != nil || !strings.EqualFold(u.Scheme, "file") || pasta == "" || (u.Host != "" && u.Host != "localhost") || u.Opaque != "" {
 		return ErrURL
 	}
-	if strings.ContainsRune(u.Path, 0) || !filepath.IsAbs(u.Path) {
+	caminho := caminhoDoURL(u.Path)
+	if strings.ContainsRune(caminho, 0) || !filepath.IsAbs(caminho) {
 		return ErrURL
 	}
-	rel, err := filepath.Rel(filepath.Clean(pasta), filepath.Clean(u.Path))
-	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+	rel, err := filepath.Rel(filepath.Clean(pasta), filepath.Clean(caminho))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return ErrURL
 	}
 	for parte := range strings.SplitSeq(rel, string(filepath.Separator)) {
@@ -187,7 +214,7 @@ func descrever(endereco, pasta string) (string, error) {
 		if err := ArquivoDaPasta(endereco, pasta); err != nil {
 			return "", ErrSaiuDaPasta
 		}
-		rel, _ := filepath.Rel(filepath.Clean(pasta), filepath.Clean(u.Path))
+		rel, _ := filepath.Rel(filepath.Clean(pasta), filepath.Clean(caminhoDoURL(u.Path)))
 		return "arquivo " + rel, nil
 	case "about":
 		if endereco == "about:blank" {
@@ -255,8 +282,9 @@ func NovoGerente(dir string) *Gerente {
 
 // processo é um navegador aberto para um perfil.
 type processo struct {
-	conn    *conexao
-	cmd     *exec.Cmd
+	conn *conexao
+	// matar encerra o navegador e o que ele abriu, à força.
+	matar   func()
 	perfil  int64
 	mu      sync.Mutex
 	janelas map[int64]*janela // por tarefa
@@ -722,8 +750,8 @@ func (p *processo) encerrar() {
 	select {
 	case <-p.fim:
 	case <-time.After(3 * time.Second):
-		if p.cmd != nil && p.cmd.Process != nil {
-			syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		if p.matar != nil {
+			p.matar()
 		}
 		<-p.fim
 	}
@@ -767,32 +795,14 @@ func (g *Gerente) iniciarChrome(perfil int64, geo Geometria) (*processo, error) 
 	if err != nil {
 		return nil, err
 	}
-	// fd 3: o Chrome lê os comandos; fd 4: o Chrome escreve as respostas.
-	chromeLe, nucleoEscreve, err := os.Pipe()
+	aberto, err := abrirChrome(executavel, g.argumentos(dir, geo))
 	if err != nil {
-		return nil, err
-	}
-	nucleoLe, chromeEscreve, err := os.Pipe()
-	if err != nil {
-		chromeLe.Close()
-		nucleoEscreve.Close()
-		return nil, err
-	}
-	cmd := exec.Command(executavel, g.argumentos(dir, geo)...)
-	cmd.ExtraFiles = []*os.File{chromeLe, chromeEscreve}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	err = cmd.Start()
-	chromeLe.Close()
-	chromeEscreve.Close()
-	if err != nil {
-		nucleoEscreve.Close()
-		nucleoLe.Close()
 		return nil, fmt.Errorf("abrindo o navegador: %w", err)
 	}
-	p := &processo{conn: novaConexao(nucleoLe, nucleoEscreve), cmd: cmd, perfil: perfil, janelas: map[int64]*janela{}, preparando: map[string]*janela{}, fim: make(chan struct{})}
+	nucleoLe, nucleoEscreve := aberto.le, aberto.escreve
+	p := &processo{conn: novaConexao(nucleoLe, nucleoEscreve), matar: aberto.matar, perfil: perfil, janelas: map[int64]*janela{}, preparando: map[string]*janela{}, fim: make(chan struct{})}
 	go func() {
-		cmd.Wait()
+		aberto.esperar()
 		nucleoEscreve.Close()
 		nucleoLe.Close()
 		p.conn.fechar(errFechado)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -90,7 +91,11 @@ func main() {
 	sessoes := make([]*terminal.Sessao, 0, *quantidade)
 	for i := range *quantidade {
 		prompt := fmt.Sprintf("PS1=\\[\\e[35m\\]agente-%d\\[\\e[0m\\] \\w $ ", i)
-		pty, err := terminal.Iniciar([]string{"bash", "--noprofile", "--norc"}, []string{prompt}, pasta, terminal.TamanhoPadrao)
+		demo := []string{"bash", "--noprofile", "--norc"}
+		if runtime.GOOS == "windows" {
+			demo = []string{terminal.ShellPadrao()}
+		}
+		pty, err := terminal.Iniciar(demo, []string{prompt}, pasta, terminal.TamanhoPadrao)
 		if err != nil {
 			log.Fatalf("abrindo terminal %d: %v", i, err)
 		}

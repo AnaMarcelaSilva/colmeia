@@ -485,23 +485,23 @@ fn cor_indexada(i: u8) -> Color32 {
     }
 }
 
-/// Acorda a thread de rede. No Unix é um par de sockets: escrever um byte
-/// faz o poll da thread voltar.
+/// Acorda a thread de rede. É um par de sockets: escrever um byte faz o
+/// poll da thread voltar.
 struct Despertador {
-    #[cfg(unix)]
-    escrita: Option<std::os::unix::net::UnixStream>,
+    #[cfg(any(unix, windows))]
+    escrita: Option<canal::Fluxo>,
 }
 
 /// O lado que a thread de rede espera.
-#[cfg(unix)]
-type Alarme = Option<std::os::unix::net::UnixStream>;
-#[cfg(not(unix))]
+#[cfg(any(unix, windows))]
+type Alarme = Option<canal::Fluxo>;
+#[cfg(not(any(unix, windows)))]
 type Alarme = ();
 
 impl Despertador {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn novo() -> (Despertador, Alarme) {
-        match std::os::unix::net::UnixStream::pair() {
+        match canal::Fluxo::pair() {
             Ok((escrita, leitura)) => {
                 let _ = escrita.set_nonblocking(true);
                 let _ = leitura.set_nonblocking(true);
@@ -511,13 +511,13 @@ impl Despertador {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn novo() -> (Despertador, Alarme) {
         (Despertador {}, ())
     }
 
     fn acordar(&self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(mut e) = self.escrita.as_ref() {
             use std::io::Write;
             // Cheio quer dizer que já há um aviso pendente: tanto faz.
@@ -529,7 +529,7 @@ impl Despertador {
 /// Roda até o programa do terminal terminar ou a conexão cair. A thread dorme
 /// no poll(2) do socket e do despertador: sem saída e sem digitação, não
 /// acorda nenhuma vez (antes ela acordava 200 vezes por segundo por terminal).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn conexao(
     caminho: &str,
     intervalo: u32,
@@ -540,7 +540,6 @@ fn conexao(
     bytes: Arc<AtomicU64>,
 ) {
     use std::io::{ErrorKind, Read};
-    use std::os::fd::AsRawFd;
 
     let mut socket = match canal::websocket(&format!("{caminho}&intervalo={intervalo}")) {
         Ok(s) => s,
@@ -553,30 +552,21 @@ fn conexao(
     if socket.get_mut().set_nonblocking(true).is_err() {
         return;
     }
-    let fd_socket = socket.get_ref().as_raw_fd();
-    let fd_alarme = alarme.as_raw_fd();
     let mut interpretador: Processor = Processor::new();
     let mut desenhados = 0;
     // Há mensagem na fila do tungstenite esperando o socket aceitar mais.
     let mut falta_enviar = false;
     let bloqueou = |e: &tungstenite::Error| matches!(e, tungstenite::Error::Io(e) if e.kind() == ErrorKind::WouldBlock);
     loop {
-        let mut fds = [
-            libc::pollfd { fd: fd_socket, events: libc::POLLIN | if falta_enviar { libc::POLLOUT } else { 0 }, revents: 0 },
-            libc::pollfd { fd: fd_alarme, events: libc::POLLIN, revents: 0 },
-        ];
-        // SAFETY: `fds` é um vetor válido de dois pollfd durante a chamada.
-        let pronto = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
-        if pronto < 0 {
-            if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
-                continue;
-            }
-            return;
-        }
-        if fds[1].revents != 0 {
+        let prontos = match aguardar(socket.get_ref(), &alarme, falta_enviar) {
+            Ok(p) => p,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        if prontos.alarme {
             // A tela soltou o terminal (trocou de tarefa, fechou o agente): o
             // despertador fecha e o poll acordaria para sempre. Sai e fecha a conexão.
-            if fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            if prontos.alarme_fechou {
                 return;
             }
             let mut lixo = [0u8; 64];
@@ -609,7 +599,7 @@ fn conexao(
                 Err(_) => return,
             }
         }
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+        if !prontos.socket {
             continue;
         }
         // Lê tudo o que já chegou e desenha uma vez só.
@@ -651,7 +641,58 @@ fn conexao(
     }
 }
 
-#[cfg(not(unix))]
+/// O que acordou a espera da thread de rede.
+#[cfg(any(unix, windows))]
+struct Prontos {
+    /// Chegou dado (ou a conexão caiu) no socket do núcleo.
+    socket: bool,
+    /// O despertador tocou (ou fechou).
+    alarme: bool,
+    alarme_fechou: bool,
+}
+
+/// Dorme até o socket ter o que ler (ou aceitar escrita, com `escrever`) ou
+/// o despertador tocar. Sem prazo: sem nada acontecendo, não acorda.
+#[cfg(unix)]
+fn aguardar(socket: &canal::Fluxo, alarme: &canal::Fluxo, escrever: bool) -> std::io::Result<Prontos> {
+    use std::os::fd::AsRawFd;
+    let mut fds = [
+        libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLIN | if escrever { libc::POLLOUT } else { 0 }, revents: 0 },
+        libc::pollfd { fd: alarme.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+    ];
+    // SAFETY: `fds` é um vetor válido de dois pollfd durante a chamada.
+    if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Prontos {
+        socket: fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0,
+        alarme: fds[1].revents != 0,
+        alarme_fechou: fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0,
+    })
+}
+
+/// No Windows o mesmo, com o WSAPoll do Winsock (o socket Unix do Windows é
+/// um socket do Winsock).
+#[cfg(windows)]
+fn aguardar(socket: &canal::Fluxo, alarme: &canal::Fluxo, escrever: bool) -> std::io::Result<Prontos> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{POLLERR, POLLHUP, POLLRDNORM, POLLWRNORM, SOCKET_ERROR, WSAPOLLFD, WSAPoll};
+    let mut fds = [
+        WSAPOLLFD { fd: socket.as_raw_socket() as usize, events: POLLRDNORM | if escrever { POLLWRNORM } else { 0 }, revents: 0 },
+        WSAPOLLFD { fd: alarme.as_raw_socket() as usize, events: POLLRDNORM, revents: 0 },
+    ];
+    // SAFETY: `fds` é um vetor válido de dois WSAPOLLFD durante a chamada.
+    if unsafe { WSAPoll(fds.as_mut_ptr(), fds.len() as u32, -1) } == SOCKET_ERROR {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Prontos {
+        socket: fds[0].revents & (POLLRDNORM | POLLHUP | POLLERR) != 0,
+        alarme: fds[1].revents != 0,
+        alarme_fechou: fds[1].revents & (POLLHUP | POLLERR) != 0,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn conexao(caminho: &str, _: u32, _: Arc<Mutex<Term<Ouvinte>>>, recebimento: Receiver<ParaNucleo>, _: Alarme, _: &egui::Context, _: Arc<AtomicU64>) {
     // No Windows o canal ainda não existe (veja canal.rs): o que a tela mandar é descartado.
     eprintln!("terminal {caminho}: canal local ainda não implementado nesta plataforma");
@@ -675,6 +716,24 @@ pub fn pedir_carga(modo: &'static str) {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// A espera da thread de rede acorda com o despertador e com o socket
+    /// (no Windows, pelo WSAPoll no socket Unix do Winsock).
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_espera_acorda_com_o_despertador_e_com_o_socket() {
+        use std::io::Write;
+        let (mut tocar, alarme) = canal::Fluxo::pair().unwrap();
+        let (mut nucleo, socket) = canal::Fluxo::pair().unwrap();
+        tocar.write_all(&[1]).unwrap();
+        let p = aguardar(&socket, &alarme, false).unwrap();
+        assert!(p.alarme && !p.socket && !p.alarme_fechou);
+        let (mut tocar2, alarme2) = canal::Fluxo::pair().unwrap();
+        nucleo.write_all(b"oi").unwrap();
+        let p = aguardar(&socket, &alarme2, false).unwrap();
+        assert!(p.socket && !p.alarme);
+        tocar2.flush().unwrap();
+    }
 
     #[test]
     fn uma_linha_vai_como_digitacao() {

@@ -251,11 +251,7 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho te
 	env := []string{processos.Marca + "=" + strconv.FormatInt(a.ID, 10)}
 	var comando []string
 	if a.Ferramenta == "shell" {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/bash"
-		}
-		comando = []string{shell}
+		comando = []string{terminal.ShellPadrao()}
 	} else {
 		executavel, err := exec.LookPath(a.Ferramenta)
 		if err != nil {

@@ -694,6 +694,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tungstenite",
+ "uds_windows",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

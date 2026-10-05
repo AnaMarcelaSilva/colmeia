@@ -19,8 +19,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 const (
@@ -33,6 +36,14 @@ const (
 func Diretorio() (string, error) {
 	if d := os.Getenv("COLMEIA_DIR"); d != "" {
 		return d, nil
+	}
+	// No Windows: %LOCALAPPDATA%\Colmeia\canal.
+	if runtime.GOOS == "windows" {
+		local, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("sem diretório para o canal: %w", err)
+		}
+		return filepath.Join(local, "Colmeia", "canal"), nil
 	}
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
@@ -51,7 +62,7 @@ func prepararDiretorio(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := protecao.Diretorio(dir); err != nil {
 		return err
 	}
 	return conferirDono(dir)

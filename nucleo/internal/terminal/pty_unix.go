@@ -75,3 +75,11 @@ func Iniciar(comando []string, env []string, dir string, tamanho Tamanho) (Pty, 
 	}()
 	return ptyUnix{File: arquivo, cmd: cmd, fim: fim, saida: saida}, nil
 }
+
+// ShellPadrao é o shell de um agente "shell": o $SHELL da pessoa, ou o bash.
+func ShellPadrao() string {
+	if s := os.Getenv("SHELL"); s != "" {
+		return s
+	}
+	return "/bin/bash"
+}

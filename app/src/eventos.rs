@@ -42,8 +42,8 @@ pub struct Ouvinte {
 struct Compartilhado {
     parar: Mutex<bool>,
     /// Cópia do socket aberto, para fechar a leitura bloqueada ao sair.
-    #[cfg(unix)]
-    socket: Mutex<Option<std::os::unix::net::UnixStream>>,
+    #[cfg(any(unix, windows))]
+    socket: Mutex<Option<canal::Fluxo>>,
 }
 
 const ESPERA_MAXIMA: Duration = Duration::from_secs(30);
@@ -72,7 +72,7 @@ impl Drop for Ouvinte {
     /// Trocar de perfil encerra a thread: fecha o socket, o que solta a leitura.
     fn drop(&mut self) {
         *self.estado.parar.lock().unwrap() = true;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(s) = self.estado.socket.lock().unwrap().take() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
@@ -154,7 +154,7 @@ fn conectar(perfil: i64, ctx: &egui::Context, envio: &Sender<Mensagem>, estado: 
         Err(e) if e.contains("404") => return Resultado::Antigo,
         Err(_) => return Resultado::Recusado,
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         *estado.socket.lock().unwrap() = ws.get_ref().try_clone().ok();
         // Pode ter mandado parar enquanto conectava.
@@ -162,7 +162,7 @@ fn conectar(perfil: i64, ctx: &egui::Context, envio: &Sender<Mensagem>, estado: 
             return Resultado::TelaFechou;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let _ = estado;
     let mut base = None;
     loop {

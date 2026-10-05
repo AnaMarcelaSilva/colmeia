@@ -1,3 +1,5 @@
+// No Windows a tela é um programa de janela: sem console aberto atrás dela.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! Tela da Colmeia: entrada por perfil, quadro de tarefas por projeto, painel
 //! da tarefa (só o terminal em foco é tempo real, com caixa de mensagem para os
 //! agentes), linha do tempo com daily e sprint, e a abelha da barra lateral,

@@ -9,10 +9,14 @@ const NOME_SOCKET: &str = "nucleo.sock";
 const NOME_TOKEN: &str = "token";
 
 /// O mesmo diretório que o núcleo usa: COLMEIA_DIR, ou $XDG_RUNTIME_DIR/colmeia,
-/// ou o cache do usuário.
+/// ou o cache do usuário (no Windows, %LOCALAPPDATA%\Colmeia\canal).
 pub fn diretorio() -> PathBuf {
     if let Some(d) = std::env::var_os("COLMEIA_DIR") {
         return PathBuf::from(d);
+    }
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        return local.join("Colmeia").join("canal");
     }
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -26,12 +30,15 @@ fn ler_token() -> io::Result<String> {
     Ok(std::fs::read_to_string(diretorio().join(NOME_TOKEN))?.trim().to_string())
 }
 
-#[cfg(unix)]
-pub use unix::*;
+#[cfg(any(unix, windows))]
+pub use local::*;
 
-#[cfg(unix)]
-mod unix {
+/// O mesmo código nos dois sistemas: o Windows 10 (1803) e o 11 também têm
+/// socket Unix (AF_UNIX).
+#[cfg(any(unix, windows))]
+mod local {
     use std::io::{self, Read, Write};
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -41,7 +48,13 @@ mod unix {
     use tungstenite::client::IntoClientRequest;
     use tungstenite::http::HeaderValue;
 
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
+
     use super::{NOME_SOCKET, diretorio, ler_token};
+
+    /// O socket do canal (o tipo muda com o sistema).
+    pub type Fluxo = UnixStream;
 
     fn conectar() -> io::Result<UnixStream> {
         UnixStream::connect(diretorio().join(NOME_SOCKET))
@@ -149,11 +162,12 @@ mod unix {
         if let Some(c) = std::env::var_os("COLMEIA_NUCLEO") {
             return Some(PathBuf::from(c));
         }
-        let vizinho = std::env::current_exe().ok()?.with_file_name("colmeia-nucleo");
+        let nome = format!("colmeia-nucleo{}", std::env::consts::EXE_SUFFIX);
+        let vizinho = std::env::current_exe().ok()?.with_file_name(&nome);
         if vizinho.is_file() {
             return Some(vizinho);
         }
-        std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("colmeia-nucleo")).find(|c| c.is_file()))
+        std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(&nome)).find(|c| c.is_file()))
     }
 
     /// Os casos comuns em português; o resto como o sistema descreve.
@@ -178,8 +192,17 @@ mod unix {
         if std::env::var("COLMEIA_DEMO").is_ok_and(|v| v == "1") {
             comando.arg("--demo");
         }
-        use std::os::unix::process::CommandExt;
-        comando.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+        comando.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // Em grupo próprio: fechar a tela (ou o terminal que a abriu) não leva o núcleo junto.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut comando, 0);
+        // No Windows, sem console e fora do grupo da tela.
+        #[cfg(windows)]
+        {
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            std::os::windows::process::CommandExt::creation_flags(&mut comando, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
         let mut filho = comando.spawn().map_err(|e| format!("iniciando {}: {}", caminho.display(), erro_ao_iniciar(&e)))?;
         // Recolhe o filho quando ele sair; sem isso, um núcleo que caiu fica
         // como zumbi até a tela fechar. A thread só espera e não segura a saída.
@@ -197,14 +220,14 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub use outros::*;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 mod outros {
-    //! No Windows o canal será um named pipe (ainda não feito).
+    //! Sem socket Unix, não há canal.
     pub type Fluxo = std::net::TcpStream;
-    const AVISO: &str = "canal local no Windows ainda não implementado (named pipe)";
+    const AVISO: &str = "canal local indisponível nesta plataforma";
 
     pub fn websocket(_: &str) -> Result<tungstenite::WebSocket<Fluxo>, String> {
         Err(AVISO.into())

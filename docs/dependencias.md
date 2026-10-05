@@ -14,7 +14,7 @@ O que entra no binário do núcleo (`go version -m colmeia-nucleo`), conferido p
 | github.com/microsoft/go-mssqldb (+ golang-sql/civil, golang-sql/sqlexp, shopspring/decimal) | v1.11.2 | BSD-3-Clause, Apache-2.0, MIT | SQL Server (o subpacote `azuread` não é importado) |
 | github.com/zalando/go-keyring | v0.2.8 | MIT | Chaveiro do sistema |
 | github.com/godbus/dbus/v5 | v5.2.2 | BSD-2-Clause | Secret Service pelo D-Bus (dependência do go-keyring) |
-| golang.org/x/crypto, x/sync, x/sys, x/text | | BSD-3-Clause | Biblioteca estendida do Go |
+| golang.org/x/crypto, x/sync, x/sys, x/text | | BSD-3-Clause | Biblioteca estendida do Go (no Windows, x/sys/windows: ConPTY, jobs e listas de acesso) |
 
 Para conferir de novo:
 

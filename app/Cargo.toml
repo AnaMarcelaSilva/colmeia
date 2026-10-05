@@ -22,3 +22,8 @@ rfd = "0.17.2"
 [target.'cfg(unix)'.dependencies]
 # poll(2) no terminal: a thread de rede dorme até chegar saída ou digitação.
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Socket Unix (AF_UNIX) no Windows 10 1803+ e 11: o mesmo canal do Linux.
+uds_windows = "1.2"
+windows-sys = { version = "0.60", features = ["Win32_Networking_WinSock", "Win32_System_Threading"] }

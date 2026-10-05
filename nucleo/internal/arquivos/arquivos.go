@@ -75,7 +75,9 @@ func Relativo(pasta, caminho string) (string, error) {
 		caminho = rel
 	}
 	caminho = filepath.Clean(caminho)
-	if caminho == ".." || strings.HasPrefix(caminho, "../") || filepath.IsAbs(caminho) {
+	// No Windows também recusa "\\pasta" (começa na raiz da unidade) e "D:x".
+	sep := string(filepath.Separator)
+	if caminho == ".." || strings.HasPrefix(caminho, ".."+sep) || filepath.IsAbs(caminho) || strings.HasPrefix(caminho, sep) || filepath.VolumeName(caminho) != "" {
 		return "", ErrForaDaPasta
 	}
 	for parte := range strings.SplitSeq(caminho, string(filepath.Separator)) {

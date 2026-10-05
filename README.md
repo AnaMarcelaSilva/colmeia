@@ -6,13 +6,15 @@ Com um agente escrevendo testes, outro ajustando uma tela e outro investigando u
 
 ![O quadro de um projeto: um agente escrevendo testes, outro esperando a sua resposta e as tarefas em revisão e concluídas](docs/imagens/quadro.png)
 
-Roda no Linux e é de código aberto.
+Roda no Linux e no Windows e é de código aberto.
 
 ![A abelha-robô da Colmeia nos cinco estados: dormindo, trabalhando, aguardando você, bugado e comemorando](docs/imagens/abelha.gif)
 
 ## Instalação
 
-Cada versão publicada tem os binários para Linux x86_64 na página de releases, com o `SHA256SUMS` ao lado.
+Cada versão publicada tem os binários para Linux e Windows (x86_64) na página de releases, com o `SHA256SUMS` ao lado.
+
+No Linux:
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -20,11 +22,17 @@ mkdir colmeia && tar -xzf colmeia-linux-x86_64.tar.gz -C colmeia
 ./colmeia/instalar.sh   # instala em ~/.local/bin, com atalho e ícone, sem sudo
 ```
 
+No Windows 10 (1803 ou mais novo) ou 11, extraia o `colmeia-windows-x86_64.zip` e rode, no PowerShell, de dentro da pasta extraída:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\instalar.ps1   # instala em %LOCALAPPDATA%\Programs\Colmeia, com atalho no menu Iniciar
+```
+
 Se preferir compilar, os passos estão em [Desenvolvimento](#desenvolvimento).
 
 A Colmeia tem duas partes. A janela é apenas a interface. Quem cuida dos terminais é o núcleo, um processo em segundo plano que a janela inicia sozinha. Por isso, fechar a janela não interrompe os agentes, que continuam trabalhando (e consumindo a sua conta de IA). Se houver agente rodando, a Colmeia pergunta se é para fechar só a janela ou parar tudo. Para encerrar o núcleo de vez, use `colmeia-nucleo --encerrar`.
 
-Os dados ficam em `~/.local/share/colmeia/`, acessíveis apenas pelo seu usuário.
+Os dados ficam em `~/.local/share/colmeia/` no Linux e em `%LOCALAPPDATA%\Colmeia\dados` no Windows, acessíveis apenas pelo seu usuário.
 
 ## Primeiros passos
 
@@ -196,7 +204,7 @@ O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelh
 
 ## Plataformas
 
-O Linux é a plataforma principal. O macOS deve funcionar, mas ainda não foi testado. No Windows a interface compila, mas o núcleo ainda depende do suporte a named pipes e a terminais ConPTY.
+O Linux é a plataforma principal. O Windows 10 (1803 ou mais novo) e o 11 são suportados a partir da 0.4.0, com o mesmo canal local, terminais pelo ConPTY e o Chrome ou o Edge como navegador da tarefa ([decisão 0011](docs/decisoes/0011-windows-com-socket-unix.md)); o suporte é recente, e problemas podem ser relatados nas issues. O macOS deve funcionar, mas ainda não foi testado.
 
 ## Licença
 

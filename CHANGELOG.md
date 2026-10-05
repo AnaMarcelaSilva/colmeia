@@ -4,6 +4,20 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ## [Não lançado]
 
+### Entrega I · Windows
+
+#### Novo
+
+- **A Colmeia roda no Windows 10 (1803 ou mais novo) e 11.** Núcleo, terminais dos agentes, navegador da tarefa, bancos de dados (senhas no Gerenciador de Credenciais) e a tela, com instalador `instalar.ps1` e o pacote `colmeia-windows-x86_64.zip` na release ([decisão 0011](docs/decisoes/0011-windows-com-socket-unix.md)).
+- **Canal:** o mesmo socket Unix do Linux (AF_UNIX), em `%LOCALAPPDATA%\Colmeia\canal`, com lista de acesso protegida só do usuário e do sistema; os dados ficam em `%LOCALAPPDATA%\Colmeia\dados`, com a mesma proteção.
+- **Terminais pelo ConPTY**, com o programa num job object: fechar o agente avisa o programa e, depois de 3 s, encerra a árvore inteira. O `claude` instalado pelo npm (`claude.cmd`) roda pelo `cmd.exe`; o agente "shell" abre o PowerShell.
+- **Navegador:** o Chrome (ou o Edge, que vem com o Windows) com o mesmo pipe de controle, sem porta de rede.
+- Testes do Windows no CI (canal e lista de acesso, ConPTY, caminhos e o bloco de descritores do navegador) e espera da thread do terminal pelo WSAPoll.
+
+#### Mudou
+
+- A conferência de "dentro da pasta" (arquivos da tarefa e `file://` do navegador) usa o separador do sistema e recusa caminhos que começam na raiz da unidade ou em outra unidade.
+
 ### Corrigido
 
 - **Ligar notas pela bolinha na lousa:** as bolinhas de ligação ficavam a 20 px da nota e sumiam no caminho até elas, porque o mouse saía da nota. Agora continuam à vista enquanto o mouse está perto da nota.

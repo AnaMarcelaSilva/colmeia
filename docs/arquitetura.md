@@ -249,7 +249,7 @@ Os anexos ficam em `anexos/<perfil>/<sha256>.<formato>` (`0600`, pasta `0700`); 
 
 ## Fases
 
-1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa, lousa do workspace e da tarefa, conexões de banco por perfil com consultas dos agentes aprovadas por você (feito no Linux; falta o Windows).
+1. **Fundação:** núcleo e canal, perfis, projetos, branches por worktree, terminais com agentes, eventos em tempo real, linha do tempo em SQLite, quadro por projeto, daily e sprint com modo apresentação, histórico de mensagens por agente, núcleo como servidor MCP para o Claude Code (pedidos pela daily, nota, anexos e navegador da tarefa), arquivos da tarefa, lousa do workspace e da tarefa, conexões de banco por perfil com consultas dos agentes aprovadas por você (Linux e Windows 10/11; no Windows, veja a [decisão 0011](decisoes/0011-windows-com-socket-unix.md)).
 2. **Orquestração:** MCP para Codex, Gemini e OpenCode, aprovações em três opções e modo autônomo, receitas como skills, comunicação entre agentes com limite contra loops, notificações e mascote.
 3. **Integrações:** servidores MCP de GitHub e Docker por branch, tarefa a partir de link, tela de provedores.
 4. **Expansão:** servidores de terceiros, "entender projeto", busca e replay, custos, acesso remoto e celular.

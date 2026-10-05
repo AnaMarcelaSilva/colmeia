@@ -12,7 +12,7 @@ Os protótipos ligavam tela e núcleo por WebSocket em `127.0.0.1`, sem autentic
 - Toda rota exige um token de 32 bytes, gerado a cada início, gravado em `token` (`0600`) e comparado em tempo constante. A tela lê o token do arquivo, nunca de variável de ambiente ou argumento.
 - WebSocket com `Origin` de outro site é recusado.
 - As cargas de teste só existem com `--demo`.
-- No Windows, o canal será um named pipe com ACL só do usuário. Até existir, o núcleo recusa iniciar em vez de abrir uma porta.
+- No Windows, o canal é o mesmo socket Unix (AF_UNIX), num diretório com ACL só do usuário ([decisão 0011](0011-windows-com-socket-unix.md)).
 
 ## Consequências
 

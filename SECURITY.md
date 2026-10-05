@@ -46,7 +46,7 @@ O token é gerado a cada início (32 bytes aleatórios), gravado de forma atômi
 - **Dados de banco vão para o provedor de IA** quando você aprova a consulta de um agente, e um dado pode trazer texto que tenta instruir o agente. Aprove só o que faz sentido para a tarefa.
 - **Isolamento dos agentes.** Os agentes rodam com as permissões do usuário, como num terminal comum. Por isso o token restrito do agente limita o que ele faz pelas ferramentas da Colmeia, mas não é uma barreira contra um agente decidido a burlá-lo: com o mesmo usuário, ele consegue ler o token da tela no diretório do canal.
 - **Páginas que instruem o agente.** Uma página aberta no navegador da tarefa pode tentar dar ordens ao agente (o mesmo risco do WebFetch); as ferramentas da Colmeia só agem dentro da tarefa.
-- **Windows.** O canal por named pipe (com ACL só do usuário) ainda não existe; até lá, o núcleo recusa iniciar no Windows em vez de abrir uma porta de rede.
+- **Windows.** O canal é um socket Unix (AF_UNIX, Windows 10 1803 ou mais novo) num diretório com lista de acesso protegida, só do usuário e do sistema; os dados recebem a mesma proteção. Os terminais rodam em ConPTY dentro de um job object, e o navegador recebe o pipe de controle só pelos descritores 3 e 4, sem herdar outros handles ([decisão 0011](docs/decisoes/0011-windows-com-socket-unix.md)).
 
 ## Versões com suporte
 

@@ -1,6 +1,6 @@
 name: release
 
-# Uma tag v* (ex.: v0.3.0) gera os binários do Linux e anexa à release.
+# Uma tag v* (ex.: v0.3.0) gera os binários do Linux e do Windows e anexa à release.
 on:
   push:
     tags: ["v*"]
@@ -31,27 +31,53 @@ jobs:
           cp target/release/colmeia dist/
           cp packaging/colmeia.desktop packaging/colmeia.svg scripts/instalar.sh LICENSE-MIT LICENSE-APACHE dist/
       - name: Empacotar
-        run: |
-          tar -C dist -czf colmeia-linux-x86_64.tar.gz .
-          sha256sum colmeia-linux-x86_64.tar.gz > SHA256SUMS
+        run: tar -C dist -czf colmeia-linux-x86_64.tar.gz .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux
-          path: |
-            colmeia-linux-x86_64.tar.gz
-            SHA256SUMS
+          path: colmeia-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: nucleo/go.mod
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - name: Testes
+        run: |
+          go -C nucleo test ./...
+          cargo test --workspace --locked
+      - name: Compilar
+        shell: bash
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo.exe ./cmd/colmeia-nucleo
+          cargo build --release --locked -p colmeia
+          cp target/release/colmeia.exe dist/
+          cp scripts/instalar.ps1 LICENSE-MIT LICENSE-APACHE dist/
+      - name: Empacotar
+        run: Compress-Archive -Path dist\* -DestinationPath colmeia-windows-x86_64.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows
+          path: colmeia-windows-x86_64.zip
 
   publicar:
-    needs: linux
+    needs: [linux, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: linux
+          merge-multiple: true
+      - name: Somas de verificação
+        run: sha256sum colmeia-linux-x86_64.tar.gz colmeia-windows-x86_64.zip > SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             colmeia-linux-x86_64.tar.gz
+            colmeia-windows-x86_64.zip
             SHA256SUMS

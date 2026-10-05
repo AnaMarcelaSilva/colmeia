@@ -15,11 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 var (
@@ -165,6 +168,14 @@ func Diretorio() (string, error) {
 	if d := os.Getenv("COLMEIA_DADOS"); d != "" {
 		return d, nil
 	}
+	// No Windows: %LOCALAPPDATA%\Colmeia\dados.
+	if runtime.GOOS == "windows" {
+		local, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(local, "Colmeia", "dados"), nil
+	}
 	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
 		return filepath.Join(d, "colmeia"), nil
 	}
@@ -180,7 +191,7 @@ func Abrir(dir string) (*Banco, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := protecao.Diretorio(dir); err != nil {
 		return nil, err
 	}
 	caminho := filepath.Join(dir, "colmeia.db")

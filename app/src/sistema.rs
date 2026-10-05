@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 /// COLMEIA_NUCLEO…): o programa aberto não precisa saber onde ficam o
 /// núcleo e os dados.
 fn comando_limpo(programa: &str) -> Command {
-    let mut comando = Command::new(programa);
+    let mut comando = Command::new(no_windows(programa));
     for (nome, _) in std::env::vars_os() {
         if nome.to_str().is_some_and(|n| n.starts_with("COLMEIA_")) {
             comando.env_remove(&nome);
@@ -30,6 +30,27 @@ pub fn editor() -> Option<(&'static str, &'static str)> {
         return Some(("editor", Box::leak(comando.into_boxed_str())));
     }
     EDITORES.into_iter().find(|(_, comando)| no_path(comando))
+}
+
+/// No Windows, o `code` do VS Code é um `code.cmd`: o Command do Rust só
+/// acha um .exe sozinho, então o .cmd vai pelo caminho completo (o Rust
+/// escapa os argumentos de um .cmd).
+fn no_windows(programa: &str) -> std::ffi::OsString {
+    if cfg!(windows)
+        && Path::new(programa).extension().is_none()
+        && let Some(caminhos) = std::env::var_os("PATH")
+    {
+        for dir in std::env::split_paths(&caminhos) {
+            if dir.join(format!("{programa}.exe")).is_file() {
+                break;
+            }
+            let cmd = dir.join(format!("{programa}.cmd"));
+            if cmd.is_file() {
+                return cmd.into_os_string();
+            }
+        }
+    }
+    programa.into()
 }
 
 fn no_path(comando: &str) -> bool {
@@ -128,8 +149,9 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
     })?;
     // Recolhe o processo; um código de erro do xdg-open quer dizer que ele
     // não achou um programa para o tipo do arquivo.
+    // O explorer do Windows sai com código 1 mesmo quando abre: lá o código não diz nada.
     std::thread::spawn(move || {
-        if filho.wait().is_ok_and(|s| !s.success()) {
+        if filho.wait().is_ok_and(|s| !s.success()) && !cfg!(windows) {
             ao_falhar(SEM_REPRODUTOR.to_string());
         }
     });
