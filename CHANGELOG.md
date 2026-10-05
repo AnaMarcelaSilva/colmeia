@@ -4,6 +4,10 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ## [Não lançado]
 
+### Corrigido
+
+- **Ligar notas pela bolinha na lousa:** as bolinhas de ligação ficavam a 20 px da nota e sumiam no caminho até elas, porque o mouse saía da nota. Agora continuam à vista enquanto o mouse está perto da nota.
+
 ## [0.3.0] · 05/10/2026
 
 ### Entrega H · Enter envia, daily e sprint gerais e tempo dos agentes só quando pedido

@@ -87,12 +87,15 @@ pub enum Alvo {
     Redimensionar(i64, Alca),
     /// A alça de puxar ligação de um item (o lado: 0 cima, 1 direita, 2 baixo, 3 esquerda).
     Ligar(i64, u8),
+    /// Fora do item, mas no caminho até as alças de ligação dele: só mantém
+    /// as alças à vista (o clique ali é como no vazio).
+    Perto(i64),
 }
 
 impl Alvo {
     pub fn id(self) -> i64 {
         match self {
-            Alvo::Item(id) | Alvo::Ligacao(id) | Alvo::Redimensionar(id, _) | Alvo::Ligar(id, _) => id,
+            Alvo::Item(id) | Alvo::Ligacao(id) | Alvo::Redimensionar(id, _) | Alvo::Ligar(id, _) | Alvo::Perto(id) => id,
         }
     }
 }
@@ -142,6 +145,11 @@ pub fn alvo_em(l: &Lousa, pos: Pos2, com_alcas: bool, item_antes: Option<i64>) -
             }
         }
     }
+    let perto = item_antes
+        .filter(|_| com_alcas)
+        .and_then(|id| l.modelo.buscar(id))
+        .filter(|e| e.tipo != TipoElemento::Ligacao && na_tela(l, e).expand(FORA_LIGAR + ALCA_LIGAR + 3.0).contains(pos))
+        .map(|e| Alvo::Perto(e.id));
     for e in l.modelo.elementos.iter().rev() {
         if e.tipo == TipoElemento::Ligacao || !caixa_quadro(e).intersects(visivel) {
             continue;
@@ -157,13 +165,13 @@ pub fn alvo_em(l: &Lousa, pos: Pos2, com_alcas: bool, item_antes: Option<i64>) -
             return Some(Alvo::Ligacao(e.id));
         }
     }
-    None
+    perto
 }
 
 /// O item (não ligação) com o mouse em cima, guardado no último quadro.
 pub fn item_em_cima(l: &Lousa, ui: &egui::Ui) -> Option<i64> {
     ui.ctx().data(|d| d.get_temp::<Option<Alvo>>(id_em_cima(l))).flatten().and_then(|a| match a {
-        Alvo::Item(id) | Alvo::Ligar(id, _) => Some(id),
+        Alvo::Item(id) | Alvo::Ligar(id, _) | Alvo::Perto(id) => Some(id),
         _ => None,
     })
 }
@@ -219,9 +227,9 @@ pub fn tratar(l: &mut Lousa, ui: &mut egui::Ui, area: Rect, c: &Contexto) -> Vec
             (None, Some(Alvo::Ligar(..))) => CursorIcon::PointingHand,
             (None, Some(Alvo::Item(id))) if l.selecao.contains(&id) && pode => CursorIcon::Move,
             (None, Some(Alvo::Item(_) | Alvo::Ligacao(_))) => CursorIcon::Default,
-            (None, None) if l.espaco => CursorIcon::Grab,
-            (None, None) if shift => CursorIcon::Crosshair,
-            (None, None) => CursorIcon::Grab,
+            (None, None | Some(Alvo::Perto(_))) if l.espaco => CursorIcon::Grab,
+            (None, None | Some(Alvo::Perto(_))) if shift => CursorIcon::Crosshair,
+            (None, None | Some(Alvo::Perto(_))) => CursorIcon::Grab,
         };
         ctx.set_cursor_icon(cursor);
     }
@@ -665,7 +673,7 @@ pub fn pintar_moldura(l: &mut Lousa, ui: &egui::Ui, area: Rect, c: &Contexto) {
     if c.pode_mudar
         && !arrastando
         && !editando
-        && let Some(Alvo::Item(id) | Alvo::Ligar(id, _)) = em_cima
+        && let Some(Alvo::Item(id) | Alvo::Ligar(id, _) | Alvo::Perto(id)) = em_cima
         && let Some(e) = l.modelo.buscar(id)
     {
         for (i, ponto) in pontos_de_ligar(na_tela(l, e)).iter().enumerate() {
