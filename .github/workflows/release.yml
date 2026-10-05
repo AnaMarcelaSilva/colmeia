@@ -1,6 +1,6 @@
 name: release
 
-# Uma tag v* (ex.: v0.2.0) gera os binários do Linux e anexa à release.
+# Uma tag v* (ex.: v0.3.0) gera os binários do Linux e anexa à release.
 on:
   push:
     tags: ["v*"]

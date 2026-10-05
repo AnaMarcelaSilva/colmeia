@@ -1,8 +1,10 @@
 # Mudanças
 
-O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as versões seguem [SemVer](https://semver.org/lang/pt-BR/). A Colmeia foi construída em entregas (A a G); dentro de cada versão, as mudanças vêm agrupadas pela entrega que as trouxe, da mais nova para a mais antiga.
+O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as versões seguem [SemVer](https://semver.org/lang/pt-BR/). A Colmeia foi construída em entregas (A a H); dentro de cada versão, as mudanças vêm agrupadas pela entrega que as trouxe, da mais nova para a mais antiga.
 
 ## [Não lançado]
+
+## [0.3.0] · 05/10/2026
 
 ### Entrega H · Enter envia, daily e sprint gerais e tempo dos agentes só quando pedido
 
