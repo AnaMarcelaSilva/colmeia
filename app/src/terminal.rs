@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -574,12 +574,25 @@ fn conexao(
             return;
         }
         if fds[1].revents != 0 {
+            // A tela soltou o terminal (trocou de tarefa, fechou o agente): o
+            // despertador fecha e o poll acordaria para sempre. Sai e fecha a conexão.
+            if fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return;
+            }
             let mut lixo = [0u8; 64];
-            while matches!(alarme.read(&mut lixo), Ok(n) if n > 0) {}
-            while let Ok(msg) = recebimento.try_recv() {
-                let msg = match msg {
-                    ParaNucleo::Digitacao(b) => Message::binary(b),
-                    ParaNucleo::Texto(t) => Message::text(t),
+            loop {
+                match alarme.read(&mut lixo) {
+                    Ok(0) => return,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            loop {
+                let msg = match recebimento.try_recv() {
+                    Ok(ParaNucleo::Digitacao(b)) => Message::binary(b),
+                    Ok(ParaNucleo::Texto(t)) => Message::text(t),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return,
                 };
                 match socket.write(msg) {
                     Ok(()) => {}
