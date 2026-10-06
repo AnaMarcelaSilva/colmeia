@@ -348,15 +348,25 @@ func TestAgenteConsultaComAprovacao(t *testing.T) {
 	}
 	// Aprovar: o cartão espera você, o agente recebe o resultado.
 	pronto := consultar("SELECT id, total FROM pedidos ORDER BY id")
-	pedida := eventos.esperar("pedido de aprovação", func(m map[string]any) bool { return m["tipo"] == "banco.aprovacao" && m["acao"] == "pedida" })
+	// O agente fica aguardando (e o cartão vai para Aguardando você) e o
+	// pedido é publicado quase juntos: os avisos chegam em qualquer ordem.
+	var pedida map[string]any
+	segurado, cartao := false, false
+	cartaoAguardando := coluna("tarefa.atualizada", "aguardando", "automatico")
+	eventos.esperar("pedido de aprovação, agente e cartão aguardando", func(m map[string]any) bool {
+		if m["tipo"] == "banco.aprovacao" && m["acao"] == "pedida" {
+			pedida = m
+		}
+		if m["tipo"] == "agente.estado" && m["estado"] == "aguardando" && m["motivo"] == "aprovar consulta" {
+			segurado = true
+		}
+		cartao = cartao || cartaoAguardando(m)
+		return pedida != nil && segurado && cartao
+	})
 	a := pedida["aprovacao"].(map[string]any)
 	if a["sql"] != "SELECT id, total FROM pedidos ORDER BY id" || a["agente"] != "Claude Code (dev)" || a["conexao"] != "loja-web-dev" || a["expira_hora"] == "" {
 		t.Fatalf("pedido: %v", a)
 	}
-	eventos.esperar("agente aguardando a aprovação", func(m map[string]any) bool {
-		return m["tipo"] == "agente.estado" && m["estado"] == "aguardando" && m["motivo"] == "aprovar consulta"
-	})
-	eventos.esperar("cartão em Aguardando você", coluna("tarefa.atualizada", "aguardando", "automatico"))
 	// O spinner continua escrevendo e o estado não muda.
 	time.Sleep(400 * time.Millisecond)
 	if sessao, _ := servidor.Agentes.Pegar(1); sessao != nil {
