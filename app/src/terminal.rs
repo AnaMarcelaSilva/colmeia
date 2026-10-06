@@ -428,8 +428,8 @@ fn sequencia(tecla: egui::Key, m: egui::Modifiers, cursor_de_aplicacao: bool) ->
     };
 
     let seq = match tecla {
-        // Shift+Enter e Alt+Enter quebram a linha no Claude Code sem enviar.
-        Enter if m.shift || m.alt => esc(b"\r"),
+        // Shift, Ctrl e Alt+Enter quebram a linha no Claude Code sem enviar.
+        Enter if m.shift || m.alt || m.ctrl => esc(b"\r"),
         Enter => b"\r".to_vec(),
         Tab if m.shift => b"\x1b[Z".to_vec(),
         Tab => b"\t".to_vec(),
@@ -798,6 +798,7 @@ mod testes {
         assert_eq!(s(Key::A, ctrl), vec![0x01]);
         assert_eq!(s(Key::Tab, shift), b"\x1b[Z");
         assert_eq!(s(Key::Enter, shift), b"\x1b\r");
+        assert_eq!(s(Key::Enter, ctrl), b"\x1b\r");
         assert_eq!(s(Key::ArrowRight, ctrl), b"\x1b[1;5C");
         assert_eq!(s(Key::ArrowUp, nada), b"\x1b[A");
         assert_eq!(sequencia(Key::ArrowUp, nada, true).unwrap(), b"\x1bOA");

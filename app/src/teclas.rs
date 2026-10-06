@@ -1,8 +1,8 @@
 //! A regra do Enter nas caixas de mensagem para o agente (a do painel da
-//! tarefa e a "Pedir ao agente"): Enter envia e Shift+Enter quebra a linha,
-//! como no terminal do Claude Code. Ctrl+Enter continua enviando (o hábito
-//! antigo), Alt+Enter não faz nada e o Enter que confirma uma composição de
-//! acento (IME) nunca envia.
+//! tarefa e a "Pedir ao agente"): só o Enter puro envia; Shift+Enter e
+//! Ctrl+Enter quebram a linha, como no terminal do Claude Code. Alt+Enter
+//! não faz nada e o Enter que confirma uma composição de acento (IME) nunca
+//! envia.
 //!
 //! O egui casa `consume_key(Modifiers::NONE, Enter)` também com Shift+Enter
 //! (`matches_logically` ignora o Shift), então os eventos são lidos à mão.
@@ -21,13 +21,9 @@ pub enum AcaoEnter {
 
 /// A regra pura: `compondo` é uma composição de acento (IME) em andamento.
 pub fn regra_enter(m: Modifiers, compondo: bool) -> AcaoEnter {
-    if compondo {
+    if compondo || m.alt {
         AcaoEnter::Ignorar
-    } else if m.ctrl || m.command || m.mac_cmd {
-        AcaoEnter::Enviar
-    } else if m.alt {
-        AcaoEnter::Ignorar
-    } else if m.shift {
+    } else if m.shift || m.ctrl || m.command || m.mac_cmd {
         AcaoEnter::QuebrarLinha
     } else {
         AcaoEnter::Enviar
@@ -48,7 +44,8 @@ pub struct Composicao {
 
 impl Composicao {
     /// Tira da fila os Enter que não são quebra de linha (antes de o campo
-    /// ver) e diz se algum deles envia. Os de Shift+Enter ficam para o campo.
+    /// ver) e diz se algum deles envia. Os de quebra ficam para o campo, como
+    /// Shift+Enter (a tecla que ele conhece).
     /// Um Enter no mesmo quadro de um evento de IME também é ignorado.
     pub fn tirar_enters(&mut self, eventos: &mut Vec<Event>) -> bool {
         let mut ime_no_quadro = false;
@@ -75,6 +72,11 @@ impl Composicao {
             },
             _ => true,
         });
+        for e in eventos.iter_mut() {
+            if let Event::Key { key: Key::Enter, modifiers, .. } = e {
+                *modifiers = Modifiers::SHIFT;
+            }
+        }
         enviar
     }
 }
@@ -91,9 +93,9 @@ mod testes {
     fn regra_de_cada_combinacao() {
         assert_eq!(regra_enter(Modifiers::NONE, false), AcaoEnter::Enviar);
         assert_eq!(regra_enter(Modifiers::SHIFT, false), AcaoEnter::QuebrarLinha);
-        assert_eq!(regra_enter(Modifiers::CTRL, false), AcaoEnter::Enviar);
-        assert_eq!(regra_enter(Modifiers::COMMAND, false), AcaoEnter::Enviar);
-        assert_eq!(regra_enter(Modifiers::CTRL | Modifiers::SHIFT, false), AcaoEnter::Enviar);
+        assert_eq!(regra_enter(Modifiers::CTRL, false), AcaoEnter::QuebrarLinha);
+        assert_eq!(regra_enter(Modifiers::COMMAND, false), AcaoEnter::QuebrarLinha);
+        assert_eq!(regra_enter(Modifiers::CTRL | Modifiers::SHIFT, false), AcaoEnter::QuebrarLinha);
         assert_eq!(regra_enter(Modifiers::ALT, false), AcaoEnter::Ignorar);
         assert_eq!(regra_enter(Modifiers::ALT | Modifiers::SHIFT, false), AcaoEnter::Ignorar);
         for m in [Modifiers::NONE, Modifiers::SHIFT, Modifiers::CTRL] {
@@ -104,10 +106,12 @@ mod testes {
     #[test]
     fn tira_da_fila_o_que_nao_e_quebra() {
         let mut c = Composicao::default();
-        let mut eventos = vec![enter(Modifiers::SHIFT), Event::Text("a".into()), enter(Modifiers::NONE), enter(Modifiers::ALT)];
+        let mut eventos = vec![enter(Modifiers::SHIFT), Event::Text("a".into()), enter(Modifiers::NONE), enter(Modifiers::ALT), enter(Modifiers::CTRL)];
         assert!(c.tirar_enters(&mut eventos));
-        assert_eq!(eventos.len(), 2);
+        assert_eq!(eventos.len(), 3);
         assert!(matches!(eventos[0], Event::Key { modifiers, .. } if modifiers.shift));
+        // O Ctrl+Enter chega ao campo como Shift+Enter, a tecla de quebra dele.
+        assert!(matches!(eventos[2], Event::Key { modifiers, .. } if modifiers == Modifiers::SHIFT));
         // Só a soltura do Enter não envia.
         let mut soltou = vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }];
         assert!(!c.tirar_enters(&mut soltou));

@@ -377,8 +377,21 @@ impl Registro {
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::ForaDaDaily { fora, resultado: api::tirar_da_daily(tarefa, &dia, fora) });
     }
 
+    /// A daily e a sprint vêm sempre juntas: quem atualiza uma encontra a
+    /// outra já pronta, sem a página vazia esperando a resposta.
     fn pedir_daily(&mut self, ctx: &egui::Context) {
+        self.pedir_so_daily(ctx);
+        self.pedir_so_sprint(ctx);
+    }
+
+    fn pedir_sprint(&mut self, ctx: &egui::Context) {
+        self.pedir_so_sprint(ctx);
+        self.pedir_so_daily(ctx);
+    }
+
+    fn pedir_so_daily(&mut self, ctx: &egui::Context) {
         let Some(chave) = self.chave else { return };
+        self.sujas[Aba::Daily.indice()] = false;
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::Daily { chave, resultado: api::daily(chave.0, chave.1) });
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::DeckDaily { chave, resultado: api::apresentacao(chave.0, chave.1, None) });
     }
@@ -401,8 +414,9 @@ impl Registro {
         }
     }
 
-    fn pedir_sprint(&mut self, ctx: &egui::Context) {
+    fn pedir_so_sprint(&mut self, ctx: &egui::Context) {
         let Some(chave) = self.chave else { return };
+        self.sujas[Aba::Sprint.indice()] = false;
         self.erro_sprint = None;
         let Some(periodo) = self.periodo_sprint() else { return };
         let outro = periodo.clone();

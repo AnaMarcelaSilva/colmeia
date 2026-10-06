@@ -1,6 +1,6 @@
-//! Caixa de mensagem do painel da tarefa. Enter envia e Shift+Enter quebra a
-//! linha, como no terminal do Claude Code (Ctrl+Enter também envia; a regra
-//! fica em `teclas`). Colar texto com várias linhas não envia. Ctrl+V com uma
+//! Caixa de mensagem do painel da tarefa. Enter envia e Shift+Enter ou
+//! Ctrl+Enter quebram a linha, como no terminal do Claude Code (a regra fica
+//! em `teclas`). Colar texto com várias linhas não envia. Ctrl+V com uma
 //! imagem na área de transferência anexa a imagem: ela
 //! vai para o núcleo como PNG (a tela não escreve nos dados), fica anexada à
 //! tarefa, e o caminho que o núcleo devolve vai junto na mensagem, que é como
@@ -335,9 +335,9 @@ impl Compositor {
         }
         self.tinha_foco = ui.memory(|m| m.has_focus(id));
         let navegando = self.historicos.get(&foco).and_then(Historico::onde);
-        // Enter (e Ctrl+Enter) envia; sai da fila antes de o campo ver, mesmo
-        // quando não dá para enviar (nem envia nem quebra a linha). Shift+Enter
-        // fica para o campo, que quebra a linha.
+        // Enter envia; sai da fila antes de o campo ver, mesmo quando não dá
+        // para enviar (nem envia nem quebra a linha). Shift+Enter e Ctrl+Enter
+        // ficam para o campo, que quebra a linha.
         let mut enviar = com_foco && teclado_livre && ui.input_mut(|i| self.composicao.tirar_enters(&mut i.events));
         // O egui só avisa um Ctrl+V quando há texto para colar. Sem texto (só uma
         // imagem), o que chega é a tecla V sendo solta com o Ctrl ainda apertado.
@@ -646,9 +646,10 @@ mod testes {
         // Caixa vazia: o Enter não envia nem quebra a linha.
         assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::NONE)], true).is_none());
         assert!(c.rascunho.is_empty());
-        // Ctrl+Enter continua enviando.
+        // Ctrl+Enter quebra a linha, como o Shift+Enter.
         quadro(&ctx, &mut c, vec![Event::Text("oi".into())], true);
-        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::CTRL)], true).is_some_and(|e| e.texto == "oi"));
+        assert!(quadro(&ctx, &mut c, vec![tecla(Modifiers::CTRL)], true).is_none());
+        assert_eq!(c.rascunho, "oi\n");
     }
 
     #[test]

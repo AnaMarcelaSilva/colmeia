@@ -8,6 +8,11 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 - **Tirar uma tarefa da daily de hoje:** pelo menu do cartão ("Tirar desta daily") ou pelo H no modo apresentação da daily. Serve para o que já foi apresentado na reunião anterior. A tarefa sai do deck e do texto da daily daquele dia, fica listada no fim da página com "Trazer de volta", e continua na sprint e na linha do tempo. A daily de outro dia não muda.
 
+### Mudou
+
+- **Ctrl+Enter quebra a linha** na caixa de mensagem, no "Pedir ao agente" e no terminal do agente, como o Shift+Enter. Só o Enter puro envia, como no terminal do Claude Code.
+- **Daily e sprint carregam juntas:** quem atualiza uma encontra a outra já pronta, em vez da página vazia esperando a resposta.
+
 ### Corrigido
 
 - **Terminal embaralhado ao reabrir a Colmeia:** os terminais conectavam antes de a tela saber o tamanho deles, e o histórico chegava desenhado em 80 colunas. Agora, se o primeiro tamanho em foco for outro, o terminal reconecta já no tamanho certo e pede ao programa que redesenhe.
