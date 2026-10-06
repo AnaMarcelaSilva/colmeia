@@ -4,7 +4,7 @@ package protecao
 
 import (
 	"fmt"
-	"regexp"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -62,28 +62,38 @@ func usuarioAtual() (*windows.SID, error) {
 	return u.User.Sid, nil
 }
 
-// SoDoUsuario diz se a lista de acesso só tem o usuário atual e o sistema
-// (herdadas ou não): nem Administradores, nem Usuários, nem Todos.
+// SoDoUsuario diz se a lista de acesso só dá acesso ao usuário atual e ao
+// sistema (herdadas ou não): nem Administradores, nem Usuários, nem Todos.
+// Se não, o erro diz quem mais tem acesso.
 func SoDoUsuario(caminho string) (bool, error) {
 	sd, err := windows.GetNamedSecurityInfo(caminho, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return false, err
 	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, err
+	}
+	if dacl == nil {
+		return false, fmt.Errorf("%s sem lista de acesso (aberto para todos)", caminho)
+	}
 	eu, err := usuarioAtual()
 	if err != nil {
 		return false, err
 	}
-	entradas := entradaSDDL.FindAllStringSubmatch(sd.String(), -1)
-	if len(entradas) == 0 {
-		return false, nil
-	}
-	for _, e := range entradas {
-		if e[1] != "SY" && e[1] != eu.String() {
-			return false, nil
+	for i := range uint32(dacl.AceCount) {
+		var entrada *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &entrada); err != nil {
+			return false, err
+		}
+		// Só herança para os de dentro: não dá acesso a este caminho.
+		if entrada.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || entrada.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&entrada.SidStart))
+		if !sid.Equals(eu) && !sid.IsWellKnown(windows.WinLocalSystemSid) {
+			return false, fmt.Errorf("%s também dá acesso a %s", caminho, sid)
 		}
 	}
 	return true, nil
 }
-
-// entradaSDDL pega o último campo (quem recebe o acesso) de cada entrada.
-var entradaSDDL = regexp.MustCompile(`\([^()]*;([^;()]+)\)`)

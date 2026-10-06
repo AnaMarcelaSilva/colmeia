@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 func TestCanalNoWindowsSoDoUsuario(t *testing.T) {
@@ -46,6 +48,11 @@ func TestCanalNoWindowsSoDoUsuario(t *testing.T) {
 	}
 	if texto := sd.String(); !containsSoUsuarioESistema(texto) {
 		t.Errorf("lista de acesso: %s", texto)
+	}
+	for _, c := range []string{dir, filepath.Join(dir, NomeToken)} {
+		if so, err := protecao.SoDoUsuario(c); !so {
+			t.Errorf("%s aberto para outros: %v", c, err)
+		}
 	}
 }
 
