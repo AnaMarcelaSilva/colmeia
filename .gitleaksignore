@@ -1,0 +1,10 @@
+# Segredos de mentira nos testes do detector de segredos e da recusa de gravar
+# segredos (nucleo/internal/segredos e os testes de dados): não são credenciais.
+0976cd4b44fb91920b2c3c213cfb9dbe474a2d21:nucleo/internal/segredos/segredos_test.go:generic-api-key:23
+0976cd4b44fb91920b2c3c213cfb9dbe474a2d21:nucleo/internal/segredos/segredos_test.go:generic-api-key:24
+0976cd4b44fb91920b2c3c213cfb9dbe474a2d21:nucleo/internal/segredos/segredos_test.go:gitlab-pat:15
+0976cd4b44fb91920b2c3c213cfb9dbe474a2d21:nucleo/internal/segredos/segredos_test.go:jwt:20
+2025ec9cd90b2656d61659a4c716eeb50de6a9f9:nucleo/internal/dados/lousas_test.go:generic-api-key:121
+2025ec9cd90b2656d61659a4c716eeb50de6a9f9:nucleo/internal/segredos/segredos_test.go:generic-api-key:32
+2025ec9cd90b2656d61659a4c716eeb50de6a9f9:nucleo/internal/segredos/segredos_test.go:generic-api-key:33
+a79d5472c82e45721950bee82993959279ddcbf1:nucleo/internal/dados/pedidos_test.go:generic-api-key:51

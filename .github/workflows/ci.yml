@@ -22,6 +22,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: nucleo/go.mod
+          cache-dependency-path: nucleo/go.sum
       - name: Formatação
         if: runner.os == 'Linux'
         run: test -z "$(gofmt -l nucleo)"
@@ -30,6 +31,10 @@ jobs:
       - name: Testes
         if: runner.os == 'Linux'
         run: go -C nucleo test -race ./...
+      # No Windows sem -race (pediria o gcc): canal, ConPTY, navegador e caminhos.
+      - name: Testes no Windows
+        if: runner.os == 'Windows'
+        run: go -C nucleo test ./...
       - name: Vulnerabilidades conhecidas
         if: runner.os == 'Linux'
         run: go -C nucleo run golang.org/x/vuln/cmd/govulncheck@latest ./...
@@ -57,9 +62,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # O cargo audit direto: a action de antes precisava criar um "check" no
+      # GitHub, o que um pull request do dependabot não tem permissão de fazer.
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
 
   # Procura segredos (tokens, chaves) no histórico inteiro, não só no último commit.
   segredos:
