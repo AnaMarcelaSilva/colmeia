@@ -27,7 +27,7 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
 )
 
-const versao = "0.3.0"
+const versao = "0.4.0"
 
 func main() {
 	// "colmeia-nucleo mcp": o servidor MCP que o Claude Code de cada agente roda.
