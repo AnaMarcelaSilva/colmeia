@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/arquivos"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 // Candidatos, na ordem, procurados no PATH. A lista é fixa e roda sem shell.
@@ -764,7 +766,7 @@ func (g *Gerente) pastaDoPerfil(perfil int64) (string, error) {
 		return "", err
 	}
 	for _, d := range []string{g.Dir, dir} {
-		if err := os.Chmod(d, 0o700); err != nil {
+		if err := protecao.Diretorio(d); err != nil {
 			return "", err
 		}
 	}

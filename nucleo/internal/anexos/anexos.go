@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 const (
@@ -154,7 +156,7 @@ func pastaPrivada(dir string) error {
 		return err
 	}
 	for _, d := range []string{filepath.Dir(dir), dir} {
-		if err := os.Chmod(d, 0o700); err != nil {
+		if err := protecao.Diretorio(d); err != nil {
 			return err
 		}
 	}

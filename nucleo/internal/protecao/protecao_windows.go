@@ -4,6 +4,7 @@ package protecao
 
 import (
 	"fmt"
+	"regexp"
 
 	"golang.org/x/sys/windows"
 )
@@ -60,3 +61,29 @@ func usuarioAtual() (*windows.SID, error) {
 	}
 	return u.User.Sid, nil
 }
+
+// SoDoUsuario diz se a lista de acesso só tem o usuário atual e o sistema
+// (herdadas ou não): nem Administradores, nem Usuários, nem Todos.
+func SoDoUsuario(caminho string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(caminho, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	eu, err := usuarioAtual()
+	if err != nil {
+		return false, err
+	}
+	entradas := entradaSDDL.FindAllStringSubmatch(sd.String(), -1)
+	if len(entradas) == 0 {
+		return false, nil
+	}
+	for _, e := range entradas {
+		if e[1] != "SY" && e[1] != eu.String() {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// entradaSDDL pega o último campo (quem recebe o acesso) de cada entrada.
+var entradaSDDL = regexp.MustCompile(`\([^()]*;([^;()]+)\)`)

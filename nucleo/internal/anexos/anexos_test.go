@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 func pngDeTeste(t *testing.T, l, a int) []byte {
@@ -51,12 +53,9 @@ func TestGravaSemMetadadosEComPermissaoSoDoUsuario(t *testing.T) {
 	if bytes.Contains(gravado, []byte("segredo")) {
 		t.Error("os metadados continuaram no arquivo")
 	}
-	if info, _ := os.Stat(img.Caminho); info.Mode().Perm() != 0o600 {
-		t.Errorf("arquivo com permissão %o", info.Mode().Perm())
-	}
-	for _, d := range []string{dir, filepath.Dir(dir)} {
-		if info, _ := os.Stat(d); info.Mode().Perm() != 0o700 {
-			t.Errorf("pasta %s com permissão %o", d, info.Mode().Perm())
+	for _, c := range []string{img.Caminho, dir, filepath.Dir(dir)} {
+		if so, err := protecao.SoDoUsuario(c); err != nil || !so {
+			t.Errorf("%s aberto para outros (%v)", c, err)
 		}
 	}
 	// A mesma imagem de novo reaproveita o arquivo.
@@ -99,7 +98,7 @@ func TestCaminhoSoComHash(t *testing.T) {
 			t.Errorf("extensão %q aceita", formato)
 		}
 	}
-	if c, err := Caminho("/x", sha, "mp4"); err != nil || c != "/x/"+sha+".mp4" {
+	if c, err := Caminho("/x", sha, "mp4"); err != nil || c != filepath.Join("/x", sha+".mp4") {
 		t.Errorf("mp4: %q, %v", c, err)
 	}
 }
@@ -172,13 +171,12 @@ func TestVideoComBytesCertos(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(v.Caminho)
-	if err != nil || info.Mode().Perm() != 0o600 || v.Bytes != 4096 || v.Formato != "mp4" || filepath.Ext(v.Caminho) != ".mp4" {
+	so, err := protecao.SoDoUsuario(v.Caminho)
+	if err != nil || !so || v.Bytes != 4096 || v.Formato != "mp4" || filepath.Ext(v.Caminho) != ".mp4" {
 		t.Errorf("vídeo gravado: %+v, %v", v, err)
 	}
-	pasta, _ := os.Stat(dir)
-	if pasta.Mode().Perm() != 0o700 {
-		t.Errorf("pasta com permissão %o", pasta.Mode().Perm())
+	if so, err := protecao.SoDoUsuario(dir); err != nil || !so {
+		t.Errorf("pasta aberta para outros (%v)", err)
 	}
 	webm := append([]byte{0x1a, 0x45, 0xdf, 0xa3}, make([]byte, 100)...)
 	if _, err := GravarVideo(dir, bytes.NewReader(webm), "video/webm"); err != nil {

@@ -177,6 +177,9 @@ func criarProcesso(linha string, ambiente []uint16, dir string, atributos *windo
 	var inicio windows.StartupInfoEx
 	inicio.Cb = uint32(unsafe.Sizeof(inicio))
 	inicio.ProcThreadAttributeList = atributos.List()
+	// Entrada e saída padrão vazias de propósito: sem isso o programa herda
+	// as do núcleo (redirecionadas para NUL) e escreve nelas, não no console.
+	inicio.Flags = windows.STARTF_USESTDHANDLES
 	var info windows.ProcessInformation
 	opcoes := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
 	err = windows.CreateProcess(nil, linha16, nil, nil, false, opcoes, &ambiente[0], dir16, &inicio.StartupInfo, &info)

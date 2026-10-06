@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 func bancoDeTeste(t *testing.T) (*Banco, string) {
@@ -24,13 +25,11 @@ func bancoDeTeste(t *testing.T) (*Banco, string) {
 
 func TestBancoFechadoParaOutros(t *testing.T) {
 	_, dir := bancoDeTeste(t)
-	info, _ := os.Stat(dir)
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("diretório de dados com permissão %o", info.Mode().Perm())
-	}
-	info, _ = os.Stat(filepath.Join(dir, "colmeia.db"))
-	if info.Mode().Perm()&0o077 != 0 {
-		t.Errorf("banco aberto para outros: %o", info.Mode().Perm())
+	// 0700 e 0600 no Linux; no Windows, lista de acesso só do usuário e do sistema.
+	for _, c := range []string{dir, filepath.Join(dir, "colmeia.db")} {
+		if so, err := protecao.SoDoUsuario(c); err != nil || !so {
+			t.Errorf("%s aberto para outros (%v)", c, err)
+		}
 	}
 }
 

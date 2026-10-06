@@ -20,6 +20,8 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/navegador"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/segredos"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
 // LadoParaOAgente: a captura devolvida ao agente é reduzida até caber nisso
@@ -408,7 +410,7 @@ func (s *Servidor) pastaAgentes() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	return dir, os.Chmod(dir, 0o700)
+	return dir, protecao.Diretorio(dir)
 }
 
 // gravarPrivado escreve o arquivo com 0600, trocando de uma vez.

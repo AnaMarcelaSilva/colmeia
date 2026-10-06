@@ -179,7 +179,8 @@ func TestSprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Markdown != string(esperado) {
+	// O git do Windows pode trocar o fim de linha do arquivo de referência.
+	if r.Markdown != strings.ReplaceAll(string(esperado), "\r\n", "\n") {
 		t.Errorf("markdown mudou (rode com -atualizar se foi de propósito):\n%s", r.Markdown)
 	}
 	vazia := Sprint(semana(t), em("2026-08-01 00:00"), em("2026-08-14 00:00"), contexto())
