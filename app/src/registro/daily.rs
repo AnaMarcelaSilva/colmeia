@@ -6,6 +6,10 @@
 //! separados por projeto, com uma fileira de saltos no topo e, em cada
 //! projeto, "Só este projeto" e "Abrir quadro". As peças dessa separação
 //! servem também à sprint.
+//!
+//! Uma tarefa já apresentada pode sair da daily de hoje pelo menu do cartão
+//! ("Tirar desta daily"); ela fica listada no fim, com "Trazer de volta". A
+//! sprint e a linha do tempo continuam com ela.
 
 use eframe::egui::{self, Id, RichText, vec2};
 
@@ -48,7 +52,9 @@ impl Registro {
             ui.set_max_width(ui.available_width() - comum::MARGEM_ROLAGEM);
             if deck.slides.is_empty() && deck.capa.novas.is_empty() {
                 let desde = deck.periodo.split(" · ").next().unwrap_or_default().to_string();
-                if escopo.recorte == api::Recorte::Perfil {
+                if !deck.fora.is_empty() {
+                    comum::vazio(ui, "Nada para a daily", "O que houve no período já foi tirado desta daily.", None);
+                } else if escopo.recorte == api::Recorte::Perfil {
                     let texto = format!("Nenhuma tarefa trabalhada ({desde}). Quando um agente trabalhar numa tarefa, ela aparece aqui como um slide.");
                     comum::vazio(ui, "Nada para a daily", &texto, None);
                 } else if comum::vazio(
@@ -58,6 +64,9 @@ impl Registro {
                     Some("Ver todos os projetos"),
                 ) {
                     acoes.push(Acao::Recorte(api::Recorte::Perfil));
+                }
+                if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado) {
+                    self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), false);
                 }
                 return;
             }
@@ -90,9 +99,11 @@ impl Registro {
                     }
                     rotulo_grupo(ui, titulo, slides.len(), cor, marca);
                     ui.add_space(8.0);
-                    let clique = comum::grade(ui, &slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
-                    if let Some(c) = clique {
-                        acoes.push(super::acao_do_clique(c, &deck, None));
+                    let clique = comum::grade(ui, &slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta, true);
+                    match clique {
+                        Some(comum::CliqueCartao::TirarDaDaily(t)) => self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), true),
+                        Some(c) => acoes.extend(super::acao_do_clique(c, &deck, None)),
+                        None => {}
                     }
                     ui.add_space(16.0);
                 }
@@ -105,6 +116,9 @@ impl Registro {
                 ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(13.5));
             }
             sem_atividade(ui, escopo, &secoes, deck.mais > 0);
+            if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado) {
+                self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), false);
+            }
             ui.add_space(12.0);
             self.texto_da_daily(ui, acoes);
             ui.add_space(24.0);
@@ -256,6 +270,33 @@ pub(super) fn sem_atividade(ui: &mut egui::Ui, escopo: &Escopo, secoes: &[SecaoD
     }
     ui.add_space(4.0);
     ui.label(RichText::new(format!("Sem atividade no período: {}.", nomes.join(", "))).color(cores().suave).size(13.5));
+}
+
+/// As tarefas tiradas da daily de hoje, cada uma com "Trazer de volta".
+/// Devolve a que deve voltar.
+fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: bool, conectado: bool) -> Option<i64> {
+    if fora.is_empty() {
+        return None;
+    }
+    let p = cores();
+    let mut voltar = None;
+    ui.add_space(16.0);
+    ui.label(RichText::new(format!("Tiradas desta daily · {}", fora.len())).color(p.suave).size(13.5));
+    ui.add_space(4.0);
+    for t in fora {
+        ui.horizontal(|ui| {
+            let mut texto = format!("“{}”", t.titulo);
+            if com_projeto && !t.projeto.is_empty() {
+                texto = format!("{texto} · {}", t.projeto);
+            }
+            ui.label(RichText::new(texto).color(p.texto).size(13.5));
+            let r = tema::link_com(ui, "Trazer de volta", conectado);
+            if r.on_hover_text("Volta para a daily de hoje").clicked() {
+                voltar = Some(t.tarefa_id);
+            }
+        });
+    }
+    voltar
 }
 
 /// Rótulo de um grupo de cartões: a marca do estado, nome e quantos.

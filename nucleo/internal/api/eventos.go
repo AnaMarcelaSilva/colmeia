@@ -371,6 +371,14 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "workspace_id": d.Workspace, "recolhido": d.Recolhido}
+	case "daily.fora":
+		// A daily de outras telas busca de novo.
+		var d struct {
+			Dia  string `json:"dia"`
+			Fora bool   `json:"fora"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "dia": d.Dia, "fora": d.Fora}
 	case "perfil.tempo_agentes":
 		// Só o booleano: as outras telas do perfil escondem ou mostram na hora.
 		var d struct {

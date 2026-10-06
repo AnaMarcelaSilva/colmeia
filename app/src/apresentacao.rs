@@ -44,6 +44,7 @@ pub enum Proprio {
     Nota,
     AnexoNovo,
     AnexoRemovido,
+    ForaDaDaily,
 }
 
 /// As regiões do slide, calculadas só pelo tamanho da janela (dá para testar).
@@ -204,7 +205,7 @@ struct Visor {
 }
 
 enum Mensagem {
-    Deck { resultado: Result<api::Deck, String>, manter: Option<i64> },
+    Deck { resultado: Result<Box<api::Deck>, String>, manter: Option<i64> },
     NotaSalva { tarefa: i64, texto: String, resultado: Result<api::NotaGravada, String> },
     Progresso(Progresso),
     Enviado { tarefa: i64, nome: String, resultado: Result<api::AnexoSlide, String> },
@@ -212,6 +213,7 @@ enum Mensagem {
     VideoFalhou(String),
     Grande { anexo: i64, resultado: Result<egui::ColorImage, String> },
     RemocaoFalhou(i64),
+    ForaDaDailyFalhou { tarefa: i64, erro: String },
     Lousa { tarefa: i64, resultado: Result<api::LousaAberta, String> },
 }
 
@@ -696,7 +698,10 @@ impl Apresentacao {
         if cfg!(test) {
             return;
         }
-        registro::em_segundo_plano(&self.canal.0, ctx, move || Mensagem::Deck { resultado: api::apresentacao(perfil, projeto, periodo.as_ref()), manter });
+        registro::em_segundo_plano(&self.canal.0, ctx, move || Mensagem::Deck {
+            resultado: api::apresentacao(perfil, projeto, periodo.as_ref()).map(Box::new),
+            manter,
+        });
     }
 
     /// Troca o deck mantendo o slide pela tarefa (R), ou indo ao início pedido.
@@ -825,6 +830,19 @@ impl Apresentacao {
         }
     }
 
+    /// Guarda que a tarefa saiu da daily de hoje. Se o núcleo recusar, o
+    /// slide continua escondido só nesta apresentação, e a faixa avisa.
+    fn tirar_da_daily(&mut self, tarefa: i64, dia: String) {
+        self.esperar(Proprio::ForaDaDaily, tarefa);
+        self.aviso = Some(("Tirada desta daily; a sprint continua com ela".into(), 0.0, Tom::Neutro));
+        let envio = self.canal.0.clone();
+        std::thread::spawn(move || {
+            if let Err(erro) = api::tirar_da_daily(tarefa, &dia, true) {
+                let _ = envio.send(Mensagem::ForaDaDailyFalhou { tarefa, erro });
+            }
+        });
+    }
+
     fn confirmar_remocao(&mut self) {
         if let Some(r) = self.remocao.take() {
             let (id, tarefa) = (r.anexo.id, r.tarefa);
@@ -863,7 +881,7 @@ impl Apresentacao {
                     } else {
                         manter
                     };
-                    self.trocar_deck(deck, manter);
+                    self.trocar_deck(*deck, manter);
                 }
                 Mensagem::Deck { resultado: Err(e), .. } => {
                     self.buscando = false;
@@ -896,6 +914,10 @@ impl Apresentacao {
                     }
                 },
                 Mensagem::RemocaoFalhou(tarefa) => self.nao_esperar(Proprio::AnexoRemovido, tarefa),
+                Mensagem::ForaDaDailyFalhou { tarefa, erro } => {
+                    self.nao_esperar(Proprio::ForaDaDaily, tarefa);
+                    self.aviso = Some((format!("Escondido só agora; não consegui tirar da daily: {erro}"), 0.0, Tom::Alerta));
+                }
                 Mensagem::Progresso(p) => self.progresso = Some(p),
                 Mensagem::Enviado { tarefa, nome, resultado } => match resultado {
                     Ok(anexo) => {
@@ -1190,6 +1212,11 @@ impl Apresentacao {
                 if let Some(d) = &self.deck {
                     self.paginas = montar_paginas(d, &self.escondidos);
                     self.atual = self.atual.min(self.paginas.len() - 1);
+                    // Na daily, a tarefa sai também da daily de hoje (a sprint continua com ela).
+                    if d.tipo == "daily" {
+                        let dia = d.chave_nota.clone();
+                        self.tirar_da_daily(t, dia);
+                    }
                 }
             }
         } else if tecla(Key::T) {
@@ -2424,7 +2451,7 @@ const ATALHOS: &[(&str, &[&str])] = &[
     ("Anexos ou lousa", &["L"]),
     ("Editar a nota", &["N"]),
     ("Adicionar foto ou vídeo", &["A"]),
-    ("Esconder o slide (só agora)", &["H"]),
+    ("Esconder o slide (na daily, tira desta daily)", &["H"]),
     ("Tema claro ou escuro (só agora)", &["T"]),
     ("Atualizar com as novidades", &["R"]),
     ("Tela cheia", &["F11"]),
@@ -2654,13 +2681,13 @@ mod testes {
         assert!(matches!(a.inicio, Inicio::Tarefa(2)));
         // Uma resposta com o tempo (pedida antes) é descartada ao chegar.
         assert!(a.buscando);
-        a.canal.0.send(Mensagem::Deck { resultado: Ok(com_tempo.clone()), manter: Some(2) }).unwrap();
+        a.canal.0.send(Mensagem::Deck { resultado: Ok(Box::new(com_tempo.clone())), manter: Some(2) }).unwrap();
         a.receber(&ctx);
         assert!(a.deck.is_none(), "o deck com o tempo entrou na tela");
         // A resposta sem o tempo entra e volta ao mesmo slide.
         let mut sem = deck();
         sem.tempo_agentes = false;
-        a.canal.0.send(Mensagem::Deck { resultado: Ok(sem), manter: Some(2) }).unwrap();
+        a.canal.0.send(Mensagem::Deck { resultado: Ok(Box::new(sem)), manter: Some(2) }).unwrap();
         a.receber(&ctx);
         assert!(a.deck.as_ref().is_some_and(|d| !d.tempo_agentes) && !a.tirando_tempo);
         assert_eq!(a.tarefa_atual(), Some(2));

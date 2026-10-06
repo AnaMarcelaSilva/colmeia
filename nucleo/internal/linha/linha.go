@@ -53,6 +53,23 @@ type Contexto struct {
 	// trabalharam e esperaram você. O valor zero esconde (o padrão do
 	// perfil): sem ele, nenhuma resposta leva tempo de agente.
 	MostrarTempo bool
+	// ForaDaDaily: as tarefas tiradas da daily de hoje. Elas saem da daily
+	// (deck e texto), mas não da sprint nem da linha do tempo.
+	ForaDaDaily map[int64]bool
+}
+
+// semForaDaDaily tira os itens das tarefas fora da daily de hoje.
+func (c Contexto) semForaDaDaily(itens []Item) []Item {
+	if len(c.ForaDaDaily) == 0 {
+		return itens
+	}
+	restantes := make([]Item, 0, len(itens))
+	for _, item := range itens {
+		if !c.ForaDaDaily[item.TarefaID] {
+			restantes = append(restantes, item)
+		}
+	}
+	return restantes
 }
 
 // escopo é o cabeçalho dos resumos e do deck ("" quando não há).

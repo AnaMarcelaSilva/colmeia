@@ -437,6 +437,13 @@ pub enum Evento {
         #[serde(default)]
         agente_id: i64,
     },
+    /// Uma tarefa saiu da daily do dia (ou voltou): a daily busca de novo.
+    #[serde(rename = "daily.fora")]
+    DailyFora {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+    },
     /// Qualquer mudança de um pedido ao agente, com o pedido inteiro.
     #[serde(rename = "pedido.criado", alias = "pedido.entregue", alias = "pedido.respondido", alias = "pedido.cancelado", alias = "pedido.falhou")]
     PedidoMudou { seq: u64, pedido: api::Pedido },
@@ -539,6 +546,7 @@ impl Evento {
             | Evento::AnexoAdicionado { seq, .. }
             | Evento::AnexoRemovido { seq, .. }
             | Evento::NotaAtualizada { seq, .. }
+            | Evento::DailyFora { seq, .. }
             | Evento::PedidoMudou { seq, .. }
             | Evento::NavegadorAberto { seq, .. }
             | Evento::NavegadorFechado { seq, .. }
@@ -620,6 +628,7 @@ impl Modelo {
             | Evento::AnexoAdicionado { .. }
             | Evento::AnexoRemovido { .. }
             | Evento::NotaAtualizada { .. }
+            | Evento::DailyFora { .. }
             | Evento::NavegadorCaptura { .. }
             // A tela principal aplica no perfil (e o registro busca de novo).
             | Evento::PerfilTempoAgentes { .. }
@@ -1071,6 +1080,8 @@ mod testes {
         assert!(!m.navegadores.contains(&10));
         let nota = evento(r#"{"tipo":"nota.atualizada","seq":12,"tarefa_id":10,"agente_id":7,"modo":"complementar"}"#);
         assert!(matches!(nota, Evento::NotaAtualizada { agente_id: 7, .. }));
+        let fora = evento(r#"{"tipo":"daily.fora","seq":13,"tarefa_id":10,"dia":"2026-10-06","fora":true}"#);
+        assert!(matches!(fora, Evento::DailyFora { tarefa_id: 10, .. }) && fora.entra_na_linha());
         m.aplicar(evento(r#"{"tipo":"tarefa.removida","seq":13,"tarefa_id":10}"#));
         assert!(m.pedidos.is_empty());
     }

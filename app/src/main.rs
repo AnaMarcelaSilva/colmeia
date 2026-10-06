@@ -566,6 +566,7 @@ impl Colmeia {
                         (dados::Evento::NotaAtualizada { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::Nota, *tarefa_id),
                         (dados::Evento::AnexoAdicionado { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::AnexoNovo, *tarefa_id),
                         (dados::Evento::AnexoRemovido { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::AnexoRemovido, *tarefa_id),
+                        (dados::Evento::DailyFora { tarefa_id, .. }, Some(a)) => a.evento_proprio(apresentacao::Proprio::ForaDaDaily, *tarefa_id),
                         _ => false,
                     };
                     de_fora |= e.entra_na_linha() && !proprio;
@@ -1881,6 +1882,9 @@ impl Colmeia {
         }
         if let Some((ws, recolhido)) = recolher {
             self.recolher_workspace(ws, recolhido);
+            // A lista já foi desenhada neste quadro: sem pedir outro, os
+            // projetos só somem quando o mouse mexer.
+            ui.ctx().request_repaint();
         }
         if let Some(ws) = mudar_workspace {
             // Da lousa ou dos bancos, o workspace abre no quadro.

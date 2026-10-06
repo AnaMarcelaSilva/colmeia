@@ -73,7 +73,7 @@ Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
 
-Tudo o que acontece nas tarefas vira um registro. A **linha do tempo** mostra um dia por vez, com um cartão por tarefa e as capturas em miniatura. A **daily** junta o que mudou desde o último dia com atividade, separado em concluídas, em revisão, esperando você, trabalhando e com erro, e "Copiar texto" entrega o resumo pronto para falar. A **sprint** cobre 7 ou 14 dias, o mês ou as datas que você escolher, e exporta em Markdown com as capturas. As três funcionam por projeto, por workspace ou para o perfil inteiro, sempre separadas por projeto.
+Tudo o que acontece nas tarefas vira um registro. A **linha do tempo** mostra um dia por vez, com um cartão por tarefa e as capturas em miniatura. A **daily** junta o que mudou desde o último dia com atividade, separado em concluídas, em revisão, esperando você, trabalhando e com erro, e "Copiar texto" entrega o resumo pronto para falar. Uma tarefa já apresentada sai da daily de hoje pelo menu do cartão ("Tirar desta daily") ou pelo H na apresentação, e continua na sprint. A **sprint** cobre 7 ou 14 dias, o mês ou as datas que você escolher, e exporta em Markdown com as capturas. As três funcionam por projeto, por workspace ou para o perfil inteiro, sempre separadas por projeto.
 
 O tempo que cada agente trabalhou e esperou fica oculto por padrão, inclusive no texto copiado e na exportação. A opção "Mostrar tempo dos agentes", guardada por perfil, exibe esses números quando necessário ([decisão 0010](docs/decisoes/0010-tempo-dos-agentes-opcional.md)).
 

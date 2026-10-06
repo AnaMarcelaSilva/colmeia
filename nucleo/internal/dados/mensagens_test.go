@@ -219,7 +219,7 @@ func TestMigracaoDosAnexos(t *testing.T) {
 	defer b.Fechar()
 	var versao int
 	b.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 5 {
+	if versao != 6 {
 		t.Errorf("versão %d depois de abrir", versao)
 	}
 	a, err := b.Anexo(ctx, 5)

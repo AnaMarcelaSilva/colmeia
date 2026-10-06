@@ -164,6 +164,15 @@ type Deck struct {
 	Vazio     bool    `json:"vazio"`
 	// TempoAgentes: os números e os textos podem ter o tempo dos agentes.
 	TempoAgentes bool `json:"tempo_agentes"`
+	// Fora: as tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
+	Fora []TarefaFora `json:"fora,omitempty"`
+}
+
+// TarefaFora é uma tarefa tirada da daily de hoje.
+type TarefaFora struct {
+	TarefaID int64  `json:"tarefa_id"`
+	Titulo   string `json:"titulo"`
+	Projeto  string `json:"projeto"`
 }
 
 // trabalho diz se o item conta como trabalho na tarefa (uma tarefa só criada
@@ -247,6 +256,15 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 			d.Periodo = "só hoje" + escopo
 		}
 		d.ChaveNota = hoje
+		// O dia anterior já foi escolhido com tudo: tirar uma tarefa não puxa
+		// a daily para um dia mais antigo.
+		itens = c.semForaDaDaily(itens)
+		for id := range c.ForaDaDaily {
+			if t, ok := c.Tarefas[id]; ok {
+				d.Fora = append(d.Fora, TarefaFora{TarefaID: id, Titulo: t.Titulo, Projeto: m.nomeProjeto(t.ProjetoID)})
+			}
+		}
+		sort.Slice(d.Fora, func(i, j int) bool { return d.Fora[i].TarefaID < d.Fora[j].TarefaID })
 	} else {
 		inicio, fim = de.Format("2006-01-02"), ate.Format("2006-01-02")
 		// O ano só aparece quando o período cruza a virada do ano; o
@@ -353,7 +371,7 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		}
 		sort.Slice(abertas, func(i, j int) bool { return abertas[i].ID < abertas[j].ID })
 		for _, t := range abertas {
-			if t.Coluna != "aguardando" && t.Coluna != "trabalhando" {
+			if (t.Coluna != "aguardando" && t.Coluna != "trabalhando") || c.ForaDaDaily[t.ID] {
 				continue
 			}
 			if t.Coluna == "trabalhando" && soTerminaisParados(c.Ativos, t.ID) {

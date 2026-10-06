@@ -479,6 +479,8 @@ pub enum CliqueCartao {
     /// Abrir a caixa "Pedir ao agente", presa ao botão.
     Pedir(i64, Rect),
     AbrirTarefa(i64),
+    /// Tirar a tarefa da daily de hoje (já apresentada); a sprint continua com ela.
+    TirarDaDaily(i64),
 }
 
 /// O pedido da tarefa e se a caixa dela está aberta (para o cartão).
@@ -493,6 +495,7 @@ pub struct PedidoNoCartao<'a> {
 /// Cartão de uma tarefa (Daily e Sprint): título, etiquetas, até 3 tópicos,
 /// a nota e as miniaturas. O clique abre a apresentação no slide dela; o
 /// botão do canto e a pílula do pedido abrem a caixa "Pedir ao agente".
+/// Na daily (`na_daily`), o menu do cartão também tira a tarefa dela.
 #[allow(clippy::too_many_arguments)]
 pub fn cartao(
     ui: &mut egui::Ui,
@@ -502,6 +505,7 @@ pub fn cartao(
     cache: &mut CacheImagens,
     rolar_ate: &mut Option<i64>,
     pedido_info: &PedidoNoCartao,
+    na_daily: bool,
 ) -> Option<CliqueCartao> {
     let p = cores();
     let mut clique = None;
@@ -539,6 +543,10 @@ pub fn cartao(
             }
             if tema::opcao_menu(ui, "Apresentar a partir daqui", false) {
                 clique = Some(CliqueCartao::Abrir(s.tarefa_id));
+                ui.close();
+            }
+            if na_daily && tema::opcao_menu(ui, "Tirar desta daily", false) {
+                clique = Some(CliqueCartao::TirarDaDaily(s.tarefa_id));
                 ui.close();
             }
         });
@@ -685,6 +693,7 @@ pub fn largura_coluna(largura: f32) -> f32 {
     (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn grade(
     ui: &mut egui::Ui,
     slides: &[&api::Slide],
@@ -693,6 +702,7 @@ pub fn grade(
     rolar_ate: &mut Option<i64>,
     pedidos: &pedido::Pedidos,
     caixa_aberta: Option<i64>,
+    na_daily: bool,
 ) -> Option<CliqueCartao> {
     let largura = ui.available_width();
     let colunas = colunas_da_grade(largura);
@@ -710,7 +720,7 @@ pub fn grade(
                     caixa_aberta: caixa_aberta == Some(s.tarefa_id),
                     respondido: resumo.is_some_and(|r| r.pedido.estado == "respondido"),
                 };
-                if let Some(c) = cartao(ui, rect, s, com_projeto, cache, rolar_ate, &info) {
+                if let Some(c) = cartao(ui, rect, s, com_projeto, cache, rolar_ate, &info, na_daily) {
                     clicada = Some(c);
                 }
             }

@@ -193,3 +193,55 @@ func TestFotoEVideoNaTarefa(t *testing.T) {
 		t.Errorf("anexos do slide: %v", anexos)
 	}
 }
+
+func TestTirarDaDaily(t *testing.T) {
+	srv := servidorComDados(t)
+	perfilComAgente(t, srv.URL)
+	hoje := time.Now().Format("2006-01-02")
+	url := srv.URL + "/v1/tarefas/1/daily"
+	slides := func(consulta string) (int, map[string]any) {
+		t.Helper()
+		_, deck := pedir(t, "GET", srv.URL+"/v1/perfis/1/apresentacao?"+consulta, nil)
+		s, _ := deck["slides"].([]any)
+		return len(s), deck
+	}
+	if n, _ := slides("tipo=daily"); n != 1 {
+		t.Fatalf("antes de tirar: %d slides", n)
+	}
+
+	if status, _ := pedir(t, "PUT", url, map[string]any{"dia": hoje, "fora": true}); status != http.StatusNoContent {
+		t.Fatalf("tirar: %d", status)
+	}
+	n, deck := slides("tipo=daily")
+	fora, _ := deck["fora"].([]any)
+	if n != 0 || len(fora) != 1 || fora[0].(map[string]any)["titulo"] != "Analisar relatório" {
+		t.Errorf("deck depois de tirar: %d slides, fora %v", n, deck["fora"])
+	}
+	if _, d := pedir(t, "GET", srv.URL+"/v1/perfis/1/resumo?tipo=daily", nil); strings.Contains(d["texto"].(string), "Analisar relatório") {
+		t.Errorf("o texto da daily ainda cita a tarefa: %v", d["texto"])
+	}
+	// A sprint continua com ela.
+	if n, _ := slides("tipo=sprint&ultimos=7"); n != 1 {
+		t.Errorf("sprint sem a tarefa: %d slides", n)
+	}
+
+	for _, ruim := range []map[string]any{
+		{"dia": "ontem", "fora": true},
+		{"dia": hoje},
+		{"dia": hoje, "fora": true, "extra": 1},
+	} {
+		if status, _ := pedir(t, "PUT", url, ruim); status != http.StatusBadRequest {
+			t.Errorf("pedido inválido %v: %d", ruim, status)
+		}
+	}
+	if status, _ := pedir(t, "PUT", srv.URL+"/v1/tarefas/99/daily", map[string]any{"dia": hoje, "fora": true}); status != http.StatusNotFound {
+		t.Errorf("tarefa que não existe: %d", status)
+	}
+
+	if status, _ := pedir(t, "PUT", url, map[string]any{"dia": hoje, "fora": false}); status != http.StatusNoContent {
+		t.Fatalf("trazer de volta: %d", status)
+	}
+	if n, deck := slides("tipo=daily"); n != 1 || deck["fora"] != nil {
+		t.Errorf("depois de trazer de volta: %d slides, fora %v", n, deck["fora"])
+	}
+}

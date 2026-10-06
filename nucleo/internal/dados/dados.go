@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS notas (
 	atualizada_em TEXT NOT NULL,
 	PRIMARY KEY (tarefa_id, tipo, periodo)
 );
+-- Tarefas tiradas da daily de um dia (já apresentadas): a sprint e a linha
+-- do tempo continuam com elas.
+CREATE TABLE IF NOT EXISTS fora_da_daily (
+	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	dia TEXT NOT NULL,
+	PRIMARY KEY (tarefa_id, dia)
+);
 `
 
 // colunasAnexos é a definição da tabela anexos desde a versão 3 do banco
@@ -299,6 +306,12 @@ func migrar(db *sql.DB) error {
 	// (tabelas novas, criadas pelo esquema).
 	if versao < 5 {
 		if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
+			return err
+		}
+	}
+	// Versão 6: tarefas tiradas da daily de um dia (tabela criada pelo esquema).
+	if versao < 6 {
+		if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
 			return err
 		}
 	}

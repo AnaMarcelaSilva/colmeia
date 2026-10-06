@@ -535,6 +535,18 @@ pub struct Deck {
     /// Os números e os textos podem ter o tempo dos agentes.
     #[serde(default)]
     pub tempo_agentes: bool,
+    /// As tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub fora: Vec<TarefaFora>,
+}
+
+/// Uma tarefa tirada da daily de hoje.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TarefaFora {
+    pub tarefa_id: i64,
+    pub titulo: String,
+    #[serde(default)]
+    pub projeto: String,
 }
 
 // Lousa (quadro livre) do workspace e da tarefa.
@@ -1086,6 +1098,17 @@ pub fn gravar_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str, versao: 
         409 => serde_json::from_str::<NotaMudou>(&resposta)
             .map(|m| NotaGravada::Mudou { texto: m.texto, versao: m.versao })
             .map_err(|e| inesperada("/v1/tarefas/notas", e)),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+    }
+}
+
+/// Tira a tarefa da daily do `dia` (AAAA-MM-DD) ou, com `fora` falso, traz
+/// de volta. A sprint e a linha do tempo não mudam.
+pub fn tirar_da_daily(tarefa: i64, dia: &str, fora: bool) -> Result<(), String> {
+    let corpo = json!({ "dia": dia, "fora": fora }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/tarefas/{tarefa}/daily"), Some(&corpo))?;
+    match status {
+        204 => Ok(()),
         _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
     }
 }
@@ -1719,6 +1742,9 @@ mod testes {
         assert!(d.capa.destaques.is_empty() && d.capa.partes.is_empty() && d.capa.numeros.por_ferramenta.is_empty());
         assert_eq!(d.slides[0].tarefa_id, 3);
         assert!(d.slides[0].anexos.is_empty() && d.slides[0].feito[0].itens.is_empty());
+        assert!(d.fora.is_empty());
+        let d: Deck = serde_json::from_str(r#"{"tipo":"daily","titulo":"Daily","fora":[{"tarefa_id":4,"titulo":"Tela nova","projeto":"loja-web"}]}"#).unwrap();
+        assert_eq!((d.fora[0].tarefa_id, d.fora[0].titulo.as_str()), (4, "Tela nova"));
     }
 
     #[test]

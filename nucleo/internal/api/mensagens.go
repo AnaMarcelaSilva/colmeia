@@ -15,6 +15,34 @@ func (s *Servidor) rotasMensagens(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agentes/{id}/mensagens", s.guardarMensagem)
 	mux.HandleFunc("DELETE /v1/agentes/{id}/mensagens", s.limparMensagens)
 	mux.HandleFunc("PUT /v1/tarefas/{id}/notas", s.definirNota)
+	mux.HandleFunc("PUT /v1/tarefas/{id}/daily", s.foraDaDaily)
+}
+
+// foraDaDaily tira a tarefa da daily de um dia (fora: true) ou a traz de
+// volta (fora: false). A sprint e a linha do tempo não mudam.
+func (s *Servidor) foraDaDaily(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		Dia  string `json:"dia"`
+		Fora *bool  `json:"fora"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.Fora == nil {
+		responderErro(w, dados.ErrInvalido{Motivo: "informe fora (true ou false)"})
+		return
+	}
+	if err := s.Banco.TirarDaDaily(r.Context(), id, pedido.Dia, *pedido.Fora); err != nil {
+		responderErro(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Servidor) listarMensagens(w http.ResponseWriter, r *http.Request) {

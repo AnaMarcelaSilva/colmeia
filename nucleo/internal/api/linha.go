@@ -301,6 +301,10 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 			responderErro(w, err)
 			return
 		}
+		if c.ForaDaDaily, err = s.Banco.ForaDaDaily(r.Context(), perfil, hoje.Format("2006-01-02")); err != nil {
+			responderErro(w, err)
+			return
+		}
 		d := linha.Daily(eventos, c)
 		if formato == "markdown" {
 			responderMarkdown(w, d.Texto+"\n")
@@ -371,6 +375,10 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		inicio := time.Date(hoje.Year(), hoje.Month(), hoje.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -linha.JanelaDaily)
 		eventos, err := s.Banco.ListarEventos(r.Context(), rc.desde(perfil, inicioDoDia(inicio)))
 		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		if c.ForaDaDaily, err = s.Banco.ForaDaDaily(r.Context(), perfil, hoje.Format("2006-01-02")); err != nil {
 			responderErro(w, err)
 			return
 		}

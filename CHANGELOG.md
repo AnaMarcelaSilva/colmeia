@@ -2,6 +2,17 @@
 
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as versões seguem [SemVer](https://semver.org/lang/pt-BR/). A Colmeia foi construída em entregas (A a H); dentro de cada versão, as mudanças vêm agrupadas pela entrega que as trouxe, da mais nova para a mais antiga.
 
+## [Não lançado]
+
+### Novo
+
+- **Tirar uma tarefa da daily de hoje:** pelo menu do cartão ("Tirar desta daily") ou pelo H no modo apresentação da daily. Serve para o que já foi apresentado na reunião anterior. A tarefa sai do deck e do texto da daily daquele dia, fica listada no fim da página com "Trazer de volta", e continua na sprint e na linha do tempo. A daily de outro dia não muda.
+
+### Corrigido
+
+- **Terminal embaralhado ao reabrir a Colmeia:** os terminais conectavam antes de a tela saber o tamanho deles, e o histórico chegava desenhado em 80 colunas. Agora, se o primeiro tamanho em foco for outro, o terminal reconecta já no tamanho certo e pede ao programa que redesenhe.
+- **Recolher um workspace na barra lateral** só escondia os projetos quando o mouse mexia; agora esconde na hora.
+
 ## [0.4.0] · 06/10/2026
 
 ### Entrega I · Windows

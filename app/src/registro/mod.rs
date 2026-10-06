@@ -132,13 +132,15 @@ pub enum Acao {
     },
 }
 
-/// O clique num cartão vira o pedido à tela principal.
-fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option<api::PeriodoSprint>) -> Acao {
-    match clique {
+/// O clique num cartão vira o pedido à tela principal; tirar da daily o
+/// registro resolve sozinho (veja `tirar_da_daily`).
+fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option<api::PeriodoSprint>) -> Option<Acao> {
+    Some(match clique {
         comum::CliqueCartao::Abrir(tarefa) => Acao::Apresentar { deck: Box::new(deck.clone()), periodo, tarefa: Some(tarefa) },
         comum::CliqueCartao::Pedir(tarefa, botao) => Acao::PedirAoAgente { tarefa, tipo: deck.tipo.clone(), periodo: deck.chave_nota.clone(), botao },
         comum::CliqueCartao::AbrirTarefa(tarefa) => Acao::AbrirTarefa { tarefa, agente: None, lousa: false },
-    }
+        comum::CliqueCartao::TirarDaDaily(_) => return None,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -169,6 +171,7 @@ enum Resposta {
     Grande { id: i64, resultado: Result<egui::ColorImage, String> },
     Salvo(Result<String, String>),
     Removido(Result<(), String>),
+    ForaDaDaily { fora: bool, resultado: Result<(), String> },
 }
 
 /// Imagem aberta em tamanho grande.
@@ -366,6 +369,12 @@ impl Registro {
         self.carregando = true;
         let antes = if primeira { 0 } else { self.proximo };
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::Pagina { chave, primeira, resultado: api::linha_do_tempo(chave.0, chave.1, antes) });
+    }
+
+    /// Tira a tarefa da daily de hoje (`fora`) ou traz de volta; a daily
+    /// busca de novo quando o núcleo confirma.
+    pub(super) fn tirar_da_daily(&mut self, ctx: &egui::Context, tarefa: i64, dia: String, fora: bool) {
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::ForaDaDaily { fora, resultado: api::tirar_da_daily(tarefa, &dia, fora) });
     }
 
     fn pedir_daily(&mut self, ctx: &egui::Context) {
@@ -595,6 +604,14 @@ impl Registro {
                         Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui salvar: {e}"))),
                     }
                 }
+                Resposta::ForaDaDaily { fora, resultado } => match resultado {
+                    Ok(()) => {
+                        let texto = if fora { "Tirada desta daily; a sprint continua com ela" } else { "De volta à daily" };
+                        acoes.push(Acao::Avisar(TipoAviso::Neutro, texto.into()));
+                        self.pedir_daily(ctx);
+                    }
+                    Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar a daily: {e}"))),
+                },
                 Resposta::Removido(resultado) => match resultado {
                     Ok(()) => {
                         if let Some(v) = self.visor.take() {

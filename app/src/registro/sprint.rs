@@ -132,10 +132,10 @@ impl Registro {
                     titulo_secao(ui, secao, secao.slides.len(), &mut self.rolar_secao, self.conectado, acoes);
                     ui.add_space(12.0);
                 }
-                let clique = comum::grade(ui, &secao.slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta);
+                let clique = comum::grade(ui, &secao.slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta, false);
                 if let Some(c) = clique {
                     let periodo = self.periodo_atual();
-                    acoes.push(super::acao_do_clique(c, &deck, periodo));
+                    acoes.extend(super::acao_do_clique(c, &deck, periodo));
                 }
                 ui.add_space(32.0 - 12.0);
             }

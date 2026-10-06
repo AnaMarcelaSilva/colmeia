@@ -124,6 +124,8 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 			ultimo = dia
 		}
 	}
+	// Escolhido o dia anterior, as tarefas tiradas da daily saem.
+	itens = c.semForaDaDaily(itens)
 	todos := func(int64) bool { return true }
 	r := m.daily(itens, ultimo, todos, c.VariosProjetos)
 	r.TempoAgentes = c.MostrarTempo
@@ -145,7 +147,9 @@ func Daily(eventos []dados.Evento, c Contexto) ResumoDaily {
 		}
 	}
 	for _, t := range c.Tarefas {
-		marcar(t.ProjetoID)
+		if !c.ForaDaDaily[t.ID] {
+			marcar(t.ProjetoID)
+		}
 	}
 	sort.Slice(projetos, func(i, j int) bool {
 		a, b := projetos[i], projetos[j]
@@ -247,7 +251,7 @@ func (m *montador) daily(itens []Item, ultimo string, incluir func(projeto int64
 	}
 	abertas := make([]TarefaAtual, 0, len(c.Tarefas))
 	for _, t := range c.Tarefas {
-		if incluir(t.ProjetoID) {
+		if incluir(t.ProjetoID) && !c.ForaDaDaily[t.ID] {
 			abertas = append(abertas, t)
 		}
 	}
@@ -330,10 +334,14 @@ func (m *montador) daily(itens []Item, ultimo string, incluir func(projeto int64
 	r.Texto = strings.Join(partesTexto, "\n")
 	if r.Texto == "" {
 		r.Vazio, r.Texto = true, fmt.Sprintf("Sem atividade nos últimos %d dias.", JanelaDaily)
+		if n := m.foraNoRecorte(incluir); n > 0 {
+			r.Texto = "Nada para falar: " + plural(n, "tarefa tirada", "tarefas tiradas") + " desta daily."
+		}
 	}
+	// O dia anterior vale mesmo que tudo dele tenha sido tirado da daily.
 	desde := "Hoje"
-	if r.Ontem != nil {
-		desde = "Desde " + rotuloDoDia(r.Ontem.Dia, ontemDeFato, fuso, false)
+	if ultimo != "" {
+		desde = "Desde " + rotuloDoDia(ultimo, ontemDeFato, fuso, false)
 	}
 	r.Periodo = desde
 	if e := c.escopo(); e != "" {
@@ -599,3 +607,15 @@ func textosSprint(r ResumoSprint) (string, string) {
 // deBanco: suas consultas e alterações no banco não fazem de um dia um dia
 // de trabalho nas tarefas (o pedido do agente, numa tarefa, faz).
 func deBanco(tipo string) bool { return tipo == TipoBanco || tipo == TipoBancoAlteracao }
+
+// foraNoRecorte conta as tarefas tiradas da daily de hoje nos projetos que
+// `incluir` aceita.
+func (m *montador) foraNoRecorte(incluir func(projeto int64) bool) int {
+	n := 0
+	for id := range m.c.ForaDaDaily {
+		if t, ok := m.c.Tarefas[id]; ok && incluir(t.ProjetoID) {
+			n++
+		}
+	}
+	return n
+}

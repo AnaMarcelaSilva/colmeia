@@ -46,6 +46,14 @@ pub struct TerminalAgente {
     rolagem_pendente: Cell<f32>,
     /// Pedir o teclado no próximo quadro (uma vez só): a gaveta de arquivos devolve o foco.
     focar: Cell<bool>,
+    /// Já passou pelo primeiro foco, que acerta o tamanho e pede ao programa
+    /// que redesenhe (veja `mostrar`).
+    redesenhou: bool,
+    /// Para reconectar no tamanho certo: o caminho sem o tamanho, a tela e o
+    /// contador de bytes.
+    base: String,
+    ctx: egui::Context,
+    bytes: Arc<AtomicU64>,
 }
 
 /// Tamanho do terminal em foco (colunas << 16 | linhas), ou 0 enquanto nenhum
@@ -95,9 +103,10 @@ impl TerminalAgente {
         // Nasce no tamanho do terminal em foco, que a conexão também informa ao
         // núcleo: o histórico chega desenhado na largura certa.
         let tamanho = tamanho_em_foco().map_or((80, 24), |(c, l)| (c as usize, l as usize));
+        let base = caminho;
         let caminho = match tamanho_em_foco() {
-            Some((c, l)) => format!("{caminho}?cols={c}&rows={l}"),
-            None => format!("{caminho}?"),
+            Some((c, l)) => format!("{base}?cols={c}&rows={l}"),
+            None => format!("{base}?"),
         };
         let term = Arc::new(Mutex::new(Term::new(Config { scrolling_history: 1000, ..Config::default() }, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
         let (envio, recebimento) = mpsc::channel();
@@ -105,10 +114,11 @@ impl TerminalAgente {
         let encerrado = Arc::new(AtomicBool::new(false));
         let encerrado_rede = encerrado.clone();
         let (despertador, alarme) = Despertador::novo();
+        let (ctx_rede, bytes_rede) = (ctx.clone(), bytes.clone());
         thread::spawn(move || {
-            conexao(&caminho, intervalo, term_rede, recebimento, alarme, &ctx, bytes);
+            conexao(&caminho, intervalo, term_rede, recebimento, alarme, &ctx_rede, bytes_rede);
             encerrado_rede.store(true, Ordering::Relaxed);
-            ctx.request_repaint();
+            ctx_rede.request_repaint();
         });
         Self {
             term,
@@ -121,6 +131,10 @@ impl TerminalAgente {
             area: Cell::new(None),
             rolagem_pendente: Cell::new(0.0),
             focar: Cell::new(false),
+            redesenhou: false,
+            base,
+            ctx,
+            bytes,
         }
     }
 
@@ -189,6 +203,15 @@ impl TerminalAgente {
         let margem = MARGEM;
         let (colunas, linhas, letra) = grade(ui, rect, tamanho_fonte);
 
+        if em_foco && !self.redesenhou && (colunas, linhas) != self.tamanho {
+            // Conectou antes de a tela saber o tamanho (a Colmeia acabou de
+            // abrir): o histórico foi desenhado em outra largura e embaralhou.
+            // Reconecta já no tamanho certo para ele chegar de novo.
+            guardar_tamanho_em_foco(colunas, linhas);
+            let focar = self.focar.get();
+            *self = Self::conectar(self.base.clone(), self.ctx.clone(), self.bytes.clone(), self.intervalo.get());
+            self.focar.set(focar);
+        }
         let mut term = self.term.lock().unwrap();
         if em_foco {
             guardar_tamanho_em_foco(colunas, linhas);
@@ -196,6 +219,15 @@ impl TerminalAgente {
                 self.tamanho = (colunas, linhas);
                 term.resize(TermSize::new(colunas, linhas));
                 self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+            }
+            if !self.redesenhou {
+                // Uma linha a menos e de volta: o programa recebe a mudança de
+                // tamanho e redesenha, como no Ctrl+L.
+                self.redesenhou = true;
+                if linhas > 1 {
+                    self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{}}}"#, linhas - 1)));
+                    self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+                }
             }
         }
         let linhas = self.tamanho.1;
