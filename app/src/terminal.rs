@@ -9,10 +9,11 @@ use std::thread;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use eframe::egui::{self, Color32, FontId, Sense, text::LayoutJob, text::TextFormat};
 use tungstenite::Message;
@@ -20,6 +21,8 @@ use tungstenite::Message;
 use crate::canal;
 use crate::tema::cores;
 
+/// O que separa as palavras no clique duplo.
+const SEPARADORES: &str = ",│`|\"' ()[]{}<>\t";
 const CONFIRMAR_A_CADA: usize = 64 * 1024;
 /// Por enquanto o terminal não precisa avisar nada à tela.
 pub struct Ouvinte;
@@ -120,7 +123,10 @@ impl TerminalAgente {
             Some((c, l)) => format!("{base}?cols={c}&rows={l}"),
             None => format!("{base}?"),
         };
-        let term = Arc::new(Mutex::new(Term::new(Config { scrolling_history: 1000, ..Config::default() }, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
+        // Dois cliques pegam a palavra; sem o ":" entre os separadores, um
+        // link ou um "arquivo.rs:120" vem inteiro.
+        let config = Config { scrolling_history: 1000, semantic_escape_chars: SEPARADORES.to_owned(), ..Config::default() };
+        let term = Arc::new(Mutex::new(Term::new(config, &TermSize::new(tamanho.0, tamanho.1), Ouvinte)));
         let (envio, recebimento) = mpsc::channel();
         let term_rede = term.clone();
         let encerrado = Arc::new(AtomicBool::new(false));
@@ -212,7 +218,7 @@ impl TerminalAgente {
     /// Desenha o terminal. Só o terminal `em_foco` muda o tamanho do terminal
     /// no núcleo; uma miniatura mostra a mesma grade com letra menor, cortada.
     pub fn mostrar(&mut self, ui: &mut egui::Ui, tamanho_fonte: f32, em_foco: bool) -> egui::Response {
-        let (rect, resposta) = ui.allocate_exact_size(ui.available_size(), Sense::click());
+        let (rect, resposta) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.area.set(Some(rect));
         let pintor = ui.painter_at(rect);
         pintor.rect_filled(rect, 0.0, cores().terminal_fundo);
@@ -287,9 +293,38 @@ impl TerminalAgente {
                 }
             }
         }
+        // Seleção com o mouse, como nos terminais comuns: arrastar seleciona,
+        // dois cliques pegam a palavra e três a linha. Os cliques nunca vão
+        // para o programa, então funciona mesmo quando ele pediu o mouse.
+        let deslocamento = term.grid().display_offset();
+        let celula = |pos| celula_em(pos, rect, letra, self.tamanho, deslocamento);
+        if resposta.drag_started() {
+            if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                let (ponto, lado) = celula(pos);
+                term.selection = Some(Selection::new(SelectionType::Simple, ponto, lado));
+            }
+        } else if resposta.triple_clicked() || resposta.double_clicked() {
+            let tipo = if resposta.triple_clicked() { SelectionType::Lines } else { SelectionType::Semantic };
+            if let Some(pos) = resposta.interact_pointer_pos() {
+                let (ponto, lado) = celula(pos);
+                term.selection = Some(Selection::new(tipo, ponto, lado));
+            }
+        } else if resposta.clicked() {
+            term.selection = None;
+        }
+        if resposta.dragged()
+            && let (Some(selecao), Some(pos)) = (term.selection.as_mut(), resposta.interact_pointer_pos())
+        {
+            let (ponto, lado) = celula(pos);
+            selecao.update(ponto, lado);
+        }
+        if resposta.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+
         // O terminal só recebe o teclado depois de clicado, como qualquer campo de
         // texto; assim a caixa de mensagem do painel e o terminal convivem.
-        if resposta.clicked() || self.focar.take() {
+        if resposta.clicked() || resposta.drag_started() || self.focar.take() {
             ui.memory_mut(|m| m.request_focus(resposta.id));
         }
         let com_teclado = ui.memory(|m| m.has_focus(resposta.id));
@@ -307,6 +342,8 @@ impl TerminalAgente {
         let mut trecho = String::new();
         let mut cor_trecho = cores().terminal_texto;
         let mut linha_atual = 0;
+        let selecao = conteudo.selection;
+        let fundo_selecao = cores().destaque.gamma_multiply(0.35);
         let desenhar = |trabalho: &mut LayoutJob, linha: i32| {
             let galeria = pintor.layout_job(std::mem::take(trabalho));
             let pos = rect.min + egui::vec2(margem, margem + linha as f32 * letra.y);
@@ -321,6 +358,11 @@ impl TerminalAgente {
             }
             if celula.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
+            }
+            if selecao.is_some_and(|s| s.contains(celula.point)) {
+                let largura = if celula.flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
+                let pos = rect.min + egui::vec2(margem + celula.point.column.0 as f32 * letra.x, margem + linha as f32 * letra.y);
+                pintor.rect_filled(egui::Rect::from_min_size(pos, egui::vec2(letra.x * largura, letra.y)), 0.0, fundo_selecao);
             }
             let cor = converter_cor(celula.fg, celula.flags);
             if cor != cor_trecho {
@@ -344,6 +386,13 @@ impl TerminalAgente {
                 pintor.rect_stroke(caixa, 0.0, (1.0, cor), egui::StrokeKind::Inside);
             }
         }
+        resposta.context_menu(|ui| {
+            let texto = term.selection_to_string().filter(|t| !t.is_empty());
+            if ui.add_enabled(texto.is_some(), egui::Button::new("Copiar")).clicked() {
+                ui.ctx().copy_text(texto.unwrap_or_default());
+                ui.close();
+            }
+        });
         resposta
     }
 
@@ -353,6 +402,7 @@ impl TerminalAgente {
         let cursor_de_aplicacao = term.mode().contains(TermMode::APP_CURSOR);
         let mut saida = Vec::new();
         let mut rolar: Option<Scroll> = None;
+        let mut copiar = None;
         ui.input(|i| {
             // Alt + tecla chega como texto; no terminal vira ESC antes da letra.
             let alt = i.modifiers.alt && !i.modifiers.ctrl;
@@ -368,9 +418,14 @@ impl TerminalAgente {
                         self.colou_texto_em.set(i.time);
                         saida.extend_from_slice(&colagem(t));
                     }
-                    // O egui transforma Ctrl+C e Ctrl+X em copiar e recortar; no terminal
-                    // eles são os de sempre (interromper, e o Ctrl+X dos editores).
-                    egui::Event::Copy => saida.push(0x03),
+                    // O egui transforma Ctrl+C e Ctrl+X em copiar e recortar. Com algo
+                    // selecionado, Ctrl+C (ou Ctrl+Shift+C) copia; sem seleção, eles são
+                    // os de sempre no terminal (interromper, e o Ctrl+X dos editores).
+                    egui::Event::Copy => match term.selection_to_string().filter(|t| !t.is_empty()) {
+                        Some(texto) => copiar = Some(texto),
+                        None if !i.modifiers.shift => saida.push(0x03),
+                        None => {}
+                    },
                     egui::Event::Cut => saida.push(0x18),
                     // Ctrl+V sem texto na área de transferência (uma imagem, por exemplo):
                     // o egui não avisa a colagem, só a tecla solta. O Ctrl+V vai para o
@@ -397,7 +452,12 @@ impl TerminalAgente {
         if let Some(r) = rolar {
             term.scroll_display(r);
         }
+        if let Some(texto) = copiar {
+            ui.ctx().copy_text(texto);
+            term.selection = None;
+        }
         if !saida.is_empty() {
+            term.selection = None;
             term.scroll_display(Scroll::Bottom);
             self.mandar(ParaNucleo::Digitacao(saida));
         }
@@ -483,6 +543,17 @@ fn sequencia(tecla: egui::Key, m: egui::Modifiers, cursor_de_aplicacao: bool) ->
         _ => return None,
     };
     Some(seq)
+}
+
+/// A célula sob o ponteiro, contando a rolagem do histórico, e o lado dela
+/// em que o ponteiro está (a seleção começa ou termina no meio da letra).
+fn celula_em(pos: egui::Pos2, rect: egui::Rect, letra: egui::Vec2, (colunas, linhas): (usize, usize), deslocamento: usize) -> (Point, Side) {
+    let x = ((pos.x - rect.min.x - MARGEM) / letra.x).max(0.0);
+    let y = ((pos.y - rect.min.y - MARGEM) / letra.y).max(0.0);
+    let coluna = (x as usize).min(colunas.saturating_sub(1));
+    let linha = (y as usize).min(linhas.saturating_sub(1));
+    let lado = if x.fract() < 0.5 && (x as usize) < colunas { Side::Left } else { Side::Right };
+    (viewport_to_point(deslocamento, Point::new(linha, Column(coluna))), lado)
 }
 
 /// Rodinha do mouse para um programa que pediu o mouse: `passos` positivos sobem.
@@ -807,6 +878,21 @@ mod testes {
         assert_eq!(rodinha(-2, (1, 1), true), b"\x1b[<65;1;1M\x1b[<65;1;1M");
         assert_eq!(rodinha(1, (300, 5), false), vec![0x1b, b'[', b'M', 96, 255, 37]);
         assert_eq!(rodinha(50, (1, 1), true).len(), 10 * b"\x1b[<64;1;1M".len());
+    }
+
+    #[test]
+    fn selecao_comeca_na_celula_do_ponteiro() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 400.0));
+        let letra = egui::vec2(10.0, 20.0);
+        // Coluna 2 (lado direito da letra), linha 1 da tela, sem rolagem.
+        let (ponto, lado) = celula_em(egui::pos2(100.0 + MARGEM + 27.0, 50.0 + MARGEM + 25.0), rect, letra, (80, 24), 0);
+        assert_eq!((ponto, lado), (Point::new(Line(1), Column(2)), Side::Right));
+        // Com o histórico rolado 10 linhas, a mesma linha da tela é 10 acima na grade.
+        let (ponto, _) = celula_em(egui::pos2(100.0 + MARGEM + 21.0, 50.0 + MARGEM + 25.0), rect, letra, (80, 24), 10);
+        assert_eq!(ponto, Point::new(Line(-9), Column(2)));
+        // Fora da grade, fica na borda.
+        let (ponto, lado) = celula_em(egui::pos2(5000.0, 5000.0), rect, letra, (80, 24), 0);
+        assert_eq!((ponto, lado), (Point::new(Line(23), Column(79)), Side::Right));
     }
 
     #[test]

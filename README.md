@@ -126,6 +126,7 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Enter, Shift+Enter ou Ctrl+Enter, ↑ ↓ | Na caixa de mensagem, envia, quebra a linha e navega pelas mensagens anteriores |
 | Ctrl+Enter, Esc | No console de banco, executa e cancela |
 | F5 / Shift+F5 | Apresenta / retoma do último slide |
+| Arrastar, dois ou três cliques, Ctrl+C | No terminal, seleciona o trecho, a palavra ou a linha e copia (sem seleção, o Ctrl+C interrompe o programa) |
 | Shift+F10 / Ctrl+F2 | Roda / para a configuração de execução escolhida (Play) |
 
 Na apresentação, as setas, PgUp/PgDn e Espaço passam os slides, N edita a nota, A adiciona foto ou vídeo, P pede ao agente, L alterna entre anexos e lousa, H esconde o slide e ? lista os demais atalhos.

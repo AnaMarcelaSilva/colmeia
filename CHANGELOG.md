@@ -7,6 +7,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 ### Novo
 
 - **Rodar o projeto (Play), como no IntelliJ:** configurações de execução por projeto (comando do shell, pasta e variáveis de ambiente), trazidas do IntelliJ (Go, Go test, Flutter, npm e Shell) ou sugeridas pelo `package.json`, `Makefile`, Cargo e Go. O botão Rodar fica no quadro do projeto e no topo da tarefa (roda na pasta dela); a saída aparece num painel embaixo, com Parar e Rodar de novo. Quem roda é o núcleo, então fechar a janela não para o programa. Uma execução que sai com erro avisa. Shift+F10 roda e Ctrl+F2 para.
+- **Copiar do terminal:** arrastar com o mouse seleciona, dois cliques pegam a palavra (um link ou caminho vem inteiro) e três a linha. Ctrl+C copia o que está selecionado (sem seleção, continua interrompendo o programa), assim como Ctrl+Shift+C e o "Copiar" do botão direito. Vale para os terminais dos agentes e para a saída do Play.
 - **Tirar uma tarefa da daily de hoje:** pelo menu do cartão ("Tirar desta daily") ou pelo H no modo apresentação da daily. Serve para o que já foi apresentado na reunião anterior. A tarefa sai do deck e do texto da daily daquele dia, fica listada no fim da página com "Trazer de volta", e continua na sprint e na linha do tempo. A daily de outro dia não muda.
 
 ### Mudou
