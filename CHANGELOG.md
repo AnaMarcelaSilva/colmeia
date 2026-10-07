@@ -6,6 +6,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Novo
 
+- **Rodar o projeto (Play), como no IntelliJ:** configurações de execução por projeto (comando do shell, pasta e variáveis de ambiente), trazidas do IntelliJ (Go, Go test, Flutter, npm e Shell) ou sugeridas pelo `package.json`, `Makefile`, Cargo e Go. O botão Rodar fica no quadro do projeto e no topo da tarefa (roda na pasta dela); a saída aparece num painel embaixo, com Parar e Rodar de novo. Quem roda é o núcleo, então fechar a janela não para o programa. Uma execução que sai com erro avisa. Shift+F10 roda e Ctrl+F2 para.
 - **Tirar uma tarefa da daily de hoje:** pelo menu do cartão ("Tirar desta daily") ou pelo H no modo apresentação da daily. Serve para o que já foi apresentado na reunião anterior. A tarefa sai do deck e do texto da daily daquele dia, fica listada no fim da página com "Trazer de volta", e continua na sprint e na linha do tempo. A daily de outro dia não muda.
 
 ### Mudou
@@ -15,6 +16,8 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Corrigido
 
+- **A nota do slide aparece inteira:** passava de 14 linhas e era cortada (com "…" em cima quando o agente tinha respondido um pedido). Agora usa o espaço livre e, se ainda não couber, rola dentro dela; respondido um pedido, começa no fim.
+- **A daily e a sprint fechavam a Colmeia** quando o nome do projeto (ou do recorte) era curto, como "loja".
 - **Terminal embaralhado ao reabrir a Colmeia:** os terminais conectavam antes de a tela saber o tamanho deles, e o histórico chegava desenhado em 80 colunas. Agora, se o primeiro tamanho em foco for outro, o terminal reconecta já no tamanho certo e pede ao programa que redesenhe.
 - **Recolher um workspace na barra lateral** só escondia os projetos quando o mouse mexia; agora esconde na hora.
 

@@ -555,7 +555,7 @@ func TestMigracaoDeUmBancoV3(t *testing.T) {
 	defer b2.Fechar()
 	var versao int
 	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 6 {
+	if versao != 7 {
 		t.Errorf("versão do banco: %d", versao)
 	}
 	a, err := b2.Anexo(ctx, 1)

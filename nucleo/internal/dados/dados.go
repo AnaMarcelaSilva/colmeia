@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS fora_da_daily (
 	dia TEXT NOT NULL,
 	PRIMARY KEY (tarefa_id, dia)
 );
+-- Configurações de execução de um projeto (o "Play"): um comando do shell,
+-- rodado numa subpasta do projeto (ou da tarefa) com variáveis de ambiente.
+CREATE TABLE IF NOT EXISTS comandos (
+	id INTEGER PRIMARY KEY,
+	projeto_id INTEGER NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
+	nome TEXT NOT NULL,
+	comando TEXT NOT NULL,
+	pasta TEXT NOT NULL DEFAULT '',
+	ambiente TEXT NOT NULL DEFAULT '[]',
+	origem TEXT NOT NULL CHECK (origem IN ('voce', 'intellij', 'projeto')),
+	criado_em TEXT NOT NULL,
+	UNIQUE (projeto_id, nome)
+);
 `
 
 // colunasAnexos é a definição da tabela anexos desde a versão 3 do banco
@@ -312,6 +325,12 @@ func migrar(db *sql.DB) error {
 	// Versão 6: tarefas tiradas da daily de um dia (tabela criada pelo esquema).
 	if versao < 6 {
 		if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
+			return err
+		}
+	}
+	// Versão 7: configurações de execução dos projetos (tabela criada pelo esquema).
+	if versao < 7 {
+		if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
 			return err
 		}
 	}

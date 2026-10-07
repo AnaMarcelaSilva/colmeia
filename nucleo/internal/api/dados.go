@@ -37,6 +37,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/tarefas/{id}", s.atualizarTarefa)
 	mux.HandleFunc("DELETE /v1/tarefas/{id}", s.removerTarefa)
 	s.rotasAgentes(mux)
+	s.rotasComandos(mux)
 	s.rotasAnexos(mux)
 	s.rotasLinha(mux)
 	s.rotasMensagens(mux)
@@ -317,6 +318,12 @@ func (s *Servidor) removerProjeto(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		responderErro(w, err)
 		return
+	}
+	// As execuções do Play do projeto param junto.
+	if comandos, err := s.Banco.ListarComandos(r.Context(), id); err == nil {
+		for _, c := range comandos {
+			s.Execucoes.Fechar(c.ID)
+		}
 	}
 	for _, t := range tarefas {
 		if err := s.fecharAgentesDaTarefa(r.Context(), t.ID); err != nil {

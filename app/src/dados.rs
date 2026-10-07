@@ -524,6 +524,24 @@ pub enum Evento {
         #[serde(default)]
         recolhido: bool,
     },
+    /// Uma configuração de execução do Play começou ou terminou (fora da
+    /// corrente: não entra na linha do tempo).
+    #[serde(rename = "comando.iniciou")]
+    ComandoIniciou { seq: u64, comando_id: i64, projeto_id: i64 },
+    #[serde(rename = "comando.terminou")]
+    ComandoTerminou {
+        seq: u64,
+        comando_id: i64,
+        projeto_id: i64,
+        #[serde(default)]
+        codigo: i32,
+        #[serde(default)]
+        parada: bool,
+        #[serde(default)]
+        hora: String,
+    },
+    #[serde(rename = "comando.removido")]
+    ComandoRemovido { seq: u64, comando_id: i64, projeto_id: i64 },
     #[serde(other)]
     Desconhecido,
 }
@@ -556,7 +574,10 @@ impl Evento {
             | Evento::ConexaoMudou { seq, .. }
             | Evento::BancoConsulta { seq, .. }
             | Evento::PerfilTempoAgentes { seq, .. }
-            | Evento::WorkspaceRecolhido { seq, .. } => *seq,
+            | Evento::WorkspaceRecolhido { seq, .. }
+            | Evento::ComandoIniciou { seq, .. }
+            | Evento::ComandoTerminou { seq, .. }
+            | Evento::ComandoRemovido { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -569,6 +590,7 @@ impl Evento {
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
+            Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
             _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido),
         }
     }
@@ -630,6 +652,10 @@ impl Modelo {
             | Evento::NotaAtualizada { .. }
             | Evento::DailyFora { .. }
             | Evento::NavegadorCaptura { .. }
+            // O Play cuida (veja execucao.rs).
+            | Evento::ComandoIniciou { .. }
+            | Evento::ComandoTerminou { .. }
+            | Evento::ComandoRemovido { .. }
             // A tela principal aplica no perfil (e o registro busca de novo).
             | Evento::PerfilTempoAgentes { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).

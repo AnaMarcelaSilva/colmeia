@@ -36,8 +36,11 @@ type Servidor struct {
 	// terminais dos agentes de verdade, que aparecem e somem.
 	Sessoes []*terminal.Sessao
 	Agentes *terminal.Gerente
-	Bytes   *atomic.Int64
-	Versao  string
+	// Execucoes são os terminais do "Play" (as configurações de execução dos
+	// projetos), pelo id da configuração.
+	Execucoes *terminal.Gerente
+	Bytes     *atomic.Int64
+	Versao    string
 	// Demo liga as cargas de teste, que escrevem comandos nos terminais.
 	Demo bool
 	// Banco guarda perfis, projetos e tarefas; DirDados é onde ele e as contas
@@ -94,6 +97,9 @@ func (s *Servidor) Rotas() http.Handler {
 	mux.HandleFunc("GET /v1/terminais/{id}", s.terminal)
 	if s.Agentes == nil {
 		s.Agentes = terminal.NovoGerente()
+	}
+	if s.Execucoes == nil {
+		s.Execucoes = terminal.NovoGerente()
 	}
 	if s.Avisos == nil {
 		s.Avisos = avisos.Novo()

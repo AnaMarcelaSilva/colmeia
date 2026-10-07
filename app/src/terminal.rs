@@ -54,6 +54,9 @@ pub struct TerminalAgente {
     base: String,
     ctx: egui::Context,
     bytes: Arc<AtomicU64>,
+    /// Terminal com tamanho próprio (o do Play): não decide o tamanho dos
+    /// terminais dos agentes nem nasce no deles.
+    independente: bool,
 }
 
 /// Tamanho do terminal em foco (colunas << 16 | linhas), ou 0 enquanto nenhum
@@ -100,11 +103,20 @@ impl TerminalAgente {
     /// Liga a tela ao terminal do núcleo em `caminho` (o WebSocket de um agente
     /// ou, na demonstração, de um terminal de teste).
     pub fn conectar(caminho: String, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32) -> Self {
+        Self::conectar_com(caminho, ctx, bytes, intervalo, tamanho_em_foco(), false)
+    }
+
+    /// Um terminal com tamanho próprio, fora da regra do terminal em foco.
+    pub fn conectar_independente(caminho: String, ctx: egui::Context, bytes: Arc<AtomicU64>) -> Self {
+        Self::conectar_com(caminho, ctx, bytes, TEMPO_REAL, None, true)
+    }
+
+    fn conectar_com(caminho: String, ctx: egui::Context, bytes: Arc<AtomicU64>, intervalo: u32, inicial: Option<(u16, u16)>, independente: bool) -> Self {
         // Nasce no tamanho do terminal em foco, que a conexão também informa ao
         // núcleo: o histórico chega desenhado na largura certa.
-        let tamanho = tamanho_em_foco().map_or((80, 24), |(c, l)| (c as usize, l as usize));
+        let tamanho = inicial.map_or((80, 24), |(c, l)| (c as usize, l as usize));
         let base = caminho;
-        let caminho = match tamanho_em_foco() {
+        let caminho = match inicial {
             Some((c, l)) => format!("{base}?cols={c}&rows={l}"),
             None => format!("{base}?"),
         };
@@ -135,6 +147,7 @@ impl TerminalAgente {
             base,
             ctx,
             bytes,
+            independente,
         }
     }
 
@@ -142,6 +155,11 @@ impl TerminalAgente {
         if self.envio.send(msg).is_ok() {
             self.despertador.acordar();
         }
+    }
+
+    /// Colunas e linhas do terminal agora.
+    pub fn tamanho(&self) -> (u16, u16) {
+        (self.tamanho.0.min(u16::MAX as usize) as u16, self.tamanho.1.min(u16::MAX as usize) as u16)
     }
 
     /// O retângulo onde o terminal foi desenhado no último quadro (para a captura).
@@ -207,14 +225,19 @@ impl TerminalAgente {
             // Conectou antes de a tela saber o tamanho (a Colmeia acabou de
             // abrir): o histórico foi desenhado em outra largura e embaralhou.
             // Reconecta já no tamanho certo para ele chegar de novo.
-            guardar_tamanho_em_foco(colunas, linhas);
+            if !self.independente {
+                guardar_tamanho_em_foco(colunas, linhas);
+            }
             let focar = self.focar.get();
-            *self = Self::conectar(self.base.clone(), self.ctx.clone(), self.bytes.clone(), self.intervalo.get());
+            let tamanho = Some((colunas.min(u16::MAX as usize) as u16, linhas.min(u16::MAX as usize) as u16));
+            *self = Self::conectar_com(self.base.clone(), self.ctx.clone(), self.bytes.clone(), self.intervalo.get(), tamanho, self.independente);
             self.focar.set(focar);
         }
         let mut term = self.term.lock().unwrap();
         if em_foco {
-            guardar_tamanho_em_foco(colunas, linhas);
+            if !self.independente {
+                guardar_tamanho_em_foco(colunas, linhas);
+            }
             if (colunas, linhas) != self.tamanho {
                 self.tamanho = (colunas, linhas);
                 term.resize(TermSize::new(colunas, linhas));

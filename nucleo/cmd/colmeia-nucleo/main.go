@@ -141,6 +141,7 @@ func main() {
 	// Fechar o terminal avisa cada agente, que tem uns segundos para salvar a
 	// conversa; o fim de cada um é gravado antes de o banco fechar.
 	agentes.FecharTodos()
+	servidor.Execucoes.FecharTodos()
 	servidor.Navegadores.FecharTodos()
 	servidor.Encerrar()
 	for _, s := range sessoes {

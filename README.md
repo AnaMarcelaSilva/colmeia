@@ -89,6 +89,10 @@ Todo Claude Code iniciado pela Colmeia recebe ferramentas próprias via MCP, res
 
 O **navegador da tarefa** é um Chrome com perfil próprio, separado do seu, que abre ao lado da janela e pode ser capturado com Ctrl+Shift+B. A gaveta de **arquivos** (Ctrl+Shift+E) mostra a pasta da tarefa em modo somente leitura, com pré-visualização de texto e imagem, e pede confirmação antes de mostrar `.env` e chaves.
 
+### Rodar o projeto (Play)
+
+Como no IntelliJ, cada projeto tem **configurações de execução**: um comando do shell, a pasta onde ele roda e as variáveis de ambiente. A Colmeia traz as configurações do IntelliJ (Go, Go test, Flutter, npm e Shell, de `.idea/workspace.xml` e `.run/`) e sugere as do `package.json`, do `Makefile`, do Cargo e do Go. O botão **Rodar** fica no quadro do projeto e no topo da tarefa (lá, roda na pasta da tarefa); a saída aparece num painel embaixo, com Parar e Rodar de novo, e quem roda é o núcleo: fechar a janela não para o programa. Shift+F10 roda e Ctrl+F2 para.
+
 ### Lousa
 
 ![A lousa do workspace: notas em markdown, um trecho de terminal, uma tabela, um cartão de tarefa e as ligações tracejadas entre eles](docs/imagens/lousa.png)
@@ -119,9 +123,10 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
 | Ctrl+Esc | Volta ao quadro |
-| Enter, Shift+Enter, ↑ ↓ | Na caixa de mensagem, envia, quebra a linha e navega pelas mensagens anteriores |
+| Enter, Shift+Enter ou Ctrl+Enter, ↑ ↓ | Na caixa de mensagem, envia, quebra a linha e navega pelas mensagens anteriores |
 | Ctrl+Enter, Esc | No console de banco, executa e cancela |
 | F5 / Shift+F5 | Apresenta / retoma do último slide |
+| Shift+F10 / Ctrl+F2 | Roda / para a configuração de execução escolhida (Play) |
 
 Na apresentação, as setas, PgUp/PgDn e Espaço passam os slides, N edita a nota, A adiciona foto ou vídeo, P pede ao agente, L alterna entre anexos e lousa, H esconde o slide e ? lista os demais atalhos.
 

@@ -239,8 +239,9 @@ enum Tom {
     Alerta,
 }
 
-/// Linhas da nota no slide: pelo menos estas, e até estas quando sobra espaço.
-const LINHAS_NOTA: (usize, usize) = (4, 14);
+/// Linhas da nota no slide: pelo menos estas; acima disso, o espaço que sobra.
+/// O que passar dele rola dentro da nota.
+const LINHAS_NOTA: usize = 4;
 
 /// A nota é o roteiro da fala: o maior texto da coluna.
 const FONTE_NOTA: f32 = 22.0;
@@ -280,16 +281,15 @@ fn altura_feito(slide: &api::Slide, s: f32, aberto: bool) -> f32 {
 fn linhas_que_cabem(pintor: &egui::Painter, livre: f32) -> usize {
     let linha = pintor.layout_no_wrap("Ág".into(), FontId::proportional(FONTE_NOTA), Color32::WHITE).size().y.max(1.0);
     let cabem = ((livre - RODAPE_NOTA - 20.0) / linha).floor().max(0.0) as usize;
-    cabem.clamp(LINHAS_NOTA.0, LINHAS_NOTA.1)
+    cabem.max(LINHAS_NOTA)
 }
 
 /// A nota lida no slide, com o markdown da lousa (títulos, negrito, itálico,
-/// código, listas e tabelas simples), em até `linhas`. `pelo_fim` mostra o
-/// fim quando não cabe (a resposta do agente vem no fim), com "…" em cima.
-fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f32, linhas: usize, pelo_fim: bool) -> std::sync::Arc<egui::Galley> {
+/// código, listas e tabelas simples), em até `linhas` (`usize::MAX`: inteira).
+fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f32, linhas: usize) -> std::sync::Arc<egui::Galley> {
     use lousa::markdown::{Bloco, Marcador, Trecho, ler};
     let blocos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
-    let montar = |blocos: &[Bloco], cortado: bool, max: usize| {
+    let montar = |blocos: &[Bloco], max: usize| {
         let p = cores();
         let normal = FontId::proportional(FONTE_NOTA);
         let mut job = egui::text::LayoutJob::default();
@@ -304,9 +304,6 @@ fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f3
                 job.append(&t.texto, 0.0, f);
             }
         };
-        if cortado {
-            job.append("…\n", 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
-        }
         for (i, b) in blocos.iter().enumerate() {
             if i > 0 {
                 job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
@@ -356,17 +353,7 @@ fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f3
         job.wrap = egui::text::TextWrapping { max_width: largura.max(10.0), max_rows: max, break_anywhere: false, overflow_character: Some('…') };
         pintor.layout_job(job)
     };
-    let linhas = linhas.max(1);
-    if pelo_fim {
-        // Tira blocos do começo até o resto caber.
-        for inicio in 0..blocos.len() {
-            let g = montar(&blocos[inicio..], inicio > 0, usize::MAX);
-            if g.rows.len() <= linhas {
-                return g;
-            }
-        }
-    }
-    montar(&blocos, false, linhas)
+    montar(&blocos, linhas.max(1))
 }
 
 pub struct Apresentacao {
@@ -1793,7 +1780,7 @@ impl Apresentacao {
             topo_nota += altura_pedido;
         }
         let area_nota = Rect::from_min_size(pos2(area.left(), topo_nota), vec2(largura, altura_nota - altura_pedido));
-        self.notas(ui, area_nota, slide, s, linhas_nota, pelo_fim);
+        self.notas(ui, area_nota, slide, s, pelo_fim);
     }
 
     /// Altura do bloco de notas: o campo em edição, a nota (até `linhas`)
@@ -1811,11 +1798,11 @@ impl Apresentacao {
             (Some(a), true) => (a.texto.as_str(), 20.0),
             _ => (slide.nota.as_str(), 0.0),
         };
-        let g = nota_formatada(pintor, texto, cores().texto, largura - 15.0, linhas, false);
+        let g = nota_formatada(pintor, texto, cores().texto, largura - 15.0, linhas);
         prefixo + g.size().y + RODAPE_NOTA
     }
 
-    fn notas(&mut self, ui: &mut egui::Ui, area: Rect, slide: &api::Slide, s: f32, linhas: usize, pelo_fim: bool) {
+    fn notas(&mut self, ui: &mut egui::Ui, area: Rect, slide: &api::Slide, s: f32, pelo_fim: bool) {
         if area.height() <= 0.0 {
             // Em tela cheia sem nota, nada aparece; o N ainda abre o campo.
             if std::mem::take(&mut self.focar_nota) {
@@ -1877,7 +1864,7 @@ impl Apresentacao {
         // Com o "Desfazer" de um anexo na tela, o clique não abre a nota.
         let sentido = if self.remocao.is_some() { Sense::hover() } else { Sense::click() };
         let resposta = ui.interact(corpo, Id::new(("nota-ler", tarefa)), sentido).on_hover_cursor(egui::CursorIcon::Text);
-        let pintor = ui.painter();
+        let pintor = ui.painter().clone();
         // O estado da gravação fica logo abaixo da última linha, alinhado ao texto.
         let mut fim_texto = pos2(corpo.left(), corpo.top() + 44.0 * s);
         if !slide.nota.is_empty() || slide.nota_anterior.is_some() {
@@ -1890,11 +1877,28 @@ impl Apresentacao {
                 pintor.text(pos2(corpo.left() + 15.0, y), egui::Align2::LEFT_TOP, prefixo, fonte_estado.clone(), p.suave);
                 y += 20.0;
             }
-            // A nota de outro período não é a que o agente complementou.
-            let g = nota_formatada(pintor, texto, cor, corpo.width() - 15.0, linhas, pelo_fim && !slide.nota.is_empty());
-            let altura = g.size().y;
+            // A nota sempre inteira: o que não cabe no espaço livre rola
+            // dentro dela. Respondido um pedido, começa no fim (a resposta do
+            // agente vem embaixo); a nota de outro período, não.
+            let g = nota_formatada(&pintor, texto, cor, corpo.width() - 15.0 - 12.0, usize::MAX);
+            let cabe = (corpo.bottom() - y - RODAPE_NOTA).max(FONTE_NOTA * 2.0);
+            let altura = g.size().y.min(cabe);
             pintor.rect_filled(Rect::from_min_size(pos2(corpo.left(), y), vec2(3.0, altura)), CornerRadius::same(2), p.destaque);
-            pintor.galley(pos2(corpo.left() + 15.0, y), g, cor);
+            if g.size().y <= cabe {
+                pintor.galley(pos2(corpo.left() + 15.0, y), g, cor);
+            } else {
+                let caixa = Rect::from_min_size(pos2(corpo.left() + 15.0, y), vec2(corpo.width() - 15.0, altura));
+                let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::top_down(egui::Align::Min)));
+                egui::ScrollArea::vertical()
+                    .id_salt(("nota-rolagem", tarefa))
+                    .max_height(altura)
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(pelo_fim && !slide.nota.is_empty())
+                    .show(&mut filho, |ui| {
+                        let (rect, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                        ui.painter().galley(rect.min, g, cor);
+                    });
+            }
             fim_texto = pos2(corpo.left() + 15.0, y + altura);
         } else if !self.tela_cheia {
             pintor.text(corpo.left_top(), egui::Align2::LEFT_TOP, "Escreva uma nota para esta tarefa (N)", FontId::proportional(15.0), p.suave);

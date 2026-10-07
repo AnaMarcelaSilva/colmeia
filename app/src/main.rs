@@ -17,6 +17,7 @@ mod dados;
 mod dialogos;
 mod entrada;
 mod eventos;
+mod execucao;
 mod gaveta;
 mod lousa;
 mod pedido;
@@ -289,6 +290,8 @@ struct Colmeia {
     /// onde Ctrl+Shift+K veio e o que você está fazendo em cada pedido de
     /// consulta de um agente.
     banco: banco::Bancos,
+    /// O "Play" dos projetos: configurações de execução e o painel da saída.
+    play: execucao::Play,
     tela_antes_do_banco: Option<Tela>,
     pedidos_consulta: HashMap<String, banco::aprovacao::Estado>,
     carga: &'static str,
@@ -373,6 +376,7 @@ impl Colmeia {
             area_lousa: None,
             palco: None,
             banco: banco::Bancos::novo(0),
+            play: execucao::Play::default(),
             tela_antes_do_banco: None,
             pedidos_consulta: HashMap::new(),
             carga: "parada",
@@ -532,6 +536,7 @@ impl Colmeia {
                         self.navegador = None;
                         // E se há chaveiro (o diálogo de senha diz onde ela vai ficar).
                         self.banco.recarregar(ctx);
+                        self.play.recarregar();
                     }
                     self.conexao = Conexao::Ligado;
                     linha_mudou = true;
@@ -581,6 +586,9 @@ impl Colmeia {
                         a.atualizar_pelo_agente(ctx);
                     }
                     estado_mudou |= matches!(e, dados::Evento::AgenteEstado { .. });
+                    if let Some((tipo, texto)) = self.play.evento(&e) {
+                        self.avisar(tipo, &texto, agora);
+                    }
                     for efeito in self.modelo.aplicar(e) {
                         match efeito {
                             Efeito::Conectar(id) => {
@@ -1311,6 +1319,7 @@ impl Colmeia {
             _ => None,
         };
         let mut avisar = None;
+        let mut avisar_play = None;
         let mut apresentar = false;
         let mut mudar_tempo = None;
         let mut barra_arranjo: Option<ArranjoBarra> = None;
@@ -1344,7 +1353,8 @@ impl Colmeia {
                     let natural = tema::largura_chip(ui, "Ver", &valor);
                     let livre = ui.available_width() - 8.0;
                     let arranjo = self.arranjo_barra(ui, aba, livre, natural);
-                    let maximo = (livre - arranjo.largura).clamp(CHIP_VER_MINIMO, natural);
+                    // Um chip curto ("Ver: loja") já é menor que o mínimo: fica no natural.
+                    let maximo = (livre - arranjo.largura).clamp(CHIP_VER_MINIMO.min(natural), natural);
                     self.chip_ver(ui, maximo);
                     barra_arranjo = Some(arranjo);
                 }
@@ -1512,6 +1522,17 @@ impl Colmeia {
                                 self.dialogo = Some(Dialogo::NovaTarefa(dialogos::NovaTarefa::new(projeto, outros)));
                             }
                         }
+                        // O Play do projeto em foco (num workspace ou em todos, não há um só),
+                        // à esquerda do "+ Nova tarefa".
+                        if !self.demo
+                            && let Some(projeto) = self.projeto_em_foco().map(|p| (p.id, p.nome.clone()))
+                        {
+                            ui.add_space(8.0);
+                            let bytes = self.bytes.clone();
+                            if let Some((tipo, texto)) = self.play.botao(ui, &bytes, projeto.0, &projeto.1, 0, self.pode_mudar()) {
+                                avisar_play = Some((tipo, texto));
+                            }
+                        }
                     }
                 }
             });
@@ -1522,6 +1543,9 @@ impl Colmeia {
         }
         if let Some(texto) = avisar {
             self.avisar(TipoAviso::Neutro, texto, agora);
+        }
+        if let Some((tipo, texto)) = avisar_play {
+            self.avisar(tipo, &texto, agora);
         }
         if apresentar {
             self.apresentar(ui.ctx(), Inicio::Capa, true);
@@ -1953,6 +1977,7 @@ impl Colmeia {
         let (mut voltar, mut novo_agente, mut abrir_editor) = (false, false, false);
         let (mut alternar_gaveta, mut clique_navegador, mut menu_navegador) = (false, None, None);
         let mut alternar_lousa = false;
+        let mut aviso_play = None;
         let gaveta_aberta = self.gaveta == Some(id);
         let lousa_aberta = self.lousa_na_tarefa.contains(&id);
         let novidade_na_lousa = self.novidade_na_lousa.contains(&id);
@@ -1981,6 +2006,7 @@ impl Colmeia {
                 // "+ Agente" sempre: com ou sem agente, é o caminho para abrir um.
                 reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
                 reservado += tema::largura_botao_dividido(&pintor, "Navegador") + 6.0 + espaco;
+                reservado += self.play.largura_botao(&pintor, tarefa.projeto_id) + 6.0 + espaco;
                 // Os chips medem sempre em negrito (a largura não muda ao ligar).
                 reservado += medir("Arquivos", tema::forte(13.0)) + 28.0 + espaco;
                 reservado += medir("Lousa", tema::forte(13.0)) + 28.0 + 6.0 + espaco;
@@ -2054,6 +2080,11 @@ impl Colmeia {
                         ui.close();
                     }
                 });
+                // O Play do projeto, na pasta da tarefa.
+                ui.add_space(6.0);
+                let nome_projeto = self.modelo.projetos.iter().find(|p| p.id == tarefa.projeto_id).map(|p| p.nome.clone()).unwrap_or_default();
+                let bytes = self.bytes.clone();
+                aviso_play = self.play.botao(ui, &bytes, tarefa.projeto_id, &nome_projeto, tarefa.id, pode);
                 ui.add_space(6.0);
                 alternar_gaveta = tema::chip_alternar(ui, "Arquivos", gaveta_aberta).on_hover_text("Arquivos da pasta da tarefa (Ctrl+Shift+E)").clicked();
                 ui.add_space(6.0);
@@ -2082,6 +2113,9 @@ impl Colmeia {
         }
         if alternar_gaveta {
             self.alternar_gaveta(id, ui.ctx());
+        }
+        if let Some((tipo, texto)) = aviso_play {
+            self.avisar(tipo, &texto, agora);
         }
         if alternar_lousa {
             self.alternar_lousa_da_tarefa(id);
@@ -2538,6 +2572,31 @@ impl Colmeia {
             return;
         }
         let atalho = |tecla| ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, tecla));
+        // O Play, com as teclas do IntelliJ: Shift+F10 roda, Ctrl+F2 para. Na
+        // tarefa, roda na pasta dela; no quadro, no projeto em foco.
+        if !self.play.dialogo_aberto() && self.pode_mudar() {
+            let onde = match self.tela {
+                Tela::Tarefa { id, .. } => self.modelo.tarefas.iter().find(|t| t.id == id).map(|t| (t.projeto_id, t.id)),
+                Tela::Quadro => self.projeto_em_foco().map(|p| (p.id, 0)),
+                _ => None,
+            };
+            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F10))
+                && let Some((projeto, tarefa)) = onde
+            {
+                let nome = self.modelo.projetos.iter().find(|p| p.id == projeto).map(|p| p.nome.clone()).unwrap_or_default();
+                let bytes = self.bytes.clone();
+                if let Some((tipo, texto)) = self.play.rodar_escolhida(ctx, &bytes, projeto, &nome, tarefa) {
+                    let agora = ctx.input(|i| i.time);
+                    self.avisar(tipo, &texto, agora);
+                }
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F2))
+                && let Some((tipo, texto)) = self.play.parar_atual(onde.map(|o| o.0))
+            {
+                let agora = ctx.input(|i| i.time);
+                self.avisar(tipo, &texto, agora);
+            }
+        }
         // Ctrl+Shift+K: os bancos de dados; de novo, volta para onde estava.
         if atalho(Key::K) {
             self.alternar_banco(false);
@@ -3544,6 +3603,23 @@ impl eframe::App for Colmeia {
             .frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin::symmetric(20, 10)))
             .show(ui, |ui| self.topo(ui, agora));
 
+        // A saída do Play, embaixo, em todas as telas (a altura muda pela borda).
+        if self.play.painel.is_some() && !self.demo {
+            let mut aviso = None;
+            let pode = self.pode_mudar();
+            let bytes = self.bytes.clone();
+            egui::Panel::bottom("play")
+                .resizable(true)
+                .default_size(260.0)
+                .min_size(120.0)
+                .show_separator_line(true)
+                .frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 }))
+                .show(ui, |ui| aviso = self.play.mostrar_painel(ui, &bytes, pode));
+            if let Some((tipo, texto)) = aviso {
+                self.avisar(tipo, &texto, agora);
+            }
+        }
+
         let mut acoes = Vec::new();
         let mut acoes_linha = Vec::new();
         let mut acoes_lousa = None;
@@ -3675,6 +3751,7 @@ impl eframe::App for Colmeia {
             self.gaveta = None;
         }
 
+        self.play.mostrar_dialogo(&ctx);
         if let Some(dialogo) = &mut self.dialogo {
             let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
             let resultado = dialogo.mostrar(&ctx, perfil);

@@ -116,6 +116,9 @@ type Sessao struct {
 	atividade    *atividade
 	aoMudar      func(Mudanca)
 	encerradaPor atomic.Value // string: quem da Colmeia fechou
+
+	// Fim de um terminal sem acompanhamento (as execuções do projeto).
+	aoTerminar func(Saida, string)
 }
 
 func NovaSessao(id int64, pty Pty, bytes *atomic.Int64) *Sessao {
@@ -128,6 +131,12 @@ func NovaSessao(id int64, pty Pty, bytes *atomic.Int64) *Sessao {
 // quando o agente trabalha, para ou parece esperar você. Chamar antes de Ler.
 func (s *Sessao) Acompanhar(ferramenta string, tempos Tempos) {
 	s.atividade = novaAtividade(ferramenta, tempos, s.ultimos, s.avisar)
+}
+
+// AoTerminar avisa como o programa saiu (e se foi a Colmeia que fechou),
+// num terminal sem acompanhamento. Chamar antes de Ler.
+func (s *Sessao) AoTerminar(f func(saida Saida, pelaColmeia string)) {
+	s.aoTerminar = f
 }
 
 func (s *Sessao) avisar(m Mudanca) {
@@ -275,6 +284,11 @@ func (s *Sessao) marcarEntrada() {
 // terminou espera o processo sair e avisa como foi.
 func (s *Sessao) terminou() {
 	if s.atividade == nil {
+		if s.aoTerminar != nil {
+			saida := s.pty.Esperar()
+			por, _ := s.encerradaPor.Load().(string)
+			s.aoTerminar(saida, por)
+		}
 		return
 	}
 	saida := s.pty.Esperar()
@@ -485,6 +499,14 @@ func (g *Gerente) Pegar(id int64) (*Sessao, bool) {
 func (g *Gerente) Ativa(id int64) bool {
 	s, ok := g.Pegar(id)
 	return ok && !s.Encerrada()
+}
+
+// Parar encerra o programa do terminal do id, mas guarda o terminal (com o
+// que foi escrito) para a tela continuar vendo.
+func (g *Gerente) Parar(id int64) {
+	if s, ok := g.Pegar(id); ok && !s.Encerrada() {
+		s.fecharPor(PelaRemocao)
+	}
 }
 
 // Fechar encerra e esquece o terminal do id, se houver.

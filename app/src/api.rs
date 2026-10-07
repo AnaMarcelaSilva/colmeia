@@ -1113,6 +1113,119 @@ pub fn tirar_da_daily(tarefa: i64, dia: &str, fora: bool) -> Result<(), String> 
     }
 }
 
+// Play: configurações de execução dos projetos
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Variavel {
+    pub nome: String,
+    pub valor: String,
+}
+
+/// O que se escreve numa configuração de execução.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct CamposComando {
+    pub nome: String,
+    pub comando: String,
+    #[serde(default)]
+    pub pasta: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub ambiente: Vec<Variavel>,
+}
+
+/// Como terminou a última execução.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct FimExecucao {
+    #[serde(default)]
+    pub codigo: i32,
+    #[serde(default)]
+    pub parada: bool,
+    #[serde(default)]
+    pub hora: String,
+}
+
+/// Uma configuração de execução e o estado dela agora.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Comando {
+    pub id: i64,
+    pub projeto_id: i64,
+    #[serde(flatten)]
+    pub campos: CamposComando,
+    #[serde(default)]
+    pub origem: String,
+    #[serde(default)]
+    pub rodando: bool,
+    #[serde(default)]
+    pub desde: String,
+    #[serde(default)]
+    pub onde: String,
+    /// A tarefa em cuja pasta rodou pela última vez (0: a do projeto).
+    #[serde(default)]
+    pub tarefa_id: i64,
+    #[serde(default)]
+    pub fim: Option<FimExecucao>,
+}
+
+/// Uma configuração achada no IntelliJ ou nos arquivos do projeto.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Sugestao {
+    #[serde(flatten)]
+    pub campos: CamposComando,
+    #[serde(default)]
+    pub origem: String,
+    #[serde(default)]
+    pub fonte: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Sugestoes {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub sugestoes: Vec<Sugestao>,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub nao_suportadas: Vec<String>,
+}
+
+pub fn comandos(projeto: i64) -> Result<Vec<Comando>, String> {
+    chamar::<Option<Vec<Comando>>>("GET", &format!("/v1/projetos/{projeto}/comandos"), None).map(Option::unwrap_or_default)
+}
+
+pub fn sugestoes_de_comandos(projeto: i64) -> Result<Sugestoes, String> {
+    chamar("GET", &format!("/v1/projetos/{projeto}/comandos/sugestoes"), None)
+}
+
+pub fn criar_comando(projeto: i64, campos: &CamposComando, origem: &str) -> Result<Comando, String> {
+    let mut corpo = serde_json::to_value(campos).map_err(|e| e.to_string())?;
+    corpo["origem"] = json!(origem);
+    chamar("POST", &format!("/v1/projetos/{projeto}/comandos"), Some(corpo))
+}
+
+pub fn editar_comando(id: i64, campos: &CamposComando) -> Result<Comando, String> {
+    chamar("PATCH", &format!("/v1/comandos/{id}"), Some(serde_json::to_value(campos).map_err(|e| e.to_string())?))
+}
+
+fn sem_conteudo(metodo: &str, caminho: &str, corpo: Option<serde_json::Value>) -> Result<(), String> {
+    let corpo = corpo.map(|c| c.to_string());
+    let (status, resposta) = canal::pedir_com_corpo(metodo, caminho, corpo.as_deref())?;
+    match status {
+        200..300 => Ok(()),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+    }
+}
+
+pub fn remover_comando(id: i64) -> Result<(), String> {
+    sem_conteudo("DELETE", &format!("/v1/comandos/{id}"), None)
+}
+
+/// Roda a configuração (na pasta da `tarefa`, ou na do projeto com 0), no
+/// tamanho do terminal; rodar de novo para a execução anterior.
+pub fn rodar_comando(id: i64, tarefa: i64, tamanho: Option<(u16, u16)>) -> Result<Comando, String> {
+    let (cols, rows) = tamanho.unwrap_or((0, 0));
+    chamar("POST", &format!("/v1/comandos/{id}/rodar"), Some(json!({ "tarefa_id": tarefa, "cols": cols, "rows": rows })))
+}
+
+pub fn parar_comando(id: i64) -> Result<(), String> {
+    sem_conteudo("POST", &format!("/v1/comandos/{id}/parar"), None)
+}
+
 // Pedidos ao agente
 
 pub fn destino_do_pedido(tarefa: i64) -> Result<Destino, String> {
