@@ -56,6 +56,9 @@ type Contexto struct {
 	// ForaDaDaily: as tarefas tiradas da daily de hoje. Elas saem da daily
 	// (deck e texto), mas não da sprint nem da linha do tempo.
 	ForaDaDaily map[int64]bool
+	// TitulosSprint: os títulos que as tarefas ganharam na sprint olhada
+	// (só no resumo e no deck da sprint); a daily usa o da tarefa.
+	TitulosSprint map[int64]string
 }
 
 // semForaDaDaily tira os itens das tarefas fora da daily de hoje.
@@ -313,6 +316,9 @@ func novoMontador(c Contexto) *montador {
 	}
 	for id, t := range c.Tarefas {
 		m.titulos[id] = t.Titulo
+	}
+	for id, t := range c.TitulosSprint {
+		m.titulos[id] = t
 	}
 	return m
 }

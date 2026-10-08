@@ -16,6 +16,7 @@
 mod comum;
 mod daily;
 mod linha;
+mod lista;
 mod sprint;
 
 use std::collections::HashSet;
@@ -145,6 +146,9 @@ fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option
 
 #[derive(Clone, Copy, PartialEq)]
 enum Periodo {
+    /// Uma sprint fixa do perfil (a atual, de começo): só nela os títulos e
+    /// as descrições da reunião podem mudar.
+    Sprint,
     Dias7,
     Dias14,
     Mes,
@@ -163,15 +167,65 @@ enum Filtro {
 type Chave = (i64, api::Recorte);
 
 enum Resposta {
-    Pagina { chave: Chave, primeira: bool, resultado: Result<api::PaginaLinha, String> },
-    Daily { chave: Chave, resultado: Result<api::Daily, String> },
-    DeckDaily { chave: Chave, resultado: Result<api::Deck, String> },
-    Sprint { chave: Chave, periodo: api::PeriodoSprint, resultado: Result<api::Sprint, String> },
-    DeckSprint { chave: Chave, periodo: api::PeriodoSprint, resultado: Result<api::Deck, String> },
-    Grande { id: i64, resultado: Result<egui::ColorImage, String> },
+    Pagina {
+        chave: Chave,
+        primeira: bool,
+        resultado: Result<api::PaginaLinha, String>,
+    },
+    Daily {
+        chave: Chave,
+        resultado: Result<api::Daily, String>,
+    },
+    DeckDaily {
+        chave: Chave,
+        resultado: Result<api::Deck, String>,
+    },
+    Sprint {
+        chave: Chave,
+        periodo: api::PeriodoSprint,
+        resultado: Result<api::Sprint, String>,
+    },
+    DeckSprint {
+        chave: Chave,
+        periodo: api::PeriodoSprint,
+        resultado: Result<api::Deck, String>,
+    },
+    Grande {
+        id: i64,
+        resultado: Result<egui::ColorImage, String>,
+    },
     Salvo(Result<String, String>),
     Removido(Result<(), String>),
-    ForaDaDaily { fora: bool, resultado: Result<(), String> },
+    ForaDaDaily {
+        fora: bool,
+        resultado: Result<(), String>,
+    },
+    Sprints {
+        perfil: i64,
+        resultado: Result<api::ListaSprints, String>,
+    },
+    DatasSprint(Result<api::SprintFixa, String>),
+    /// O item da lista foi salvo; `Some` traz a descrição que mudou enquanto
+    /// você editava (o agente complementou) e a versão dela.
+    ItemSalvo {
+        tarefa: i64,
+        resultado: Result<Option<(String, String)>, String>,
+    },
+}
+
+/// Um item da lista da sprint em edição: o título e a descrição só da sprint.
+pub(super) struct EdicaoItem {
+    pub tarefa: i64,
+    pub titulo: String,
+    pub descricao: String,
+    /// O título da tarefa: igual a ele, o título da sprint é apagado.
+    pub titulo_tarefa: String,
+    pub titulo_antes: String,
+    pub descricao_antes: String,
+    pub versao: String,
+    pub salvando: bool,
+    pub focar: bool,
+    pub aviso: Option<String>,
 }
 
 /// Imagem aberta em tamanho grande.
@@ -235,6 +289,18 @@ pub struct Registro {
     ate: String,
     galeria_aberta: bool,
     salvando: bool,
+    /// As sprints fixas do perfil e a escolhida (a atual, de começo).
+    sprints: Option<api::ListaSprints>,
+    sprint_escolhida: Option<i64>,
+    pedindo_sprints: bool,
+    /// Editando as datas da sprint (DD/MM/AAAA) e o erro do núcleo.
+    datas_sprint: Option<(String, String)>,
+    erro_datas: Option<String>,
+    /// A sprint em lista (o resumo para a reunião) ou nos cartões.
+    pub(super) em_lista: bool,
+    /// Itens da lista abertos, com o cartão completo embaixo.
+    pub(super) abertos: HashSet<i64>,
+    pub(super) edicao: Option<EdicaoItem>,
 
     /// Ao voltar da apresentação, a página rola até o cartão do último slide visto.
     pub rolar_ate: Option<i64>,
@@ -292,11 +358,19 @@ impl Default for Registro {
             erro_sprint: None,
             texto_sprint: String::new(),
             texto_sprint_com_tempo: false,
-            periodo: Periodo::Dias14,
+            periodo: Periodo::Sprint,
             de: String::new(),
             ate: String::new(),
             galeria_aberta: false,
             salvando: false,
+            sprints: None,
+            sprint_escolhida: None,
+            pedindo_sprints: false,
+            datas_sprint: None,
+            erro_datas: None,
+            em_lista: true,
+            abertos: HashSet::new(),
+            edicao: None,
             rolar_ate: None,
             pedidos: Default::default(),
             caixa_aberta: None,
@@ -399,6 +473,7 @@ impl Registro {
     /// O período escolhido na sprint, já no formato do núcleo.
     pub fn periodo_sprint(&mut self) -> Option<api::PeriodoSprint> {
         match self.periodo {
+            Periodo::Sprint => self.sprint_escolhida.map(api::PeriodoSprint::Fixa),
             Periodo::Dias7 => Some(api::PeriodoSprint::Ultimos(7)),
             Periodo::Dias14 => Some(api::PeriodoSprint::Ultimos(14)),
             Periodo::Mes => Some(api::PeriodoSprint::MesAtual),
@@ -418,6 +493,14 @@ impl Registro {
         let Some(chave) = self.chave else { return };
         self.sujas[Aba::Sprint.indice()] = false;
         self.erro_sprint = None;
+        // A lista vem junto (o núcleo cria a sprint nova quando a semana
+        // vira). Sem saber a sprint ainda, ela vem quando a lista chegar.
+        if self.periodo == Periodo::Sprint {
+            self.pedir_sprints(ctx);
+            if self.sprint_escolhida.is_none() {
+                return;
+            }
+        }
         let Some(periodo) = self.periodo_sprint() else { return };
         let outro = periodo.clone();
         em_segundo_plano(&self.canal.0, ctx, move || {
@@ -427,6 +510,79 @@ impl Registro {
         em_segundo_plano(&self.canal.0, ctx, move || {
             let resultado = api::apresentacao(chave.0, chave.1, Some(&outro));
             Resposta::DeckSprint { chave, periodo: outro, resultado }
+        });
+    }
+
+    fn pedir_sprints(&mut self, ctx: &egui::Context) {
+        let Some(chave) = self.chave else { return };
+        if std::mem::replace(&mut self.pedindo_sprints, true) {
+            return;
+        }
+        let perfil = chave.0;
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::Sprints { perfil, resultado: api::listar_sprints(perfil) });
+    }
+
+    /// Mostra outra sprint fixa (as setas da página).
+    pub(super) fn escolher_sprint(&mut self, ctx: &egui::Context, id: i64) {
+        self.sprint_escolhida = Some(id);
+        self.sprint = None;
+        self.deck_sprint = None;
+        self.datas_sprint = None;
+        self.erro_datas = None;
+        self.edicao = None;
+        self.abertos.clear();
+        self.pedir_sprint(ctx);
+    }
+
+    /// Grava as datas editadas da sprint escolhida.
+    pub(super) fn salvar_datas(&mut self, ctx: &egui::Context) {
+        let (Some(id), Some((de, ate))) = (self.sprint_escolhida, self.datas_sprint.clone()) else { return };
+        let (Some(inicio), Some(fim)) = (data_da_tela(&de), data_da_tela(&ate)) else {
+            self.erro_datas = Some("Use datas no formato DD/MM/AAAA.".into());
+            return;
+        };
+        self.erro_datas = None;
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::DatasSprint(api::editar_sprint(id, &inicio, &fim)));
+    }
+
+    /// Grava o item da lista em edição: o título só da sprint (igual ao da
+    /// tarefa, ele é apagado) e a descrição, que é a nota da sprint.
+    pub(super) fn salvar_item(&mut self, ctx: &egui::Context) {
+        let Some(deck) = self.deck_sprint.as_ref() else { return };
+        let (sprint, chave_nota) = (deck.sprint_id, deck.chave_nota.clone());
+        let Some(e) = self.edicao.as_mut().filter(|e| !e.salvando) else { return };
+        if sprint == 0 {
+            return;
+        }
+        let titulo = e.titulo.trim().to_string();
+        let mudou_titulo = titulo != e.titulo_antes.trim();
+        let mudou_descricao = e.descricao.trim() != e.descricao_antes.trim();
+        if !mudou_titulo && !mudou_descricao {
+            self.edicao = None;
+            return;
+        }
+        if titulo.is_empty() {
+            e.aviso = Some("O título não pode ficar vazio.".into());
+            return;
+        }
+        e.salvando = true;
+        e.aviso = None;
+        let titulo = if titulo == e.titulo_tarefa.trim() { String::new() } else { titulo };
+        let (tarefa, descricao, versao) = (e.tarefa, e.descricao.trim().to_string(), e.versao.clone());
+        em_segundo_plano(&self.canal.0, ctx, move || {
+            let resultado = (|| {
+                if mudou_titulo {
+                    api::titulo_sprint(sprint, tarefa, &titulo)?;
+                }
+                if mudou_descricao {
+                    return Ok(match api::gravar_nota(tarefa, "sprint", &chave_nota, &descricao, &versao)? {
+                        api::NotaGravada::Ok(_) => None,
+                        api::NotaGravada::Mudou { texto, versao } => Some((texto, versao)),
+                    });
+                }
+                Ok(None)
+            })();
+            Resposta::ItemSalvo { tarefa, resultado }
         });
     }
 
@@ -638,6 +794,58 @@ impl Registro {
                     }
                     Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui remover: {e}"))),
                 },
+                Resposta::Sprints { perfil, resultado } if self.chave.is_some_and(|c| c.0 == perfil) => {
+                    self.pedindo_sprints = false;
+                    match resultado {
+                        Ok(lista) => {
+                            // Vai para a atual na primeira vez, quando a escolhida sumiu
+                            // ou quando você estava na atual e a semana virou.
+                            let atual_antes = self.sprints.as_ref().map(|l| l.atual);
+                            let seguir = match self.sprint_escolhida {
+                                None => true,
+                                Some(id) => !lista.sprints.iter().any(|s| s.id == id) || (Some(id) == atual_antes && id != lista.atual),
+                            };
+                            self.sprints = Some(lista);
+                            if seguir {
+                                let atual = self.sprints.as_ref().map(|l| l.atual).unwrap_or_default();
+                                self.escolher_sprint(ctx, atual);
+                            }
+                        }
+                        Err(e) if api::erro_de_conexao(&e) => {}
+                        Err(e) => self.erro_sprint = Some(if api::erro_inesperado(&e) { "Não consegui buscar as sprints.".into() } else { e }),
+                    }
+                }
+                Resposta::DatasSprint(resultado) => match resultado {
+                    Ok(s) => {
+                        if let Some(lista) = self.sprints.as_mut() {
+                            lista.sprints.retain(|x| x.id != s.id);
+                            lista.sprints.push(s.clone());
+                            lista.sprints.sort_by(|a, b| a.inicio.cmp(&b.inicio));
+                        }
+                        acoes.push(Acao::Avisar(TipoAviso::Neutro, "Datas da sprint salvas".into()));
+                        self.escolher_sprint(ctx, s.id);
+                    }
+                    Err(e) => self.erro_datas = Some(e),
+                },
+                Resposta::ItemSalvo { tarefa, resultado } => {
+                    let Some(e) = self.edicao.as_mut().filter(|e| e.tarefa == tarefa) else { continue };
+                    e.salvando = false;
+                    match resultado {
+                        Ok(None) => {
+                            self.edicao = None;
+                            acoes.push(Acao::Avisar(TipoAviso::Neutro, "Salvo só nesta sprint".into()));
+                            self.pedir_so_sprint(ctx);
+                        }
+                        Ok(Some((texto, versao))) => {
+                            // O título (se mudou) já foi; falta a descrição. A próxima
+                            // gravação vale sobre a versão de agora, que aparece no aviso.
+                            e.titulo_antes = e.titulo.trim().to_string();
+                            e.versao = versao;
+                            e.aviso = Some(format!("A descrição mudou enquanto você editava. Agora ela é:\n{texto}\nSalve de novo para ficar com a sua."));
+                        }
+                        Err(erro) => e.aviso = Some(format!("Não consegui salvar: {erro}")),
+                    }
+                }
                 // Resposta de um escopo (ou período) que já não está na tela.
                 _ => {}
             }
@@ -647,6 +855,7 @@ impl Registro {
     /// O período sem mexer no aviso de erro (para comparar respostas).
     fn periodo_atual(&self) -> Option<api::PeriodoSprint> {
         match self.periodo {
+            Periodo::Sprint => self.sprint_escolhida.map(api::PeriodoSprint::Fixa),
             Periodo::Dias7 => Some(api::PeriodoSprint::Ultimos(7)),
             Periodo::Dias14 => Some(api::PeriodoSprint::Ultimos(14)),
             Periodo::Mes => Some(api::PeriodoSprint::MesAtual),
@@ -666,7 +875,12 @@ impl Registro {
         if self.chave != Some(chave) {
             let guardado =
                 (self.periodo, self.texto_daily_aberto, self.focar_daily, self.galeria_aberta, self.de.clone(), self.ate.clone(), self.mostrar_tempo);
+            // As sprints são do perfil: trocar só o recorte mantém a escolhida.
+            let sprints = if self.chave.is_some_and(|c| c.0 == perfil) { (self.sprints.take(), self.sprint_escolhida) } else { (None, None) };
+            let em_lista = self.em_lista;
             *self = Registro { canal: std::mem::replace(&mut self.canal, mpsc::channel()), ..Registro::default() };
+            (self.sprints, self.sprint_escolhida) = sprints;
+            self.em_lista = em_lista;
             let tempo;
             (self.periodo, self.texto_daily_aberto, self.focar_daily, self.galeria_aberta, self.de, self.ate, tempo) = guardado;
             self.mostrar_tempo = tempo;

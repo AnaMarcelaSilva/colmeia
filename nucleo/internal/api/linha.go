@@ -312,11 +312,12 @@ func (s *Servidor) resumo(w http.ResponseWriter, r *http.Request) {
 		}
 		responderJSON(w, d)
 	case "sprint":
-		de, ate, err := periodo(r, true)
+		de, ate, _, err := s.periodoDaSprint(r, &c)
 		if err != nil {
 			responderErro(w, err)
 			return
 		}
+
 		// O histórico até o fim do período: o anterior diz onde cada tarefa estava.
 		eventos, err := s.Banco.ListarEventos(r.Context(), rc.ate(perfil, inicioDoDia(ate.AddDate(0, 0, 1))))
 		if err != nil {
@@ -384,7 +385,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		}
 		deck = linha.Apresentacao(eventos, time.Time{}, time.Time{}, c, tipo)
 	} else {
-		de, ate, err := periodo(r, true)
+		de, ate, sprint, err := s.periodoDaSprint(r, &c)
 		if err != nil {
 			responderErro(w, err)
 			return
@@ -395,6 +396,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		deck = linha.Apresentacao(eventos, de, ate, c, tipo)
+		deck.SprintID = sprint
 	}
 	ids := deck.Tarefas()
 	inicio, _ := time.ParseInLocation("2006-01-02", deck.De, time.Local)

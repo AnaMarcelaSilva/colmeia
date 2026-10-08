@@ -103,14 +103,16 @@ type NotaAnterior struct {
 }
 
 type Slide struct {
-	TarefaID  int64  `json:"tarefa_id"`
-	Titulo    string `json:"titulo"`
-	ProjetoID int64  `json:"projeto_id"`
-	Projeto   string `json:"projeto"`
-	Coluna    string `json:"coluna"`
-	Status    string `json:"status"`
-	Grupo     string `json:"grupo"`
-	Removida  bool   `json:"removida"`
+	TarefaID int64  `json:"tarefa_id"`
+	Titulo   string `json:"titulo"`
+	// TituloOriginal é o da tarefa, quando ela ganhou outro na sprint.
+	TituloOriginal string `json:"titulo_original,omitempty"`
+	ProjetoID      int64  `json:"projeto_id"`
+	Projeto        string `json:"projeto"`
+	Coluna         string `json:"coluna"`
+	Status         string `json:"status"`
+	Grupo          string `json:"grupo"`
+	Removida       bool   `json:"removida"`
 	// Secao é o nome do projeto da tarefa ("estudos · loja-web" com mais de
 	// um workspace no recorte): com mais de uma seção, a tela põe um título
 	// (e um slide divisor) quando muda. SecaoID é o projeto e Workspace, o
@@ -155,13 +157,15 @@ type Deck struct {
 	Titulo  string `json:"titulo"`
 	Periodo string `json:"periodo"`
 	// De e Ate (AAAA-MM-DD) limitam os anexos; ChaveNota é o período das notas.
-	De        string  `json:"de"`
-	Ate       string  `json:"ate"`
-	ChaveNota string  `json:"chave_nota"`
-	Capa      Capa    `json:"capa"`
-	Slides    []Slide `json:"slides"`
-	Mais      int     `json:"mais"`
-	Vazio     bool    `json:"vazio"`
+	De        string `json:"de"`
+	Ate       string `json:"ate"`
+	ChaveNota string `json:"chave_nota"`
+	// SprintID: o deck é de uma sprint fixa (os títulos dela valem aqui).
+	SprintID int64   `json:"sprint_id,omitempty"`
+	Capa     Capa    `json:"capa"`
+	Slides   []Slide `json:"slides"`
+	Mais     int     `json:"mais"`
+	Vazio    bool    `json:"vazio"`
 	// TempoAgentes: os números e os textos podem ter o tempo dos agentes.
 	TempoAgentes bool `json:"tempo_agentes"`
 	// Fora: as tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
@@ -400,6 +404,9 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		}
 		if existe {
 			s.Titulo = atual.Titulo
+		}
+		if t := c.TitulosSprint[s.TarefaID]; t != "" && tipo == "sprint" {
+			s.TituloOriginal, s.Titulo = s.Titulo, t
 		}
 		s.Status = cmpOr(nomesColuna[s.Coluna], s.Coluna)
 		switch {

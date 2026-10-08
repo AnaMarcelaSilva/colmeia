@@ -116,6 +116,23 @@ CREATE TABLE IF NOT EXISTS fora_da_daily (
 	dia TEXT NOT NULL,
 	PRIMARY KEY (tarefa_id, dia)
 );
+-- Sprints: períodos fixos do perfil, para o que se escreve para a reunião
+-- (as notas da sprint ficam pelo período; os títulos, pela sprint).
+CREATE TABLE IF NOT EXISTS sprints (
+	id INTEGER PRIMARY KEY,
+	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
+	inicio TEXT NOT NULL,
+	fim TEXT NOT NULL,
+	criada_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sprints_por_perfil ON sprints (perfil_id, inicio);
+-- O título que a tarefa ganha numa sprint; a tarefa e a daily não mudam.
+CREATE TABLE IF NOT EXISTS titulos_sprint (
+	sprint_id INTEGER NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	titulo TEXT NOT NULL,
+	PRIMARY KEY (sprint_id, tarefa_id)
+);
 -- Configurações de execução de um projeto (o "Play"): um comando do shell,
 -- rodado numa subpasta do projeto (ou da tarefa) com variáveis de ambiente.
 CREATE TABLE IF NOT EXISTS comandos (
@@ -331,6 +348,12 @@ func migrar(db *sql.DB) error {
 	// Versão 7: configurações de execução dos projetos (tabela criada pelo esquema).
 	if versao < 7 {
 		if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
+			return err
+		}
+	}
+	// Versão 8: sprints com datas fixas e títulos da sprint (tabelas do esquema).
+	if versao < 8 {
+		if _, err := db.Exec(`PRAGMA user_version = 8`); err != nil {
 			return err
 		}
 	}

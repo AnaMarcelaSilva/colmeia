@@ -40,6 +40,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasComandos(mux)
 	s.rotasAnexos(mux)
 	s.rotasLinha(mux)
+	s.rotasSprints(mux)
 	s.rotasMensagens(mux)
 	s.rotasPedidos(mux)
 	s.rotasNavegador(mux)

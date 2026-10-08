@@ -21,15 +21,28 @@ impl Registro {
             None => super::daily::cabecalho(ui, "Sprint", &escopo.nome, escopo, acoes),
         }
         ui.add_space(12.0);
-        let opcoes = [Periodo::Dias7, Periodo::Dias14, Periodo::Mes, Periodo::Escolher];
-        let atual = opcoes.iter().position(|o| *o == self.periodo).unwrap_or(1);
-        if let Some(i) = tema::segmentado(ui, &["7 dias", "14 dias", "Este mês", "Escolher…"], atual)
-            && opcoes[i] != self.periodo
-        {
-            self.periodo = opcoes[i];
-            self.sprint = None;
-            self.deck_sprint = None;
-            self.pedir_sprint(&ctx);
+        let opcoes = [Periodo::Sprint, Periodo::Dias7, Periodo::Dias14, Periodo::Mes, Periodo::Escolher];
+        let atual = opcoes.iter().position(|o| *o == self.periodo).unwrap_or(0);
+        ui.horizontal(|ui| {
+            if let Some(i) = tema::segmentado(ui, &["Sprint", "7 dias", "14 dias", "Este mês", "Escolher…"], atual)
+                && opcoes[i] != self.periodo
+            {
+                self.periodo = opcoes[i];
+                self.sprint = None;
+                self.deck_sprint = None;
+                self.edicao = None;
+                self.pedir_sprint(&ctx);
+            }
+            // Resumo: a lista para a reunião; Detalhes: os cartões de sempre.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(i) = tema::segmentado(ui, &["Resumo", "Detalhes"], if self.em_lista { 0 } else { 1 }) {
+                    self.em_lista = i == 0;
+                }
+            });
+        });
+        if self.periodo == Periodo::Sprint {
+            ui.add_space(10.0);
+            self.escolha_da_sprint(ui);
         }
         if self.periodo == Periodo::Escolher {
             ui.add_space(10.0);
@@ -78,6 +91,7 @@ impl Registro {
                 ui.label(RichText::new(format!("Nada aconteceu{onde} entre {periodo}.")).color(p.suave).size(13.5));
                 ui.add_space(12.0);
                 let (rotulo, proximo) = match self.periodo {
+                    Periodo::Sprint => (Some("Ver 14 dias"), Periodo::Dias14),
                     Periodo::Dias7 => (Some("Ver 14 dias"), Periodo::Dias14),
                     Periodo::Dias14 => (Some("Ver este mês"), Periodo::Mes),
                     _ => (None, self.periodo),
@@ -129,10 +143,14 @@ impl Registro {
             let com_projeto = !com_titulo && escopo.varios();
             for secao in &secoes {
                 if com_titulo {
-                    titulo_secao(ui, secao, secao.slides.len(), &mut self.rolar_secao, self.conectado, acoes);
+                    titulo_secao(ui, secao, if self.em_lista { usize::MAX } else { secao.slides.len() }, &mut self.rolar_secao, self.conectado, acoes);
                     ui.add_space(12.0);
                 }
-                let clique = comum::grade(ui, &secao.slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta, false);
+                let clique = if self.em_lista {
+                    self.lista(ui, &deck, &secao.slides, com_projeto)
+                } else {
+                    comum::grade(ui, &secao.slides, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &self.pedidos, self.caixa_aberta, false)
+                };
                 if let Some(c) = clique {
                     let periodo = self.periodo_atual();
                     acoes.extend(super::acao_do_clique(c, &deck, periodo));

@@ -113,7 +113,7 @@ func TestMigracaoDeUmBancoV4(t *testing.T) {
 	defer b2.Fechar()
 	var versao int
 	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 7 {
+	if versao != 8 {
 		t.Errorf("versão: %d", versao)
 	}
 	if _, err := b2.CriarConexao(ctx, p.ID, CamposConexao{Nome: "loja", Tipo: "mysql", Host: "localhost"}, "nenhuma"); err != nil {

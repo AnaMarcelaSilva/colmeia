@@ -467,6 +467,9 @@ pub struct NotaAnterior {
 pub struct Slide {
     pub tarefa_id: i64,
     pub titulo: String,
+    /// O título da tarefa, quando ela ganhou outro na sprint.
+    #[serde(default)]
+    pub titulo_original: String,
     #[serde(default)]
     pub projeto: String,
     #[serde(default)]
@@ -524,6 +527,9 @@ pub struct Deck {
     /// Período das notas deste deck (o dia, ou "de..ate").
     #[serde(default)]
     pub chave_nota: String,
+    /// O deck é de uma sprint fixa: os títulos dela valem e podem mudar.
+    #[serde(default)]
+    pub sprint_id: i64,
     #[serde(default)]
     pub capa: Capa,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
@@ -954,6 +960,38 @@ pub enum PeriodoSprint {
     MesAtual,
     /// AAAA-MM-DD.
     Datas(String, String),
+    /// Uma sprint fixa do perfil (com os títulos dela).
+    Fixa(i64),
+}
+
+/// Uma sprint: um período fixo do perfil (AAAA-MM-DD, inclusive).
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct SprintFixa {
+    pub id: i64,
+    pub inicio: String,
+    pub fim: String,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ListaSprints {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub sprints: Vec<SprintFixa>,
+    /// A que tem hoje (o núcleo cria se ainda não existir).
+    #[serde(default)]
+    pub atual: i64,
+}
+
+pub fn listar_sprints(perfil: i64) -> Result<ListaSprints, String> {
+    chamar("GET", &format!("/v1/perfis/{perfil}/sprints"), None)
+}
+
+pub fn editar_sprint(id: i64, inicio: &str, fim: &str) -> Result<SprintFixa, String> {
+    chamar("PATCH", &format!("/v1/sprints/{id}"), Some(json!({ "inicio": inicio, "fim": fim })))
+}
+
+/// O título da tarefa só nesta sprint; vazio volta ao da tarefa.
+pub fn titulo_sprint(sprint: i64, tarefa: i64, titulo: &str) -> Result<(), String> {
+    sem_conteudo("PUT", &format!("/v1/sprints/{sprint}/titulos/{tarefa}"), Some(json!({ "titulo": titulo })))
 }
 
 pub fn sprint(perfil: i64, recorte: Recorte, periodo: &PeriodoSprint) -> Result<Sprint, String> {
@@ -965,6 +1003,7 @@ fn consulta_periodo(periodo: &PeriodoSprint) -> String {
         PeriodoSprint::Ultimos(n) => format!("ultimos={n}"),
         PeriodoSprint::MesAtual => "mes=atual".into(),
         PeriodoSprint::Datas(de, ate) => format!("de={de}&ate={ate}"),
+        PeriodoSprint::Fixa(id) => format!("sprint={id}"),
     }
 }
 

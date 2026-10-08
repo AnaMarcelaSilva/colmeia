@@ -18,7 +18,7 @@ const maxPorBloco = 5
 const JanelaDaily = 7
 
 // Maior período de uma sprint, em dias.
-const MaxDiasSprint = 92
+const MaxDiasSprint = dados.MaxDiasSprint
 
 // ItemResumo é uma linha clicável de um bloco, para conferir antes de falar.
 type ItemResumo struct {
