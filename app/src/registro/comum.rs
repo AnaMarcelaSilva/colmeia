@@ -438,12 +438,12 @@ pub fn numeros(ui: &mut egui::Ui, n: &api::NumerosCapa, tamanho: f32, com_novas:
 }
 
 /// Os tópicos de "o que foi feito" de um slide, juntando as partes.
-fn topicos(s: &api::Slide) -> Vec<&str> {
+pub(super) fn topicos(s: &api::Slide) -> Vec<&str> {
     s.feito.iter().flat_map(|f| f.itens.iter().map(String::as_str)).collect()
 }
 
 const ALTURA_TOPICO: f32 = 20.0;
-const LADO_MINIATURA: f32 = 64.0;
+pub(super) const LADO_MINIATURA: f32 = 64.0;
 
 /// Largura do título do cartão: o botão "Pedir ao agente" fica no canto de cima.
 fn largura_titulo(pintor: &egui::Painter, largura_cartao: f32) -> f32 {
@@ -621,40 +621,47 @@ pub fn cartao(
         y += altura;
     }
     if !s.anexos.is_empty() {
-        y += 12.0;
-        let mut x = interno.left();
-        for (n, a) in s.anexos.iter().enumerate() {
-            let caixa = Rect::from_min_size(pos2(x, y), vec2(LADO_MINIATURA, LADO_MINIATURA));
-            if n == 3 {
-                caixa_mais(&pintor, caixa, s.anexos.len() - 3);
-                break;
-            }
-            if a.video() {
-                pintor.rect(caixa, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie, Stroke::new(1.0, p.borda), StrokeKind::Inside);
-                pintor.circle_filled(caixa.center(), 12.0, p.destaque);
-                tema::play(&pintor, caixa.center(), 5.0, tema::sobre_destaque());
-            } else {
-                // A miniatura só desenha: o clique é do cartão inteiro.
-                let ctx = ui.ctx().clone();
-                let raio = CornerRadius::same(tema::RAIO_CONTROLE);
-                match cache.pedir(&ctx, a.id) {
-                    Miniatura::Pronta(t) => {
-                        let tamanho = t.size_vec2();
-                        let escala = (caixa.width() / tamanho.x).max(caixa.height() / tamanho.y);
-                        let visivel = vec2(caixa.width() / (tamanho.x * escala), caixa.height() / (tamanho.y * escala));
-                        egui::Image::new(t).uv(Rect::from_center_size(pos2(0.5, 0.5), visivel)).corner_radius(raio).paint_at(ui, caixa);
-                    }
-                    _ => {
-                        pintor.rect_filled(caixa, raio, p.realce);
-                    }
-                }
-                pintor.rect_stroke(caixa, raio, Stroke::new(1.0, p.borda), StrokeKind::Inside);
-            }
-            x += LADO_MINIATURA + 8.0;
-        }
+        miniaturas(ui, &pintor, cache, s, pos2(interno.left(), y + 12.0));
     }
     // Sem dica: o cursor de mão e a borda realçada já dizem que abre o slide.
     clique
+}
+
+/// As miniaturas dos anexos numa fileira (até três e "+n"), a partir de `canto`.
+/// Só desenham: o clique é de quem as mostra.
+pub(super) fn miniaturas(ui: &egui::Ui, pintor: &egui::Painter, cache: &mut CacheImagens, s: &api::Slide, canto: Pos2) {
+    let p = cores();
+    let y = canto.y;
+    let mut x = canto.x;
+    for (n, a) in s.anexos.iter().enumerate() {
+        let caixa = Rect::from_min_size(pos2(x, y), vec2(LADO_MINIATURA, LADO_MINIATURA));
+        if n == 3 {
+            caixa_mais(pintor, caixa, s.anexos.len() - 3);
+            break;
+        }
+        if a.video() {
+            pintor.rect(caixa, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie, Stroke::new(1.0, p.borda), StrokeKind::Inside);
+            pintor.circle_filled(caixa.center(), 12.0, p.destaque);
+            tema::play(pintor, caixa.center(), 5.0, tema::sobre_destaque());
+        } else {
+            // A miniatura só desenha: o clique é do cartão inteiro.
+            let ctx = ui.ctx().clone();
+            let raio = CornerRadius::same(tema::RAIO_CONTROLE);
+            match cache.pedir(&ctx, a.id) {
+                Miniatura::Pronta(t) => {
+                    let tamanho = t.size_vec2();
+                    let escala = (caixa.width() / tamanho.x).max(caixa.height() / tamanho.y);
+                    let visivel = vec2(caixa.width() / (tamanho.x * escala), caixa.height() / (tamanho.y * escala));
+                    egui::Image::new(t).uv(Rect::from_center_size(pos2(0.5, 0.5), visivel)).corner_radius(raio).paint_at(ui, caixa);
+                }
+                _ => {
+                    pintor.rect_filled(caixa, raio, p.realce);
+                }
+            }
+            pintor.rect_stroke(caixa, raio, Stroke::new(1.0, p.borda), StrokeKind::Inside);
+        }
+        x += LADO_MINIATURA + 8.0;
+    }
 }
 
 /// A pílula de estado de um slide: a palavra e a marca de `estado_do_slide`.

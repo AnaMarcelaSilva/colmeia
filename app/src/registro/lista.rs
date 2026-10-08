@@ -9,7 +9,7 @@
 
 use eframe::egui::{self, CornerRadius, FontId, Id, RichText, Sense, Stroke, pos2, vec2};
 
-use super::comum::{self, CliqueCartao, PedidoNoCartao};
+use super::comum::{self, CliqueCartao};
 use super::{EdicaoItem, Registro};
 use crate::api;
 use crate::tema::{self, Icone, cores};
@@ -363,6 +363,9 @@ impl Registro {
                     let (r, _) = ui.allocate_exact_size(vec2(largura, galeria.size().y), Sense::hover());
                     ui.painter().galley(r.min, galeria, p.texto);
                 }
+                if aberto && let Some(c) = detalhes(ui, s, self.pedidos.get(&id).map(|r| &r.estado), &mut self.miniaturas) {
+                    clique = Some(c);
+                }
             });
             if editar {
                 self.abrir_edicao(s);
@@ -372,22 +375,6 @@ impl Registro {
             }
             if alternar && !self.abertos.remove(&id) {
                 self.abertos.insert(id);
-            }
-            // O cartão completo, embaixo do item aberto.
-            if aberto && !editando {
-                ui.add_space(6.0);
-                let largura = ui.available_width();
-                let altura = comum::altura_cartao(ui, s, largura);
-                let (rect, _) = ui.allocate_exact_size(vec2(largura, altura), Sense::hover());
-                let resumo = self.pedidos.get(&id);
-                let info = PedidoNoCartao {
-                    estado: resumo.map(|r| &r.estado),
-                    caixa_aberta: self.caixa_aberta == Some(id),
-                    respondido: resumo.is_some_and(|r| r.pedido.estado == "respondido"),
-                };
-                if let Some(c) = comum::cartao(ui, rect, s, com_projeto, &mut self.miniaturas, &mut self.rolar_ate, &info, false) {
-                    clique = Some(c);
-                }
             }
             if self.rolar_ate == Some(id) {
                 ui.scroll_to_rect(resposta.response.rect, Some(egui::Align::Center));
@@ -484,4 +471,53 @@ mod testes {
         assert_eq!(da_tela("2026-10-08"), "08/10/2026");
         assert_eq!(curta("x"), "x");
     }
+}
+
+/// Os detalhes do item aberto, dentro do mesmo cartão: o que aconteceu
+/// na tarefa, o pedido ao agente em andamento e os anexos.
+fn detalhes(ui: &mut egui::Ui, s: &api::Slide, estado: Option<&crate::pedido::Estado>, cache: &mut comum::CacheImagens) -> Option<CliqueCartao> {
+    let p = cores();
+    let mut clique = None;
+    ui.add_space(12.0);
+    let linha = ui.available_rect_before_wrap();
+    ui.painter().hline(linha.x_range(), linha.top(), Stroke::new(1.0, p.borda));
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Na tarefa").color(p.suave).size(12.5));
+        if let Some(e) = estado {
+            let pilula = crate::pedido::pilula(e);
+            let (r, resposta) = ui.allocate_exact_size(vec2(pilula.largura(ui.painter()), 22.0), Sense::click());
+            pilula.pintar(ui.painter(), r.min);
+            if resposta.on_hover_text(&e.longo).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                clique = Some(CliqueCartao::Pedir(s.tarefa_id, r));
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if tema::link_com(ui, "Ver na apresentação", true).clicked() {
+                clique = Some(CliqueCartao::Abrir(s.tarefa_id));
+            }
+        });
+    });
+    let topicos = comum::topicos(s);
+    if topicos.is_empty() {
+        ui.label(RichText::new("Nada registrado na tarefa neste período.").color(p.suave).size(13.0));
+    }
+    for t in &topicos {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(8.0, 18.0), Sense::hover());
+            ui.painter().circle_filled(pos2(r.left() + 3.0, r.center().y), 2.0, p.suave);
+            ui.add(egui::Label::new(RichText::new(*t).color(p.texto).size(13.5)).wrap());
+        });
+    }
+    if !s.anexos.is_empty() {
+        ui.add_space(10.0);
+        let largura = (comum::LADO_MINIATURA + 8.0) * s.anexos.len().min(4) as f32;
+        let (r, resposta) = ui.allocate_exact_size(vec2(largura, comum::LADO_MINIATURA), Sense::click());
+        let pintor = ui.painter().clone();
+        comum::miniaturas(ui, &pintor, cache, s, r.min);
+        if resposta.on_hover_text("Ver na apresentação").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            clique = Some(CliqueCartao::Abrir(s.tarefa_id));
+        }
+    }
+    clique
 }
