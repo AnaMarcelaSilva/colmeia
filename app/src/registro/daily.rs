@@ -235,7 +235,8 @@ pub(super) fn titulo_secao(ui: &mut egui::Ui, secao: &SecaoDeck, cartoes: usize,
         }
         ui.label(tema::texto_forte(secao.projeto, 17.0).color(p.texto));
         ui.label(RichText::new(if n == 1 { "· 1 tarefa".to_string() } else { format!("· {n} tarefas") }).color(p.suave).size(13.5));
-        if secao.id == 0 {
+        // Sem projeto (ou um assunto da sprint), sem os links do projeto.
+        if secao.id <= 0 {
             return;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -263,7 +264,8 @@ pub(super) fn sem_atividade(ui: &mut egui::Ui, escopo: &Escopo, secoes: &[SecaoD
     if !escopo.varios() || cortado || secoes.iter().any(|s| s.id == 0) {
         return;
     }
-    let ids: Vec<i64> = secoes.iter().map(|s| s.id).collect();
+    // Pelos projetos das tarefas: na sprint, um assunto junta vários.
+    let ids: Vec<i64> = secoes.iter().flat_map(|s| s.slides.iter().map(|x| x.projeto_id)).collect();
     let nomes: Vec<String> = escopo.sem_atividade(&ids).iter().map(|p| p.nome.clone()).collect();
     if nomes.is_empty() || secoes.is_empty() {
         return;

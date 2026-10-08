@@ -471,6 +471,8 @@ pub struct Slide {
     #[serde(default)]
     pub titulo_original: String,
     #[serde(default)]
+    pub projeto_id: i64,
+    #[serde(default)]
     pub projeto: String,
     #[serde(default)]
     pub coluna: String,
@@ -486,6 +488,9 @@ pub struct Slide {
     /// O id do projeto da seção (dois workspaces podem ter o mesmo nome).
     #[serde(default)]
     pub secao_id: i64,
+    /// Na sprint, o assunto da tarefa (a seção é ele; `secao_id` fica negativo).
+    #[serde(default)]
+    pub assunto_id: i64,
     /// O workspace, quando o recorte tem mais de um.
     #[serde(default)]
     pub workspace: String,
@@ -530,6 +535,9 @@ pub struct Deck {
     /// O deck é de uma sprint fixa: os títulos dela valem e podem mudar.
     #[serde(default)]
     pub sprint_id: i64,
+    /// Os assuntos da sprint fixa, na ordem (os vazios também).
+    #[serde(default)]
+    pub assuntos: Vec<Assunto>,
     #[serde(default)]
     pub capa: Capa,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
@@ -987,6 +995,40 @@ pub fn listar_sprints(perfil: i64) -> Result<ListaSprints, String> {
 
 pub fn editar_sprint(id: i64, inicio: &str, fim: &str) -> Result<SprintFixa, String> {
     chamar("PATCH", &format!("/v1/sprints/{id}"), Some(json!({ "inicio": inicio, "fim": fim })))
+}
+
+/// Um assunto da sprint: junta tarefas de projetos diferentes na reunião.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct Assunto {
+    pub id: i64,
+    pub nome: String,
+}
+
+pub fn criar_assunto(sprint: i64, nome: &str) -> Result<Assunto, String> {
+    chamar("POST", &format!("/v1/sprints/{sprint}/assuntos"), Some(json!({ "nome": nome })))
+}
+
+pub fn renomear_assunto(id: i64, nome: &str) -> Result<Assunto, String> {
+    chamar("PATCH", &format!("/v1/assuntos/{id}"), Some(json!({ "nome": nome })))
+}
+
+pub fn remover_assunto(id: i64) -> Result<(), String> {
+    sem_conteudo("DELETE", &format!("/v1/assuntos/{id}"), None)
+}
+
+/// Põe as tarefas no assunto; 0 tira do assunto (voltam ao projeto).
+pub fn assunto_das_tarefas(sprint: i64, tarefas: &[i64], assunto: i64) -> Result<(), String> {
+    sem_conteudo("PUT", &format!("/v1/sprints/{sprint}/assuntos/tarefas"), Some(json!({ "tarefas": tarefas, "assunto": assunto })))
+}
+
+#[derive(Deserialize)]
+pub struct Repetidos {
+    pub assuntos: i64,
+}
+
+/// Traz os assuntos da sprint anterior; diz quantos vieram.
+pub fn repetir_assuntos(sprint: i64) -> Result<Repetidos, String> {
+    chamar("POST", &format!("/v1/sprints/{sprint}/assuntos/repetir"), None)
 }
 
 /// O título da tarefa só nesta sprint; vazio volta ao da tarefa.

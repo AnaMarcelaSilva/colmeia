@@ -59,6 +59,34 @@ type Contexto struct {
 	// TitulosSprint: os títulos que as tarefas ganharam na sprint olhada
 	// (só no resumo e no deck da sprint); a daily usa o da tarefa.
 	TitulosSprint map[int64]string
+	// Assuntos da sprint olhada, na ordem, e o assunto de cada tarefa: na
+	// sprint, as tarefas com assunto saem do projeto e vão para a seção dele.
+	Assuntos  []dados.Assunto
+	AssuntoDa map[int64]int64
+}
+
+// assuntoDa diz o assunto da tarefa na sprint e a posição dele (-1 sem).
+func (c Contexto) assuntoDa(tarefa int64) (int, dados.Assunto) {
+	if id, ok := c.AssuntoDa[tarefa]; ok {
+		for i, a := range c.Assuntos {
+			if a.ID == id {
+				return i, a
+			}
+		}
+	}
+	return -1, dados.Assunto{}
+}
+
+// antesComAssunto ordena as seções: os assuntos primeiro, na ordem deles;
+// depois os projetos, na ordem da barra lateral.
+func (c Contexto) antesComAssunto(posA, posB int, a, b int64, nomeA, nomeB string) bool {
+	if posA >= 0 || posB >= 0 {
+		if posA < 0 || posB < 0 {
+			return posA >= 0
+		}
+		return posA < posB
+	}
+	return c.antesNaOrdem(a, b, nomeA, nomeB)
 }
 
 // semForaDaDaily tira os itens das tarefas fora da daily de hoje.
@@ -317,13 +345,15 @@ func novoMontador(c Contexto) *montador {
 	for id, t := range c.Tarefas {
 		m.titulos[id] = t.Titulo
 	}
-	for id, t := range c.TitulosSprint {
-		m.titulos[id] = t
-	}
 	return m
 }
 
+// titulo: o da sprint olhada, se a tarefa ganhou um; senão, o da tarefa (o
+// histórico atualiza m.titulos ao montar, por isso a sprint vem antes).
 func (m *montador) titulo(id int64) string {
+	if t := m.c.TitulosSprint[id]; t != "" {
+		return t
+	}
 	if t := m.titulos[id]; t != "" {
 		return t
 	}

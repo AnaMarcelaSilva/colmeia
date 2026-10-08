@@ -133,6 +133,20 @@ CREATE TABLE IF NOT EXISTS titulos_sprint (
 	titulo TEXT NOT NULL,
 	PRIMARY KEY (sprint_id, tarefa_id)
 );
+-- Assuntos da sprint: juntam tarefas de projetos diferentes na reunião, sem
+-- mudar o projeto delas. Uma tarefa tem no máximo um assunto por sprint.
+CREATE TABLE IF NOT EXISTS assuntos_sprint (
+	id INTEGER PRIMARY KEY,
+	sprint_id INTEGER NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+	nome TEXT NOT NULL,
+	posicao INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tarefas_assunto (
+	sprint_id INTEGER NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	assunto_id INTEGER NOT NULL REFERENCES assuntos_sprint(id) ON DELETE CASCADE,
+	PRIMARY KEY (sprint_id, tarefa_id)
+);
 -- Configurações de execução de um projeto (o "Play"): um comando do shell,
 -- rodado numa subpasta do projeto (ou da tarefa) com variáveis de ambiente.
 CREATE TABLE IF NOT EXISTS comandos (
@@ -351,7 +365,7 @@ func migrar(db *sql.DB) error {
 			return err
 		}
 	}
-	// Versão 8: sprints com datas fixas e títulos da sprint (tabelas do esquema).
+	// Versão 8: sprints com datas fixas, títulos e assuntos da sprint (tabelas do esquema).
 	if versao < 8 {
 		if _, err := db.Exec(`PRAGMA user_version = 8`); err != nil {
 			return err

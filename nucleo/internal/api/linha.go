@@ -397,6 +397,7 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		}
 		deck = linha.Apresentacao(eventos, de, ate, c, tipo)
 		deck.SprintID = sprint
+		deck.Assuntos = c.Assuntos
 	}
 	ids := deck.Tarefas()
 	inicio, _ := time.ParseInLocation("2006-01-02", deck.De, time.Local)

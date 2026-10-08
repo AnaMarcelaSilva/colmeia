@@ -241,7 +241,8 @@ pub fn secoes_do_deck(deck: &api::Deck) -> Vec<SecaoDeck<'_>> {
         match secoes.last_mut() {
             Some(ultima) if ultima.id == s.secao_id && ultima.rotulo == s.secao => ultima.slides.push(s),
             _ => {
-                let projeto = if s.projeto.is_empty() { s.secao.as_str() } else { s.projeto.as_str() };
+                // Um assunto da sprint (id negativo) mostra o nome dele.
+                let projeto = if s.projeto.is_empty() || s.secao_id < 0 { s.secao.as_str() } else { s.projeto.as_str() };
                 secoes.push(SecaoDeck { id: s.secao_id, rotulo: &s.secao, projeto, workspace: &s.workspace, slides: vec![s] });
             }
         }

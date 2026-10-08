@@ -117,8 +117,11 @@ type Slide struct {
 	// um workspace no recorte): com mais de uma seção, a tela põe um título
 	// (e um slide divisor) quando muda. SecaoID é o projeto e Workspace, o
 	// workspace dele quando o recorte tem mais de um.
-	Secao     string `json:"secao,omitempty"`
-	SecaoID   int64  `json:"secao_id,omitempty"`
+	Secao   string `json:"secao,omitempty"`
+	SecaoID int64  `json:"secao_id,omitempty"`
+	// AssuntoID: na sprint, a tarefa está num assunto; a seção é ele
+	// (Secao é o nome e SecaoID, o id negativo, para não colidir com projeto).
+	AssuntoID int64  `json:"assunto_id,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	// Partes em que a tarefa aparece ("Ontem", "Hoje"), para as marcas do cabeçalho.
 	Partes  []string     `json:"partes"`
@@ -161,11 +164,13 @@ type Deck struct {
 	Ate       string `json:"ate"`
 	ChaveNota string `json:"chave_nota"`
 	// SprintID: o deck é de uma sprint fixa (os títulos dela valem aqui).
-	SprintID int64   `json:"sprint_id,omitempty"`
-	Capa     Capa    `json:"capa"`
-	Slides   []Slide `json:"slides"`
-	Mais     int     `json:"mais"`
-	Vazio    bool    `json:"vazio"`
+	SprintID int64 `json:"sprint_id,omitempty"`
+	// Assuntos da sprint fixa, na ordem (os vazios também, para a tela).
+	Assuntos []dados.Assunto `json:"assuntos,omitempty"`
+	Capa     Capa            `json:"capa"`
+	Slides   []Slide         `json:"slides"`
+	Mais     int             `json:"mais"`
+	Vazio    bool            `json:"vazio"`
 	// TempoAgentes: os números e os textos podem ter o tempo dos agentes.
 	TempoAgentes bool `json:"tempo_agentes"`
 	// Fora: as tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
@@ -422,13 +427,23 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 			s.Grupo = GrupoOutras
 		}
 		s.Secao, s.SecaoID, s.Workspace = c.rotuloSecao(s.ProjetoID, s.Projeto), s.ProjetoID, c.workspaceDaSecao(s.ProjetoID)
+		if pos, a := c.assuntoDa(s.TarefaID); pos >= 0 && tipo == "sprint" {
+			s.AssuntoID, s.Secao, s.SecaoID, s.Workspace = a.ID, a.Nome, -a.ID, ""
+		}
 		ordenados = append(ordenados, s)
 	}
 	// Por projeto (na ordem da barra lateral), depois o grupo e o mais recente.
 	sort.Slice(ordenados, func(i, j int) bool {
 		a, b := ordenados[i], ordenados[j]
 		if a.SecaoID != b.SecaoID || a.Secao != b.Secao {
-			return c.antesNaOrdem(a.SecaoID, b.SecaoID, a.Secao, b.Secao)
+			posA, posB := -1, -1
+			if a.AssuntoID != 0 {
+				posA, _ = c.assuntoDa(a.TarefaID)
+			}
+			if b.AssuntoID != 0 {
+				posB, _ = c.assuntoDa(b.TarefaID)
+			}
+			return c.antesComAssunto(posA, posB, a.SecaoID, b.SecaoID, a.Secao, b.Secao)
 		}
 		if ordemGrupos[a.Grupo] != ordemGrupos[b.Grupo] {
 			return ordemGrupos[a.Grupo] < ordemGrupos[b.Grupo]

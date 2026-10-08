@@ -211,6 +211,9 @@ enum Resposta {
         tarefa: i64,
         resultado: Result<Option<(String, String)>, String>,
     },
+    /// Um assunto criado, renomeado, apagado ou tarefas que mudaram de
+    /// assunto; `Ok` traz o aviso (vazio, sem aviso).
+    Assuntos(Result<String, String>),
 }
 
 /// Um item da lista da sprint em edição: o título e a descrição só da sprint.
@@ -301,6 +304,8 @@ pub struct Registro {
     /// Itens da lista abertos, com o cartão completo embaixo.
     pub(super) abertos: HashSet<i64>,
     pub(super) edicao: Option<EdicaoItem>,
+    /// O nome de assunto sendo escrito: (0, nome) cria um, (id, nome) renomeia.
+    pub(super) nome_assunto: Option<(i64, String)>,
 
     /// Ao voltar da apresentação, a página rola até o cartão do último slide visto.
     pub rolar_ate: Option<i64>,
@@ -371,6 +376,7 @@ impl Default for Registro {
             em_lista: true,
             abertos: HashSet::new(),
             edicao: None,
+            nome_assunto: None,
             rolar_ate: None,
             pedidos: Default::default(),
             caixa_aberta: None,
@@ -543,6 +549,11 @@ impl Registro {
         };
         self.erro_datas = None;
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::DatasSprint(api::editar_sprint(id, &inicio, &fim)));
+    }
+
+    /// Muda os assuntos fora da thread da tela; a sprint é pedida de novo.
+    pub(super) fn mexer_assuntos(&mut self, ctx: &egui::Context, f: impl FnOnce() -> Result<String, String> + Send + 'static) {
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::Assuntos(f()));
     }
 
     /// Grava o item da lista em edição: o título só da sprint (igual ao da
@@ -846,6 +857,15 @@ impl Registro {
                         Err(erro) => e.aviso = Some(format!("Não consegui salvar: {erro}")),
                     }
                 }
+                Resposta::Assuntos(resultado) => match resultado {
+                    Ok(aviso) => {
+                        if !aviso.is_empty() {
+                            acoes.push(Acao::Avisar(TipoAviso::Neutro, aviso));
+                        }
+                        self.pedir_so_sprint(ctx);
+                    }
+                    Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar os assuntos: {e}"))),
+                },
                 // Resposta de um escopo (ou período) que já não está na tela.
                 _ => {}
             }

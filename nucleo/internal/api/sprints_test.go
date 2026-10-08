@@ -5,6 +5,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,6 +55,46 @@ func TestSprintsComTitulos(t *testing.T) {
 	// Sprint de outro perfil (ou que não existe) não serve.
 	if status, _ := pedir(t, "GET", srv.URL+"/v1/perfis/1/apresentacao?tipo=sprint&sprint=99", nil); status != http.StatusNotFound {
 		t.Errorf("sprint que não existe: %d", status)
+	}
+
+	// Assuntos: criados numa sprint passada e repetidos na atual levam a
+	// tarefa junto; a seção do deck e do texto passa a ser o assunto.
+	status, velha := pedir(t, "POST", srv.URL+"/v1/perfis/1/sprints", map[string]string{"inicio": "2020-01-03", "fim": "2020-01-09"})
+	if status != http.StatusOK {
+		t.Fatalf("sprint passada: %d %v", status, velha)
+	}
+	velhaID := int64(velha["id"].(float64))
+	status, assunto := pedir(t, "POST", fmt.Sprintf("%s/v1/sprints/%d/assuntos", srv.URL, velhaID), map[string]string{"nome": "Entrada das lojas"})
+	if status != http.StatusOK {
+		t.Fatalf("assunto: %d %v", status, assunto)
+	}
+	tarefas := map[string]any{"tarefas": []int64{1}, "assunto": assunto["id"]}
+	if status, r := pedir(t, "PUT", fmt.Sprintf("%s/v1/sprints/%d/assuntos/tarefas", srv.URL, velhaID), tarefas); status != http.StatusNoContent {
+		t.Fatalf("pôr no assunto: %d %v", status, r)
+	}
+	if status, _ := pedir(t, "PUT", fmt.Sprintf("%s/v1/sprints/%d/assuntos/tarefas", srv.URL, id), tarefas); status != http.StatusNotFound {
+		t.Errorf("assunto de outra sprint: %d", status)
+	}
+	if status, r := pedir(t, "POST", fmt.Sprintf("%s/v1/sprints/%d/assuntos/repetir", srv.URL, id), nil); status != http.StatusOK || r["assuntos"] != float64(1) {
+		t.Fatalf("repetir: %d %v", status, r)
+	}
+	_, deck = pedir(t, "GET", fmt.Sprintf("%s/v1/perfis/1/apresentacao?tipo=sprint&sprint=%d", srv.URL, id), nil)
+	s := deck["slides"].([]any)[0].(map[string]any)
+	assuntos := deck["assuntos"].([]any)
+	novo := assuntos[0].(map[string]any)
+	if len(assuntos) != 1 || s["secao"] != "Entrada das lojas" || s["assunto_id"] != novo["id"] || s["secao_id"] != -novo["id"].(float64) {
+		t.Fatalf("deck com assunto: %v %v", s, assuntos)
+	}
+	_, resumo := pedir(t, "GET", fmt.Sprintf("%s/v1/perfis/1/resumo?tipo=sprint&sprint=%d", srv.URL, id), nil)
+	if texto, _ := resumo["texto"].(string); !strings.Contains(texto, "\nEntrada das lojas\n") {
+		t.Errorf("texto com assunto: %q", texto)
+	}
+	if status, _ := pedir(t, "DELETE", fmt.Sprintf("%s/v1/assuntos/%v", srv.URL, novo["id"]), nil); status != http.StatusNoContent {
+		t.Errorf("remover assunto: %d", status)
+	}
+	_, deck = pedir(t, "GET", fmt.Sprintf("%s/v1/perfis/1/apresentacao?tipo=sprint&sprint=%d", srv.URL, id), nil)
+	if s := deck["slides"].([]any)[0].(map[string]any); s["assunto_id"] != nil || s["secao_id"].(float64) <= 0 {
+		t.Errorf("a tarefa não voltou ao projeto: %v", s)
 	}
 
 	// Datas: editar, não cruzar outra, remover.

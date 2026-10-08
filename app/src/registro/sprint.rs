@@ -7,6 +7,7 @@ use eframe::egui::{self, CornerRadius, FontId, Rect, RichText, Sense, pos2, vec2
 
 use super::comum::{self, desenhar_miniatura};
 use super::daily::{fileira_de_saltos, sem_atividade, titulo_secao};
+use super::lista::{self, Arrasto, alca};
 use super::{Acao, Escopo, Periodo, Registro};
 use crate::api;
 use crate::tema::{self, cores};
@@ -130,7 +131,8 @@ impl Registro {
                 por_ferramenta(ui, ferramentas);
             }
             let secoes = comum::secoes_do_deck(&deck);
-            let com_titulo = secoes.len() > 1;
+            // Um assunto sempre tem título, mesmo sozinho.
+            let com_titulo = secoes.len() > 1 || secoes.iter().any(|s| s.id < 0);
             if com_titulo {
                 ui.add_space(20.0);
                 if let Some(id) = fileira_de_saltos(ui, &secoes) {
@@ -141,11 +143,30 @@ impl Registro {
                 ui.add_space(32.0);
             }
             let com_projeto = !com_titulo && escopo.varios();
+            // Na sprint fixa, a lista tem os assuntos: a barra e as alças.
+            let com_assuntos = self.em_lista && deck.sprint_id != 0;
+            if com_assuntos {
+                self.barra_de_assuntos(ui, &deck);
+                ui.add_space(24.0);
+            }
             for secao in &secoes {
                 if com_titulo {
-                    titulo_secao(ui, secao, if self.em_lista { usize::MAX } else { secao.slides.len() }, &mut self.rolar_secao, self.conectado, acoes);
+                    if com_assuntos && self.conectado {
+                        ui.horizontal(|ui| {
+                            let arrasto = || Arrasto {
+                                tarefas: secao.slides.iter().filter(|s| !s.removida).map(|s| s.tarefa_id).collect(),
+                                rotulo: secao.projeto.to_string(),
+                            };
+                            alca(ui, "Arraste o projeto inteiro até um assunto", arrasto);
+                            titulo_secao(ui, secao, usize::MAX, &mut self.rolar_secao, self.conectado, acoes);
+                        });
+                    } else {
+                        titulo_secao(ui, secao, if self.em_lista { usize::MAX } else { secao.slides.len() }, &mut self.rolar_secao, self.conectado, acoes);
+                    }
                     ui.add_space(12.0);
                 }
+                // Dentro de um assunto, cada tarefa mostra o projeto dela.
+                let com_projeto = com_projeto || secao.id < 0;
                 let clique = if self.em_lista {
                     self.lista(ui, &deck, &secao.slides, com_projeto)
                 } else {
@@ -165,6 +186,7 @@ impl Registro {
             self.galeria(ui, acoes);
             ui.add_space(24.0);
         });
+        lista::rotulo_do_arrasto(ui.ctx());
         let area = egui::Rect::from_min_max(egui::pos2(saida.inner_rect.left(), topo), saida.inner_rect.right_bottom());
         comum::sombra_rolagem(ui.painter(), area, saida.state.offset.y);
     }

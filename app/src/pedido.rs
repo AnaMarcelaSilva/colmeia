@@ -25,6 +25,8 @@ pub const LARGURA: f32 = 460.0;
 
 /// Exemplos que preenchem o campo (não enviam).
 pub const EXEMPLOS: [&str; 2] = ["Traga os números (ex.: total de testes) e complemente a nota", "Capture prints das telas finalizadas e anexe à nota"];
+/// Na sprint, o primeiro exemplo pede a descrição para a reunião.
+pub const EXEMPLO_SPRINT: &str = "Escreva para a reunião, sem termos técnicos, o que foi feito e o resultado (duas ou três frases)";
 
 /// O que a tela oferece para um pedido, conforme o estado dele.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -258,7 +260,8 @@ impl Caixa {
                 if self.texto.is_empty() {
                     ui.label(RichText::new("Exemplos").color(p.suave).size(12.5));
                     ui.spacing_mut().item_spacing.y = 6.0;
-                    for exemplo in EXEMPLOS {
+                    let sprint = (self.tipo == "sprint").then_some(EXEMPLO_SPRINT);
+                    for exemplo in sprint.into_iter().chain(EXEMPLOS) {
                         if tema::botao_secundario(ui, exemplo).clicked() {
                             self.texto = exemplo.into();
                             self.focar = true;

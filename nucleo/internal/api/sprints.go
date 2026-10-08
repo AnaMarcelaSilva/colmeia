@@ -15,6 +15,11 @@ func (s *Servidor) rotasSprints(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/sprints/{id}", s.editarSprint)
 	mux.HandleFunc("DELETE /v1/sprints/{id}", s.removerSprint)
 	mux.HandleFunc("PUT /v1/sprints/{id}/titulos/{tarefa}", s.definirTituloSprint)
+	mux.HandleFunc("POST /v1/sprints/{id}/assuntos", s.criarAssunto)
+	mux.HandleFunc("POST /v1/sprints/{id}/assuntos/repetir", s.repetirAssuntos)
+	mux.HandleFunc("PUT /v1/sprints/{id}/assuntos/tarefas", s.definirAssunto)
+	mux.HandleFunc("PATCH /v1/assuntos/{id}", s.renomearAssunto)
+	mux.HandleFunc("DELETE /v1/assuntos/{id}", s.removerAssunto)
 }
 
 // listarSprints traz as sprints do perfil e a atual (a que tem hoje), que é
@@ -125,6 +130,98 @@ func (s *Servidor) definirTituloSprint(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type nomeAssunto struct {
+	Nome string `json:"nome"`
+}
+
+func (s *Servidor) criarAssunto(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido nomeAssunto
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	a, err := s.Banco.CriarAssunto(r.Context(), id, pedido.Nome)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, a)
+}
+
+func (s *Servidor) renomearAssunto(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido nomeAssunto
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	a, err := s.Banco.RenomearAssunto(r.Context(), id, pedido.Nome)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, a)
+}
+
+func (s *Servidor) removerAssunto(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if err := s.Banco.RemoverAssunto(r.Context(), id); err != nil {
+		responderErro(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// definirAssunto: {"tarefas": [1, 2], "assunto": 3}; assunto 0 tira do assunto.
+func (s *Servidor) definirAssunto(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		Tarefas []int64 `json:"tarefas"`
+		Assunto int64   `json:"assunto"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if err := s.Banco.DefinirAssunto(r.Context(), id, pedido.Tarefas, pedido.Assunto); err != nil {
+		responderErro(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// repetirAssuntos traz os assuntos da sprint anterior; responde quantos vieram.
+func (s *Servidor) repetirAssuntos(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	n, err := s.Banco.RepetirAssuntos(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]int{"assuntos": n})
+}
+
 // periodoDaSprint lê o período do resumo e do deck da sprint: sprint=<id>
 // (uma sprint fixa do perfil, com os títulos dela no contexto) ou, como
 // antes, ultimos=, mes= ou de= e ate=. Devolve o id da sprint (0 sem ela).
@@ -149,6 +246,9 @@ func (s *Servidor) periodoDaSprint(r *http.Request, c *linha.Contexto) (time.Tim
 	de, _ := time.ParseInLocation("2006-01-02", sprint.Inicio, time.Local)
 	ate, _ := time.ParseInLocation("2006-01-02", sprint.Fim, time.Local)
 	if c.TitulosSprint, err = s.Banco.TitulosDaSprint(r.Context(), id); err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
+	if c.Assuntos, c.AssuntoDa, err = s.Banco.AssuntosDaSprint(r.Context(), id); err != nil {
 		return time.Time{}, time.Time{}, 0, err
 	}
 	return de, ate, id, nil

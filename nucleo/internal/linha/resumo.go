@@ -391,9 +391,11 @@ func rotuloDoDia(dia, ontem string, fuso *time.Location, maiuscula bool) string 
 type SecaoSprint struct {
 	// Projeto é o nome da seção ("estudos · loja-web" com mais de um
 	// workspace no recorte); ProjetoID e Workspace dizem qual é.
-	Projeto    string       `json:"projeto"`
-	ProjetoID  int64        `json:"projeto_id,omitempty"`
-	Workspace  string       `json:"workspace,omitempty"`
+	Projeto   string `json:"projeto"`
+	ProjetoID int64  `json:"projeto_id,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	// Assunto: a seção é um assunto da sprint (Projeto é o nome dele).
+	Assunto    int64        `json:"assunto_id,omitempty"`
 	Concluidas []ItemResumo `json:"concluidas"`
 	Andamento  []ItemResumo `json:"andamento"`
 	Criadas    []ItemResumo `json:"criadas"`
@@ -442,14 +444,24 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		r.Periodo += " · " + e
 	}
 
-	// Uma seção por projeto (pelo id: dois workspaces podem ter um loja-web cada).
+	// Uma seção por projeto (pelo id: dois workspaces podem ter um loja-web
+	// cada) ou, para a tarefa com assunto, pelo assunto (o id negativo).
 	secoes := map[int64]*SecaoSprint{}
-	secao := func(projeto int64, nome string) *SecaoSprint {
-		if s, ok := secoes[projeto]; ok {
+	posicao := map[*SecaoSprint]int{}
+	secao := func(tarefa, projeto int64, nome string) *SecaoSprint {
+		chave := projeto
+		pos, a := c.assuntoDa(tarefa)
+		if pos >= 0 {
+			chave = -a.ID
+		}
+		if s, ok := secoes[chave]; ok {
 			return s
 		}
 		s := &SecaoSprint{Projeto: c.rotuloSecao(projeto, cmpOr(nome, m.nomeProjeto(projeto))), ProjetoID: projeto, Workspace: c.workspaceDaSecao(projeto)}
-		secoes[projeto] = s
+		if pos >= 0 {
+			s = &SecaoSprint{Projeto: a.Nome, Assunto: a.ID}
+		}
+		secoes[chave], posicao[s] = s, pos
 		return s
 	}
 	// Coluna de cada tarefa no fim do período, refeita pelo histórico
@@ -472,7 +484,7 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		if dia < inicio {
 			continue
 		}
-		s := secao(item.ProjetoID, item.Projeto)
+		s := secao(item.TarefaID, item.ProjetoID, item.Projeto)
 		nome := m.titulo(item.TarefaID)
 		switch item.Tipo {
 		case TipoConcluiu:
@@ -511,7 +523,7 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		if col != "trabalhando" && col != "aguardando" && col != "revisao" {
 			continue
 		}
-		s := secao(projetoDa[id], "")
+		s := secao(id, projetoDa[id], "")
 		s.Andamento = append(s.Andamento, ItemResumo{Texto: m.titulo(id) + " (" + nomesColuna[col] + ")", Tipo: col, TarefaID: id})
 	}
 	ordem := make([]*SecaoSprint, 0, len(secoes))
@@ -519,7 +531,7 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		ordem = append(ordem, s)
 	}
 	sort.Slice(ordem, func(i, j int) bool {
-		return c.antesNaOrdem(ordem[i].ProjetoID, ordem[j].ProjetoID, ordem[i].Projeto, ordem[j].Projeto)
+		return c.antesComAssunto(posicao[ordem[i]], posicao[ordem[j]], ordem[i].ProjetoID, ordem[j].ProjetoID, ordem[i].Projeto, ordem[j].Projeto)
 	})
 	for _, s := range ordem {
 		if len(s.Concluidas)+len(s.Andamento)+len(s.Criadas)+len(s.Removidas)+len(s.Erros) == 0 && s.TempoS == 0 {

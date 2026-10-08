@@ -142,7 +142,8 @@ fn montar_paginas(deck: &api::Deck, escondidos: &HashSet<i64>) -> Vec<Pagina> {
     let secao = |s: &api::Slide| (s.secao_id, s.secao.clone());
     let mut secoes: Vec<(i64, String)> = deck.slides.iter().filter(|s| !escondidos.contains(&s.tarefa_id)).map(secao).collect();
     secoes.dedup();
-    let com_divisor = secoes.len() > 1;
+    // Um assunto da sprint (id negativo) sempre abre com o divisor dele.
+    let com_divisor = secoes.len() > 1 || secoes.iter().any(|s| s.0 < 0);
     let mut secao_atual = None;
     for (i, s) in deck.slides.iter().enumerate() {
         if escondidos.contains(&s.tarefa_id) {
@@ -150,7 +151,7 @@ fn montar_paginas(deck: &api::Deck, escondidos: &HashSet<i64>) -> Vec<Pagina> {
         }
         if com_divisor && secao_atual.as_ref() != Some(&secao(s)) {
             let n = deck.slides.iter().filter(|x| secao(x) == secao(s) && !escondidos.contains(&x.tarefa_id)).count();
-            let projeto = if s.projeto.is_empty() { s.secao.clone() } else { s.projeto.clone() };
+            let projeto = if s.projeto.is_empty() || s.secao_id < 0 { s.secao.clone() } else { s.projeto.clone() };
             paginas.push(Pagina::Divisor { projeto, workspace: s.workspace.clone(), n });
             secao_atual = Some(secao(s));
         }
