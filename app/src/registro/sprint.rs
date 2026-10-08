@@ -185,6 +185,7 @@ impl Registro {
             ui.add_space(12.0);
             self.galeria(ui, acoes);
             ui.add_space(24.0);
+            lista::rolar_no_arrasto(ui);
         });
         lista::rotulo_do_arrasto(ui.ctx());
         let area = egui::Rect::from_min_max(egui::pos2(saida.inner_rect.left(), topo), saida.inner_rect.right_bottom());

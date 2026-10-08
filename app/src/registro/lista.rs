@@ -61,6 +61,31 @@ pub(super) fn rotulo_do_arrasto(ctx: &egui::Context) {
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
 }
 
+/// Durante o arrasto, a lista rola: com a roda do mouse (que o egui ignora
+/// enquanto algo é arrastado) e sozinha com o ponteiro perto da borda de
+/// cima ou de baixo. Chamada dentro da área de rolagem.
+pub(super) fn rolar_no_arrasto(ui: &egui::Ui) {
+    let ctx = ui.ctx();
+    let (true, Some(ponto)) = (egui::DragAndDrop::has_payload_of_type::<Arrasto>(ctx), ctx.pointer_hover_pos()) else { return };
+    let visivel = ui.clip_rect();
+    if !visivel.x_range().contains(ponto.x) {
+        return;
+    }
+    let mut delta = ctx.input(|i| i.smooth_scroll_delta.y);
+    const BORDA: f32 = 70.0;
+    let perto_do_topo = BORDA - (ponto.y - visivel.top());
+    let perto_do_fim = BORDA - (visivel.bottom() - ponto.y);
+    if perto_do_topo > 0.0 {
+        delta += perto_do_topo.min(BORDA * 1.5) * 0.3;
+    } else if perto_do_fim > 0.0 {
+        delta -= perto_do_fim.min(BORDA * 1.5) * 0.3;
+    }
+    if delta != 0.0 {
+        ui.scroll_with_delta_animation(vec2(0.0, delta), egui::style::ScrollAnimation::none());
+        ctx.request_repaint();
+    }
+}
+
 /// Um assunto (ou "Sem assunto", "Novo assunto") na barra: aceita o arrasto
 /// e devolve o clique e o que foi solto nele.
 fn alvo(ui: &mut egui::Ui, texto: &str, suave: bool) -> (egui::Response, Option<std::sync::Arc<Arrasto>>) {
