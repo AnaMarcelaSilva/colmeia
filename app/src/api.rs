@@ -788,7 +788,7 @@ pub fn gravar_lousa(id: i64, operacoes: &[Operacao]) -> Result<LoteGravado, Stri
     match status {
         200 => ler(&resposta).map(|r| LoteGravado::Ok { elementos: r.elementos, removidos: r.removidos, refs: r.refs }),
         409 => ler(&resposta).map(|r| LoteGravado::Mudou { elementos: r.elementos, removidos: r.removidos }),
-        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
@@ -827,7 +827,7 @@ pub fn anexar_arquivo_na_lousa(perfil: i64, arquivo: &std::path::Path) -> Result
 fn resposta_anexo_lousa(status: u16, corpo: &[u8]) -> Result<AnexoLousa, String> {
     let corpo = String::from_utf8_lossy(corpo);
     if !(200..300).contains(&status) {
-        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo")));
+        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
     }
     serde_json::from_str(&corpo).map_err(|e| inesperada("/v1/perfis/anexos", e))
 }
@@ -864,6 +864,18 @@ struct Erro {
 
 /// Começo da mensagem quando o núcleo responde algo que a tela não entende.
 /// O detalhe (do serde, em inglês) vai só para o log, nunca para a tela.
+/// O erro de uma resposta sem o corpo de erro do núcleo. Um 404 assim é de
+/// rota que o núcleo não conhece: o núcleo em uso é anterior à tela (a
+/// instalação troca os arquivos, mas o núcleo só muda ao reiniciar).
+fn erro_sem_corpo(status: impl std::fmt::Display) -> String {
+    let status = status.to_string();
+    if status.starts_with("404") {
+        "o núcleo em uso é de uma versão anterior: feche os agentes, rode colmeia-nucleo --encerrar e abra a Colmeia de novo".to_string()
+    } else {
+        format!("erro {status} do núcleo")
+    }
+}
+
 const INESPERADA: &str = "resposta inesperada do núcleo";
 
 /// O erro é de conexão (o núcleo não está lá): a faixa do topo já avisa.
@@ -887,7 +899,7 @@ fn chamar<T: DeserializeOwned>(metodo: &str, caminho: &str, corpo: Option<serde_
     let (status, resposta) = canal::pedir_com_corpo(metodo, caminho, corpo.as_deref())?;
     if !(200..300).contains(&status) {
         // O núcleo explica o problema em português; é essa mensagem que a tela mostra.
-        return Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo")));
+        return Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
     }
     serde_json::from_str(&resposta).map_err(|e| inesperada(caminho, e))
 }
@@ -1060,7 +1072,7 @@ pub fn anexar(tarefa: i64, origem: &str, agente: Option<i64>, png: &[u8]) -> Res
 fn resposta_anexo(status: u16, corpo: &[u8]) -> Result<Anexo, String> {
     let corpo = String::from_utf8_lossy(corpo);
     if !(200..300).contains(&status) {
-        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo")));
+        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
     }
     serde_json::from_str(&corpo).map_err(|e| inesperada("/v1/tarefas/anexos", e))
 }
@@ -1179,7 +1191,7 @@ pub fn gravar_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str, versao: 
         409 => serde_json::from_str::<NotaMudou>(&resposta)
             .map(|m| NotaGravada::Mudou { texto: m.texto, versao: m.versao })
             .map_err(|e| inesperada("/v1/tarefas/notas", e)),
-        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
@@ -1190,7 +1202,7 @@ pub fn tirar_da_daily(tarefa: i64, dia: &str, fora: bool) -> Result<(), String> 
     let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/tarefas/{tarefa}/daily"), Some(&corpo))?;
     match status {
         204 => Ok(()),
-        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
@@ -1288,7 +1300,7 @@ fn sem_conteudo(metodo: &str, caminho: &str, corpo: Option<serde_json::Value>) -
     let (status, resposta) = canal::pedir_com_corpo(metodo, caminho, corpo.as_deref())?;
     match status {
         200..300 => Ok(()),
-        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
@@ -1385,7 +1397,7 @@ pub fn ver_arquivo(tarefa: i64, caminho: &str, mostrar: bool) -> Result<Previa, 
 pub fn imagem_do_arquivo(tarefa: i64, caminho: &str) -> Result<Vec<u8>, String> {
     match canal::pedir_bytes("GET", &format!("/v1/tarefas/{tarefa}/arquivo/imagem?caminho={}", codificar_url(caminho)), "application/json", &[])? {
         (200, corpo) => Ok(corpo),
-        (status, corpo) => Err(serde_json::from_slice::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        (status, corpo) => Err(serde_json::from_slice::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
@@ -1480,7 +1492,7 @@ pub fn sessoes(tarefa: i64) -> Result<Sessoes, String> {
 pub fn encerrar_nucleo() -> Result<(), String> {
     match canal::pedir_com_corpo("POST", "/v1/encerrar", None)? {
         (202, _) => Ok(()),
-        (status, corpo) => Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| format!("erro {status} do núcleo"))),
+        (status, corpo) => Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
     }
 }
 
