@@ -134,7 +134,7 @@ pub const FOSCO: Paleta = Paleta {
     ok: rgb(0x8db992),
     alerta: rgb(0xd2ad70),
     erro: rgb(0xd1848a),
-    favo: Color32::from_rgba_premultiplied(0, 0, 0, 10),
+    favo: Color32::from_rgba_premultiplied(12, 12, 12, 12),
     terminal_fundo: rgb(0x1c1d1f),
     terminal_texto: rgb(0xcdcbc5),
     ansi: [
