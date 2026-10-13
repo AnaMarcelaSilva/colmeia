@@ -1933,10 +1933,23 @@ impl Colmeia {
         }
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            let atual = tema::Escolha::TODAS.iter().position(|e| *e == self.tema).unwrap_or(0);
-            let largura = ui.available_width();
-            if let Some(i) = tema::segmentado_com_largura(ui, &tema::Escolha::TODAS.map(|e| e.nome()), atual, Some(largura)) {
-                self.tema = tema::Escolha::TODAS[i];
+            // Tema: um chip com menu, como o do perfil. Quatro nomes lado a lado
+            // não cabem na barra sem ficarem espremidos.
+            let resposta = tema::chip(ui, "Tema", self.tema.nome(), false);
+            let mut escolhido = None;
+            egui::Popup::menu(&resposta).show(|ui| {
+                ui.set_min_width(160.0);
+                for opcao in tema::Escolha::TODAS {
+                    if tema::opcao_menu(ui, opcao.nome(), opcao == self.tema) {
+                        escolhido = Some(opcao);
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(opcao) = escolhido
+                && opcao != self.tema
+            {
+                self.tema = opcao;
                 self.tema.aplicar(ui.ctx());
                 if !self.demo
                     && let Some(perfil) = &mut self.perfil
