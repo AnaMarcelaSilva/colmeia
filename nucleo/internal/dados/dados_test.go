@@ -464,3 +464,66 @@ func TestRecolherWorkspace(t *testing.T) {
 		t.Errorf("workspace inexistente: %v", err)
 	}
 }
+
+// Um banco da versão 8 tem o CHECK antigo na tabela de perfis, que recusa o
+// tema fosco. A migração refaz a tabela sem perder perfis nem o que aponta
+// para eles.
+func TestMigracaoDoTemaFosco(t *testing.T) {
+	b, dir := bancoDeTeste(t)
+	ctx := context.Background()
+	p, _ := b.CriarPerfil(ctx, "Pessoal", "leitura")
+	w, err := b.CriarWorkspace(ctx, p.ID, "Estudos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, comando := range []string{
+		`PRAGMA foreign_keys = OFF`,
+		`CREATE TABLE perfis_antiga (
+			id INTEGER PRIMARY KEY,
+			nome TEXT NOT NULL UNIQUE,
+			tema TEXT NOT NULL DEFAULT 'escuro' CHECK (tema IN ('escuro', 'claro', 'leitura')),
+			criado_em TEXT NOT NULL,
+			aviso_captura INTEGER NOT NULL DEFAULT 1,
+			tempo_agentes INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO perfis_antiga SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis`,
+		`DROP TABLE perfis`,
+		`ALTER TABLE perfis_antiga RENAME TO perfis`,
+		`PRAGMA user_version = 8`,
+	} {
+		if _, err := b.db.Exec(comando); err != nil {
+			t.Fatal(comando, err)
+		}
+	}
+	if err := b.DefinirTema(ctx, p.ID, "fosco"); err == nil {
+		t.Fatal("o CHECK antigo deveria recusar o fosco")
+	}
+	b.Fechar()
+
+	b2, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b2.Fechar()
+	var versao int
+	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
+	if versao != 9 {
+		t.Errorf("versão: %d", versao)
+	}
+	if err := b2.DefinirTema(ctx, p.ID, "fosco"); err != nil {
+		t.Fatalf("tema fosco depois da migração: %v", err)
+	}
+	perfil, err := b2.Perfil(ctx, p.ID)
+	if err != nil || perfil.Tema != "fosco" || perfil.Nome != "Pessoal" {
+		t.Fatalf("perfil depois da migração: %+v, %v", perfil, err)
+	}
+	workspaces, _ := b2.ListarWorkspaces(ctx, p.ID)
+	if len(workspaces) != 1 || workspaces[0].ID != w.ID {
+		t.Errorf("o workspace deveria continuar ligado ao perfil: %+v", workspaces)
+	}
+	if _, err := b2.db.Exec(`DELETE FROM perfis WHERE id = ?`, p.ID); err != nil {
+		t.Fatalf("remover o perfil: %v", err)
+	}
+	if workspaces, _ := b2.ListarWorkspaces(ctx, p.ID); len(workspaces) != 0 {
+		t.Errorf("a remoção em cascata parou de funcionar: %+v", workspaces)
+	}
+}

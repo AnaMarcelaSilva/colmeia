@@ -118,6 +118,31 @@ pub const LEITURA: Paleta = Paleta {
     ],
 };
 
+/// Tema fosco: cinza-carvão sem brilho, contraste mais baixo que o escuro e
+/// cores de estado apagadas, para uma tela que não chama atenção.
+#[rustfmt::skip]
+pub const FOSCO: Paleta = Paleta {
+    fundo: rgb(0x1f2022),
+    lateral: rgb(0x232426),
+    superficie: rgb(0x28292c),
+    superficie_alta: rgb(0x2f3033),
+    realce: rgb(0x38393d),
+    borda: rgb(0x3c3d41),
+    texto: rgb(0xd3d1cb),
+    suave: rgb(0x8f8e89),
+    destaque: rgb(0xa394cc),
+    ok: rgb(0x8db992),
+    alerta: rgb(0xd2ad70),
+    erro: rgb(0xd1848a),
+    favo: Color32::from_rgba_premultiplied(0, 0, 0, 10),
+    terminal_fundo: rgb(0x1c1d1f),
+    terminal_texto: rgb(0xcdcbc5),
+    ansi: [
+        rgb(0x2a2b2e), rgb(0xd1848a), rgb(0x8db992), rgb(0xd2bb7a), rgb(0x8aa6cf), rgb(0xb39ccc), rgb(0x86bcc3), rgb(0xcdcbc5),
+        rgb(0x6c6b67), rgb(0xe09aa0), rgb(0xa5cda9), rgb(0xe0cb90), rgb(0xa3bcdd), rgb(0xc7b3dc), rgb(0xa0d0d6), rgb(0xe8e6e0),
+    ],
+};
+
 /// Mistura opaca de `a` para `b` (t = 0 dá `a`, t = 1 dá `b`). Para fundos
 /// tingidos: uma cor translúcida sobre um painel sem nada embaixo se mistura
 /// com o preto da janela, não com o fundo do tema.
@@ -131,7 +156,7 @@ pub fn fundo_tingido(p: &Paleta, cor: Color32, claro: bool) -> Color32 {
     misturar(p.fundo, cor, if claro { 0.12 } else { 0.18 })
 }
 
-/// 0 = escuro, 1 = claro, 2 = leitura.
+/// 0 = escuro, 1 = claro, 2 = leitura, 3 = fosco.
 static ATUAL: AtomicU8 = AtomicU8::new(0);
 
 /// As cores do tema que está na tela agora.
@@ -139,28 +164,31 @@ pub fn cores() -> &'static Paleta {
     match ATUAL.load(Ordering::Relaxed) {
         1 => &CLARO,
         2 => &LEITURA,
+        3 => &FOSCO,
         _ => &ESCURO,
     }
 }
 
 /// Tema de fundo claro (claro ou leitura).
 pub fn claro() -> bool {
-    ATUAL.load(Ordering::Relaxed) != 0
+    matches!(ATUAL.load(Ordering::Relaxed), 1 | 2)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Escolha {
     Escuro,
+    Fosco,
     Claro,
     Leitura,
 }
 
 impl Escolha {
-    pub const TODAS: [Escolha; 3] = [Escolha::Escuro, Escolha::Claro, Escolha::Leitura];
+    pub const TODAS: [Escolha; 4] = [Escolha::Escuro, Escolha::Fosco, Escolha::Claro, Escolha::Leitura];
 
     pub fn nome(self) -> &'static str {
         match self {
             Escolha::Escuro => "Escuro",
+            Escolha::Fosco => "Fosco",
             Escolha::Claro => "Claro",
             Escolha::Leitura => "Leitura",
         }
@@ -170,21 +198,33 @@ impl Escolha {
     pub fn chave(self) -> &'static str {
         match self {
             Escolha::Escuro => "escuro",
+            Escolha::Fosco => "fosco",
             Escolha::Claro => "claro",
             Escolha::Leitura => "leitura",
         }
+    }
+
+    /// Tema de fundo escuro (escuro ou fosco).
+    pub fn escuro(self) -> bool {
+        matches!(self, Escolha::Escuro | Escolha::Fosco)
     }
 
     pub fn da_chave(chave: &str) -> Escolha {
         Escolha::TODAS.into_iter().find(|e| e.chave() == chave).unwrap_or(Escolha::Escuro)
     }
 
-    /// O egui só tem os temas escuro e claro; o de leitura usa a vaga do claro
-    /// com as próprias cores.
+    /// O egui só tem os temas escuro e claro; o fosco usa a vaga do escuro e o
+    /// de leitura a do claro, cada um com as próprias cores.
     pub fn aplicar(self, ctx: &egui::Context) {
         match self {
             Escolha::Escuro => {
                 ATUAL.store(0, Ordering::Relaxed);
+                ctx.set_visuals_of(Theme::Dark, visuais(&ESCURO, Visuals::dark()));
+                ctx.set_theme(ThemePreference::Dark);
+            }
+            Escolha::Fosco => {
+                ATUAL.store(3, Ordering::Relaxed);
+                ctx.set_visuals_of(Theme::Dark, visuais(&FOSCO, Visuals::dark()));
                 ctx.set_theme(ThemePreference::Dark);
             }
             Escolha::Claro => {
@@ -227,8 +267,9 @@ pub fn instalar(ctx: &egui::Context) {
 
     ctx.set_visuals_of(Theme::Dark, visuais(&ESCURO, Visuals::dark()));
     ctx.set_visuals_of(Theme::Light, visuais(&CLARO, Visuals::light()));
-    // Nos dois estilos (escuro e claro): o claro e o leitura usam a vaga do
-    // claro e, sem isto, ficariam com os tamanhos e espaçamentos padrão do egui.
+    // Nos dois estilos (escuro e claro): o fosco usa a vaga do escuro, o claro
+    // e o leitura a do claro e, sem isto, ficariam com os tamanhos e
+    // espaçamentos padrão do egui.
     ctx.all_styles_mut(|s| {
         s.interaction.selectable_labels = false;
         s.spacing.button_padding = vec2(12.0, 6.0);

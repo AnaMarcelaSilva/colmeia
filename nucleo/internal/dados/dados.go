@@ -36,12 +36,7 @@ type ErrInvalido struct{ Motivo string }
 func (e ErrInvalido) Error() string { return e.Motivo }
 
 const esquema = `
-CREATE TABLE IF NOT EXISTS perfis (
-	id INTEGER PRIMARY KEY,
-	nome TEXT NOT NULL UNIQUE,
-	tema TEXT NOT NULL DEFAULT 'escuro' CHECK (tema IN ('escuro', 'claro', 'leitura')),
-	criado_em TEXT NOT NULL
-);
+CREATE TABLE IF NOT EXISTS perfis (` + colunasPerfis + `);
 CREATE TABLE IF NOT EXISTS contas_ia (
 	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
 	ferramenta TEXT NOT NULL,
@@ -160,6 +155,16 @@ CREATE TABLE IF NOT EXISTS comandos (
 	criado_em TEXT NOT NULL,
 	UNIQUE (projeto_id, nome)
 );
+`
+
+// colunasPerfis é a definição da tabela perfis desde a versão 9 do banco
+// (com o tema fosco). A migração para ela está em migrarPerfis. As colunas
+// aviso_captura e tempo_agentes nasceram em migrar e ficam lá.
+const colunasPerfis = `
+	id INTEGER PRIMARY KEY,
+	nome TEXT NOT NULL UNIQUE,
+	tema TEXT NOT NULL DEFAULT 'escuro' CHECK (tema IN ('escuro', 'claro', 'leitura', 'fosco')),
+	criado_em TEXT NOT NULL
 `
 
 // colunasAnexos é a definição da tabela anexos desde a versão 3 do banco
@@ -371,7 +376,71 @@ func migrar(db *sql.DB) error {
 			return err
 		}
 	}
+	// Versão 9: o tema fosco entra no CHECK da tabela de perfis.
+	if versao < 9 {
+		if err := migrarPerfis(db); err != nil {
+			return fmt.Errorf("liberando o tema fosco nos perfis: %w", err)
+		}
+	}
 	return nil
+}
+
+// migrarPerfis leva a tabela perfis à versão 9: o CHECK do tema aceita
+// "fosco". Como em migrarAnexos, o SQLite não muda um CHECK com ALTER, então
+// a tabela é refeita numa transação com as chaves estrangeiras desligadas só
+// durante a troca; as outras tabelas continuam apontando para "perfis" pelo
+// nome. Os ids e as linhas ficam iguais.
+func migrarPerfis(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var definicao string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'perfis'`).Scan(&definicao); err != nil {
+		return err
+	}
+	if strings.Contains(definicao, "'fosco'") {
+		// Banco novo: a tabela já nasceu na versão 9.
+		_, err := conn.ExecContext(ctx, `PRAGMA user_version = 9`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, comando := range []string{
+		`CREATE TABLE perfis_nova (` + colunasPerfis + `,
+			aviso_captura INTEGER NOT NULL DEFAULT 1,
+			tempo_agentes INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes)
+			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis`,
+		`DROP TABLE perfis`,
+		`ALTER TABLE perfis_nova RENAME TO perfis`,
+	} {
+		if _, err := tx.ExecContext(ctx, comando); err != nil {
+			return err
+		}
+	}
+	linhas, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	problema := linhas.Next()
+	linhas.Close()
+	if problema {
+		return errors.New("a troca da tabela de perfis quebraria referências")
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 9`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrarAnexos leva a tabela anexos à versão 3: aceita a origem "arquivo" e
@@ -696,7 +765,7 @@ var (
 	TiposProjeto = []string{"git", "pasta"}
 	Locais       = []string{"pasta", "copia"}
 	Papeis       = []string{"líder", "dev", "revisor", "testador"}
-	Temas        = []string{"escuro", "claro", "leitura"}
+	Temas        = []string{"escuro", "claro", "leitura", "fosco"}
 	Colunas      = []string{"backlog", "trabalhando", "aguardando", "revisao", "concluido"}
 	Ferramentas  = []string{"claude", "codex", "gemini", "opencode"}
 	// Um agente pode ser uma das ferramentas ou um shell comum.

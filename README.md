@@ -36,7 +36,7 @@ Os dados ficam em `~/.local/share/colmeia/` no Linux e em `%LOCALAPPDATA%\Colmei
 
 ## Primeiros passos
 
-Na primeira execução, a Colmeia pede a criação de um perfil. Perfis separam contextos, como trabalho e estudo, cada um com os seus projetos, contas de IA e tema (escuro, claro ou leitura). A Colmeia detecta as ferramentas de IA instaladas, e cada uma pode usar a conta do sistema ou uma conta exclusiva do perfil.
+Na primeira execução, a Colmeia pede a criação de um perfil. Perfis separam contextos, como trabalho e estudo, cada um com os seus projetos, contas de IA e tema (escuro, fosco, claro ou leitura). A Colmeia detecta as ferramentas de IA instaladas, e cada uma pode usar a conta do sistema ou uma conta exclusiva do perfil.
 
 Em seguida, adicione um projeto. Pode ser um repositório git ou qualquer pasta, que não é alterada ao ser adicionada.
 
@@ -199,7 +199,7 @@ Para testar sem afetar os dados reais, aponte `COLMEIA_DIR` e `COLMEIA_DADOS` pa
 | `COLMEIA_NAVEGADOR` | Chrome ou Chromium do navegador da tarefa |
 | `COLMEIA_CHAVEIRO=memoria` | Ignora o chaveiro e guarda as senhas só na memória |
 | `COLMEIA_CHAVEIRO_SERVICO` | Nome do serviço no chaveiro (padrão `Colmeia`) |
-| `COLMEIA_TEMA` | `escuro`, `claro` ou `leitura`, antes de escolher um perfil |
+| `COLMEIA_TEMA` | `escuro`, `fosco`, `claro` ou `leitura`, antes de escolher um perfil |
 | `COLMEIA_SEM_ABELHA=1` | Desliga a abelha |
 | `COLMEIA_TAMANHO` | Tamanho inicial da janela, como `1280x720` |
 | `COLMEIA_FPS=1` | Mostra o contador de quadros, para medir desempenho |

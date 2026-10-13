@@ -256,7 +256,7 @@ impl Palco {
             self.transicao(agora);
         } else if tecla(Key::T) {
             let atual = self.tema_sessao.unwrap_or(self.tema_base);
-            let outro = if atual == tema::Escolha::Escuro { tema::Escolha::Claro } else { tema::Escolha::Escuro };
+            let outro = if atual.escuro() { tema::Escolha::Claro } else { tema::Escolha::Escuro };
             outro.aplicar(ctx);
             self.tema_sessao = Some(outro);
         } else if interrogacao || tecla(Key::Questionmark) {
