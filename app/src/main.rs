@@ -215,6 +215,7 @@ struct Colmeia {
     sem_abelha: bool,
     tema: tema::Escolha,
     favo: tema::Favo,
+    gradiente: tema::Gradiente,
     compositor: Compositor,
     filtro: Option<String>,
     /// Eventos do perfil aberto e o estado da ligação.
@@ -337,6 +338,7 @@ impl Colmeia {
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
             tema: escolha,
             favo: tema::Favo::default(),
+            gradiente: tema::Gradiente::default(),
             compositor: Compositor::default(),
             filtro: None,
             ouvinte: None,
@@ -1101,7 +1103,8 @@ impl Colmeia {
 
     /// Faixa no topo quando o núcleo está fora: o quadro continua visível, mas
     /// nada é pedido até ele voltar.
-    fn faixa_nucleo(&mut self, ui: &mut egui::Ui) {
+    /// Diz se a faixa apareceu (ela ocupa o alto do cartão).
+    fn faixa_nucleo(&mut self, ui: &mut egui::Ui) -> bool {
         let p = cores();
         let (texto, cor) = match (self.conexao, &self.problema_nucleo) {
             (Conexao::Antigo, _) => {
@@ -1109,7 +1112,7 @@ impl Colmeia {
             }
             (Conexao::Fora, _) => ("Núcleo desconectado. Tentando reconectar…", p.alerta),
             (_, Some(_)) => ("", p.erro),
-            _ => return,
+            _ => return false,
         };
         let mut texto = if texto.is_empty() { self.problema_nucleo.clone().unwrap_or_default() } else { texto.to_string() };
         // Com uma lousa na tela, a faixa dela não aparece: o aviso vem aqui.
@@ -1124,30 +1127,35 @@ impl Colmeia {
         // Opaco: uma cor translúcida aqui se misturaria com o preto da janela.
         let fundo = tema::fundo_tingido(p, cor, tema::claro());
         let mut tentar = false;
-        egui::Panel::top("faixa-nucleo").show_separator_line(false).frame(egui::Frame::new().fill(fundo).inner_margin(egui::Margin::symmetric(20, 6))).show(
-            ui,
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_height(32.0);
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.0, cor);
-                    ui.label(RichText::new(texto).color(p.texto).size(13.5));
-                    if self.conexao == Conexao::Antigo {
-                        tema::etiqueta_ui(ui, "colmeia-nucleo --encerrar", egui::FontId::monospace(12.0), p.texto);
-                    }
-                    if self.conexao == Conexao::Fora {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            tentar = tema::botao_secundario(ui, "Tentar agora")
-                                .on_hover_text("Reconecta e, se o núcleo não estiver rodando, inicia de novo")
-                                .clicked();
-                        });
-                    }
-                });
-            },
-        );
+        // No alto do cartão, com os cantos de cima dele.
+        let m = tema::MARGEM_MOLDURA as i8;
+        let raio = tema::RAIO_MOLDURA;
+        let moldura = egui::Frame::new()
+            .fill(fundo)
+            .inner_margin(egui::Margin::symmetric(20, 6))
+            .outer_margin(egui::Margin { left: 0, right: m, top: m, bottom: 0 })
+            .corner_radius(egui::CornerRadius { nw: raio, ne: raio, sw: 0, se: 0 });
+        egui::Panel::top("faixa-nucleo").show_separator_line(false).frame(moldura).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_height(32.0);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, cor);
+                ui.label(RichText::new(texto).color(p.texto).size(13.5));
+                if self.conexao == Conexao::Antigo {
+                    tema::etiqueta_ui(ui, "colmeia-nucleo --encerrar", egui::FontId::monospace(12.0), p.texto);
+                }
+                if self.conexao == Conexao::Fora {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        tentar =
+                            tema::botao_secundario(ui, "Tentar agora").on_hover_text("Reconecta e, se o núcleo não estiver rodando, inicia de novo").clicked();
+                    });
+                }
+            });
+        });
         if tentar && let Some(o) = &self.ouvinte {
             o.tentar_agora();
         }
+        true
     }
 
     fn topo(&mut self, ui: &mut egui::Ui, agora: f64) {
@@ -3267,11 +3275,9 @@ fn item_lateral(
     let rect = rect.with_min_x(rect.min.x + recuo);
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let em_cima = ui.rect_contains_pointer(rect);
-    if ativo || em_cima {
-        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), if ativo { p.realce } else { p.realce.gamma_multiply(0.6) });
-    }
+    pintar_fundo_lateral(ui, &resposta, rect, ativo, em_cima);
     let fonte = if ativo { tema::forte(13.5) } else { egui::FontId::proportional(13.5) };
-    let cor = if ativo { p.texto } else { p.suave };
+    let cor = tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, p.suave, p.texto);
     // Com ícone (a lousa do workspace), o texto vai a 32 da esquerda.
     let x = match icone {
         Some(i) => {
@@ -3293,6 +3299,18 @@ fn item_lateral(
     (resposta, mais)
 }
 
+/// Fundo de um item da barra lateral: o realce dela no ativo e mais leve com
+/// o mouse em cima, entrando e saindo com a transição do tema.
+fn pintar_fundo_lateral(ui: &egui::Ui, resposta: &egui::Response, rect: egui::Rect, ativo: bool, em_cima: bool) {
+    let realce = tema::realce_lateral(cores());
+    let mouse = tema::transicao(ui, resposta.id.with("mouse"), em_cima);
+    let escolhido = tema::transicao(ui, resposta.id.with("ativo"), ativo);
+    let forca = escolhido.max(mouse * 0.6);
+    if forca > 0.0 {
+        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), realce.gamma_multiply(forca));
+    }
+}
+
 /// Cabeçalho de um workspace na barra lateral: o nome, pequeno como antes,
 /// agora clicável (mostra todos os projetos dele). Com o mouse em cima o
 /// texto vai para a cor do texto (o suave sobre o realce não tem contraste
@@ -3309,9 +3327,7 @@ fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize
     let seta = seta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if recolhido { "Mostrar os projetos" } else { "Recolher os projetos" });
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let em_cima = resposta.hovered() || seta.hovered();
-    if ativo || em_cima {
-        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), if ativo { p.realce } else { p.realce.gamma_multiply(0.6) });
-    }
+    pintar_fundo_lateral(ui, &resposta, rect, ativo, em_cima);
     // O workspace se destaca dos projetos: seminegrito e na cor do texto
     // sempre, maior que antes, com a seta na cor de destaque.
     let (fonte, cor) = (tema::forte(12.5), p.texto);
@@ -3350,6 +3366,9 @@ fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize
     }
     (resposta, seta)
 }
+
+/// Largura da barra lateral; o cartão do conteúdo começa logo depois.
+const LARGURA_LATERAL: f32 = 236.0;
 
 /// Quanto os projetos e a lousa de um workspace entram na barra lateral.
 const RECUO_WORKSPACE: f32 = 12.0;
@@ -3514,11 +3533,15 @@ impl eframe::App for Colmeia {
         // Mede o atlas das letras antes de qualquer texto do quadro (o cache da lousa depende dele).
         lousa::desenho::geracao_das_fontes(&ctx);
 
+        // A janela: o gradiente e, bem suave por cima, o favo.
+        let janela = ui.max_rect();
+        self.gradiente.desenhar(ui.painter(), janela);
+        self.favo.desenhar(ui.painter(), janela);
+
         // Sem perfil: só a tela de entrada, sobre o favo.
         if let Tela::Entrada(entrada) = &mut self.tela {
             let mut escolhido = None;
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
-                self.favo.desenhar(ui.painter(), ui.max_rect());
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| escolhido = entrada.mostrar(ui));
             });
             if let Some(perfil) = escolhido {
@@ -3598,22 +3621,29 @@ impl eframe::App for Colmeia {
         let estado = self.abelha.atualizar(base, |p| no_escopo.contains(&p), agora);
         let linha = abelha::linha_de_estado(estado, self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)));
 
+        // O conteúdo vai num cartão solto da janela; a barra lateral fica
+        // direto sobre o gradiente, à esquerda dele.
+        let cartao = tema::rect_cartao_principal(janela, LARGURA_LATERAL);
+        tema::cartao_principal(ui.painter(), cartao);
+
         let mut abelha = (None, false);
         egui::Panel::left("lateral")
-            .exact_size(236.0)
+            .exact_size(LARGURA_LATERAL)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(p.lateral).inner_margin(egui::Margin::symmetric(14, 18)))
+            .frame(egui::Frame::new().fill(tema::fundo_lateral(p)).inner_margin(egui::Margin::symmetric(14, 18)))
             .show(ui, |ui| abelha = self.lateral(ui, agora, &linha));
         if matches!(self.tela, Tela::Entrada(_)) {
             return;
         }
         let (caixa_abelha, abelha_clicada) = abelha;
 
-        self.faixa_nucleo(ui);
+        // As margens de dentro dos painéis somam a distância do cartão até a janela.
+        let m = tema::MARGEM_MOLDURA as i8;
+        let com_faixa = self.faixa_nucleo(ui);
         egui::Panel::top("topo")
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin::symmetric(20, 10)))
+            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20 + m, top: if com_faixa { 10 } else { 10 + m }, bottom: 10 }))
             .show(ui, |ui| self.topo(ui, agora));
 
         // A saída do Play, embaixo, em todas as telas (a altura muda pela borda).
@@ -3626,7 +3656,7 @@ impl eframe::App for Colmeia {
                 .default_size(260.0)
                 .min_size(120.0)
                 .show_separator_line(true)
-                .frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 }))
+                .frame(egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20 + m, top: 10, bottom: 12 + m }))
                 .show(ui, |ui| aviso = self.play.mostrar_painel(ui, &bytes, pode));
             if let Some((tipo, texto)) = aviso {
                 self.avisar(tipo, &texto, agora);
@@ -3637,60 +3667,51 @@ impl eframe::App for Colmeia {
         let mut acoes_linha = Vec::new();
         let mut acoes_lousa = None;
         let mut acoes_banco = Vec::new();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo).inner_margin(egui::Margin { left: 20, right: 20, top: 6, bottom: 16 })).show(
-            ui,
-            |ui| {
-                let area = ui.max_rect().expand2(egui::vec2(20.0, 16.0));
-                self.favo.desenhar(ui.painter(), area);
-                if !matches!(self.tela, Tela::Tarefa { .. }) {
-                    self.tarefa_na_tela = None;
+        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20 + m, top: 6, bottom: 16 + m })).show(ui, |ui| {
+            if !matches!(self.tela, Tela::Tarefa { .. }) {
+                self.tarefa_na_tela = None;
+            }
+            match self.tela {
+                Tela::Quadro if self.modelo.projetos.is_empty() && self.conexao == Conexao::Ligado => self.sem_projetos(ui),
+                Tela::Quadro => {
+                    self.barra(ui, agora);
+                    let pode = self.pode_mudar();
+                    // O nome do projeto aparece no cartão fora da visão de um projeto só.
+                    let rotulos = self.escopo.projeto().is_none().then(|| rotulos_de_projeto(&self.modelo.projetos, &no_escopo));
+                    acoes = quadro::mostrar(ui, &mut self.modelo.tarefas, &no_escopo, rotulos.as_ref(), self.filtro.as_deref(), &self.terminais, pode);
                 }
-                match self.tela {
-                    Tela::Quadro if self.modelo.projetos.is_empty() && self.conexao == Conexao::Ligado => self.sem_projetos(ui),
-                    Tela::Quadro => {
-                        self.barra(ui, agora);
-                        let pode = self.pode_mudar();
-                        // O nome do projeto aparece no cartão fora da visão de um projeto só.
-                        let rotulos = self.escopo.projeto().is_none().then(|| rotulos_de_projeto(&self.modelo.projetos, &no_escopo));
-                        acoes = quadro::mostrar(ui, &mut self.modelo.tarefas, &no_escopo, rotulos.as_ref(), self.filtro.as_deref(), &self.terminais, pode);
-                    }
-                    Tela::Registro(aba) => {
-                        self.barra(ui, agora);
-                        let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
-                        self.registro.conectado = self.pode_mudar();
-                        self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
-                        self.registro.pedidos = pedido::resumir(&self.modelo);
-                        self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
-                        // O conteúdo das páginas tem as próprias margens (24 nas laterais).
-                        ui.add_space(4.0);
-                        acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos);
-                    }
-                    Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
-                    Tela::Lousa(ws) => {
-                        // A lousa ocupa o painel inteiro, sem as margens.
-                        let m = ui.max_rect();
-                        let area = egui::Rect::from_min_max(m.min - egui::vec2(20.0, 6.0), m.max + egui::vec2(20.0, 16.0));
-                        let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
-                        // Os avisos da lousa ficam centrados nela, como na da tarefa.
-                        self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
-                        acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
-                    }
-                    Tela::Banco => {
-                        let modelo = &self.modelo;
-                        let nomes = |agente: i64| {
-                            modelo
-                                .tarefas
-                                .iter()
-                                .flat_map(|t| &t.agentes)
-                                .find(|a| a.id == agente)
-                                .map_or_else(|| "Um agente".to_string(), |a| a.nome_com_papel())
-                        };
-                        acoes_banco = self.banco.mostrar(ui, &self.modelo.aprovacoes, &nomes, agora);
-                    }
-                    Tela::Entrada(_) => {}
+                Tela::Registro(aba) => {
+                    self.barra(ui, agora);
+                    let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+                    self.registro.conectado = self.pode_mudar();
+                    self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
+                    self.registro.pedidos = pedido::resumir(&self.modelo);
+                    self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
+                    // O conteúdo das páginas tem as próprias margens (24 nas laterais).
+                    ui.add_space(4.0);
+                    acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos);
                 }
-            },
-        );
+                Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
+                Tela::Lousa(ws) => {
+                    // A lousa ocupa o cartão abaixo do topo, sem as margens; 6 px
+                    // para dentro, os cantos dela não passam da curva do cartão.
+                    let topo = ui.max_rect().top() - 6.0;
+                    let area = egui::Rect::from_min_max(egui::pos2(cartao.left() + 6.0, topo), cartao.max - egui::vec2(6.0, 6.0));
+                    let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
+                    // Os avisos da lousa ficam centrados nela, como na da tarefa.
+                    self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
+                    acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
+                }
+                Tela::Banco => {
+                    let modelo = &self.modelo;
+                    let nomes = |agente: i64| {
+                        modelo.tarefas.iter().flat_map(|t| &t.agentes).find(|a| a.id == agente).map_or_else(|| "Um agente".to_string(), |a| a.nome_com_papel())
+                    };
+                    acoes_banco = self.banco.mostrar(ui, &self.modelo.aprovacoes, &nomes, agora);
+                }
+                Tela::Entrada(_) => {}
+            }
+        });
         for acao in acoes_banco {
             match acao {
                 banco::Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
@@ -3852,7 +3873,10 @@ fn main() -> eframe::Result {
         .and_then(|v| v.split_once('x').and_then(|(l, a)| Some([l.trim().parse::<f32>().ok()?, a.trim().parse::<f32>().ok()?])))
         .filter(|[l, a]| *l >= 640.0 && *a >= 480.0)
         .unwrap_or([1600.0, 900.0]);
-    let opcoes = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size(tamanho), ..Default::default() };
+    // O ícone da janela é a placa da logo em 64 px (a mesma do atalho).
+    let icone = eframe::icon_data::from_png_bytes(include_bytes!("../../packaging/colmeia-64.png")).unwrap_or_default();
+    let viewport = egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size(tamanho).with_icon(Arc::new(icone));
+    let opcoes = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, problema)))))
 }
 

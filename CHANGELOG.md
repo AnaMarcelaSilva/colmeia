@@ -15,6 +15,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Mudou
 
+- **Identidade nova:** a logo agora são três células do favo que formam uma abelha vista de cima, também no ícone do atalho e da janela. Os quatro temas ganharam cores revisadas, com todo texto legível em qualquer fundo, e o destaque do Leitura passou de ferrugem para ameixa. O conteúdo fica num cartão arredondado sobre um gradiente leve, botões e itens mudam de cor suavemente ao passar o mouse, e a abelha ganhou o acabamento da logo (corpo em célula, asas de favo e tela com moldura).
 - **Ctrl+Enter quebra a linha** na caixa de mensagem, no "Pedir ao agente" e no terminal do agente, como o Shift+Enter. Só o Enter puro envia, como no terminal do Claude Code.
 - **Daily e sprint carregam juntas:** quem atualiza uma encontra a outra já pronta, em vez da página vazia esperando a resposta.
 

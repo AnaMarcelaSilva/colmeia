@@ -1,10 +1,11 @@
 //! A abelha-robô da Colmeia: desenhada só com formas vetoriais do egui, sem
 //! imagens, com cinco estados, cada um ligado a uma situação real do trabalho
-//! dos agentes.
+//! dos agentes. O acabamento segue a logo: corpo numa célula deitada, asas
+//! de favo e a tela do rosto com moldura roxa.
 
 use std::f32::consts::TAU;
 
-use eframe::egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, vec2};
+use eframe::egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Estado {
@@ -39,13 +40,14 @@ impl Estado {
         }
     }
 
+    /// A luz das antenas: as cores de estado dos temas (ok, alerta, erro, destaque).
     fn cor_luz(self) -> Color32 {
         match self {
-            Estado::Dormindo => Color32::from_rgb(0x7a, 0x81, 0x90),
-            Estado::Trabalhando => Color32::from_rgb(0x7f, 0xd1, 0x8b),
-            Estado::Aguardando => Color32::from_rgb(0xf2, 0xb3, 0x5b),
-            Estado::Bugado => Color32::from_rgb(0xf2, 0x5b, 0x6b),
-            Estado::Comemorando => Color32::from_rgb(0xc7, 0x92, 0xea),
+            Estado::Dormindo => Color32::from_rgb(0x8a, 0x91, 0xa3),
+            Estado::Trabalhando => VERDE,
+            Estado::Aguardando => AMBAR,
+            Estado::Bugado => Color32::from_rgb(0xf4, 0x70, 0x7c),
+            Estado::Comemorando => ROXO_CLARO,
         }
     }
 }
@@ -57,8 +59,15 @@ pub struct Tempo {
     pub no_estado: f32,
 }
 
-const TELA: Color32 = Color32::from_rgb(0x11, 0x14, 0x1b);
-const OLHO: Color32 = Color32::from_rgb(0x6f, 0xe3, 0xf0);
+const MEL: Color32 = Color32::from_rgb(0xf4, 0xb5, 0x44);
+const MEL_SOMBRA: Color32 = Color32::from_rgba_premultiplied(0x60, 0x43, 0x13, 115);
+const LISTRA: Color32 = Color32::from_rgb(0x2a, 0x26, 0x38);
+const TELA: Color32 = Color32::from_rgb(0x14, 0x12, 0x21);
+const OLHO: Color32 = Color32::from_rgb(0x7f, 0xe6, 0xf2);
+const ROXO: Color32 = Color32::from_rgb(0x8f, 0x72, 0xf6);
+const ROXO_CLARO: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
+const VERDE: Color32 = Color32::from_rgb(0x6f, 0xd4, 0x9b);
+const AMBAR: Color32 = Color32::from_rgb(0xf1, 0xb6, 0x5f);
 
 /// Desenha em coordenadas de um quadro de 100 x 100 centrado em `c`.
 /// `tinta` troca todas as cores por uma só, para o efeito de cores deslocadas.
@@ -120,6 +129,89 @@ impl<'a> Pincel<'a> {
     fn texto(&self, x: f32, y: f32, tamanho: f32, texto: &str, cor: Color32) {
         self.p.text(self.pt(x, y), Align2::CENTER_CENTER, texto, FontId::proportional(tamanho * self.u), self.cor(cor));
     }
+
+    /// Polígono convexo em coordenadas do quadro, com contorno opcional.
+    fn poligono(&self, pontos: &[Pos2], cor: Color32, contorno: Option<(f32, Color32)>) {
+        let pontos = pontos.iter().map(|q| self.pt(q.x, q.y)).collect();
+        let traco = contorno.map_or(Stroke::NONE, |(e, c)| Stroke::new(e * self.u, self.cor(c)));
+        self.p.add(Shape::convex_polygon(pontos, self.cor(cor), traco));
+    }
+
+    /// Contorno de um retângulo arredondado (a moldura da tela).
+    fn moldura(&self, (x, y): (f32, f32), (l, a): (f32, f32), raio: f32, espessura: f32, cor: Color32) {
+        let rect = Rect::from_center_size(self.pt(x, y), vec2(l * self.u, a * self.u));
+        let raio = CornerRadius::same((raio * self.u).min(255.0) as u8);
+        self.p.rect_stroke(rect, raio, Stroke::new(espessura * self.u, self.cor(cor)), eframe::egui::StrokeKind::Middle);
+    }
+}
+
+/// Hexágono de raio `r` em volta de `c`; `deitado` põe uma aresta em cima
+/// (o corpo), senão uma ponta em cima (as asas e a logo).
+pub fn hexagono(c: Pos2, r: f32, deitado: bool) -> Vec<Pos2> {
+    let giro = if deitado { 0.0 } else { -90.0 };
+    (0..6)
+        .map(|i| {
+            let a = (60.0 * i as f32 + giro).to_radians();
+            c + vec2(a.cos() * r, a.sin() * r)
+        })
+        .collect()
+}
+
+/// O polígono convexo com os cantos arredondados por um disco de `raio`: o
+/// mesmo que um traço da mesma cor com junção redonda (o egui só faz junção
+/// em ponta). Continua convexo, para desenhar com `convex_polygon`.
+pub fn arredondar(pontos: &[Pos2], raio: f32) -> Vec<Pos2> {
+    let n = pontos.len();
+    if n < 3 || raio <= 0.0 {
+        return pontos.to_vec();
+    }
+    let centro = pontos.iter().fold(vec2(0.0, 0.0), |s, q| s + q.to_vec2()) / n as f32;
+    // A normal de fora de cada aresta (de i para i + 1).
+    let normais: Vec<_> = (0..n)
+        .map(|i| {
+            let (a, b) = (pontos[i], pontos[(i + 1) % n]);
+            let d = (b - a).normalized();
+            let normal = vec2(d.y, -d.x);
+            if normal.dot(a + (b - a) / 2.0 - pos2(centro.x, centro.y)) < 0.0 { -normal } else { normal }
+        })
+        .collect();
+    let mut saida = Vec::with_capacity(n * 5);
+    for i in 0..n {
+        let (n1, n2) = (normais[(i + n - 1) % n], normais[i]);
+        let a1 = n1.y.atan2(n1.x);
+        let mut delta = n2.y.atan2(n2.x) - a1;
+        if delta > std::f32::consts::PI {
+            delta -= TAU;
+        } else if delta < -std::f32::consts::PI {
+            delta += TAU;
+        }
+        for passo in 0..=4 {
+            let a = a1 + delta * passo as f32 / 4.0;
+            saida.push(pontos[i] + vec2(a.cos(), a.sin()) * raio);
+        }
+    }
+    saida
+}
+
+/// A parte de um polígono convexo entre duas alturas (y0 <= y <= y1): as
+/// listras e a sombra cortadas no contorno do corpo.
+fn faixa(pontos: &[Pos2], y0: f32, y1: f32) -> Vec<Pos2> {
+    let cortar = |pontos: &[Pos2], dentro: &dyn Fn(Pos2) -> bool, y: f32| {
+        let mut saida = Vec::new();
+        for (i, &a) in pontos.iter().enumerate() {
+            let b = pontos[(i + 1) % pontos.len()];
+            if dentro(a) {
+                saida.push(a);
+            }
+            if dentro(a) != dentro(b) {
+                let t = (y - a.y) / (b.y - a.y);
+                saida.push(pos2(a.x + t * (b.x - a.x), y));
+            }
+        }
+        saida
+    };
+    let acima = cortar(pontos, &|q| q.y >= y0, y0);
+    cortar(&acima, &|q| q.y <= y1, y1)
 }
 
 /// Número pseudoaleatório estável entre 0 e 1: o mesmo quadro desenha sempre igual.
@@ -163,7 +255,7 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, estado: Estado, t
         let y = (aleatorio(semente, i + 50) - 0.5) * 90.0;
         let largura = 30.0 + aleatorio(semente, i + 60) * 70.0;
         let x = (aleatorio(semente, i + 70) - 0.5) * 40.0;
-        let cor = if i % 2 == 0 { Color32::from_rgba_unmultiplied(111, 227, 240, 90) } else { Color32::from_rgba_unmultiplied(242, 91, 107, 90) };
+        let cor = if i % 2 == 0 { Color32::from_rgba_unmultiplied(127, 230, 242, 90) } else { Color32::from_rgba_unmultiplied(244, 112, 124, 90) };
         base.caixa(x, y, largura, 1.6, 0.0, cor);
     }
 }
@@ -188,74 +280,88 @@ fn corpo(p: Pincel, estado: Estado, t: Tempo) {
 
 /// Posição da mão para um braço preso em `ombro`, em cada estado.
 fn mao(lado: f32, estado: Estado, tt: f32) -> (f32, f32) {
-    let comprimento = 16.0;
+    let comprimento = 13.0;
     let angulo: f32 = match estado {
-        Estado::Dormindo => 1.35,
-        Estado::Trabalhando => 0.9 + (tt * 12.0 + lado).sin() * 0.25,
-        Estado::Aguardando if lado > 0.0 => -1.1 + (tt * 10.0).sin() * 0.45,
-        Estado::Aguardando => 1.2,
-        Estado::Bugado => 1.0 + (aleatorio((tt * 14.0) as u32, lado as u32 + 5) - 0.5) * 1.2,
-        Estado::Comemorando => -1.0 + (tt * 9.0 + lado).sin() * 0.4,
+        Estado::Dormindo => 1.22,
+        Estado::Trabalhando => 0.7 + (tt * 12.0 + lado).sin() * 0.25,
+        Estado::Aguardando if lado > 0.0 => -1.05 + (tt * 10.0).sin() * 0.42,
+        Estado::Aguardando => 1.13,
+        Estado::Bugado if lado > 0.0 => 0.35 + (aleatorio((tt * 14.0) as u32, 6) - 0.5) * 1.2,
+        Estado::Bugado => 1.4 + (aleatorio((tt * 14.0) as u32, 5) - 0.5) * 1.2,
+        Estado::Comemorando => -0.96 + (tt * 9.0 + lado).sin() * 0.42,
     };
     (angulo.cos() * comprimento * lado.signum(), angulo.sin() * comprimento)
 }
 
+/// O corpo: um hexágono deitado, como as células da logo.
+const CORPO: [(f32, f32); 6] = [(-40.0, 6.0), (-23.0, -24.0), (23.0, -24.0), (40.0, 6.0), (23.0, 36.0), (-23.0, 36.0)];
+
 fn abelha(p: Pincel, estado: Estado, t: Tempo) {
     let tt = t.total;
-    let amarelo = Color32::from_rgb(0xf6, 0xc4, 0x43);
-    let listra = Color32::from_rgb(0x2b, 0x2b, 0x35);
+    let dorme = estado == Estado::Dormindo;
 
-    // Asas atrás do corpo; batem rápido quando trabalha.
+    // Asas de favo atrás do corpo; batem (achatam) rápido quando trabalha.
     let batida = match estado {
         Estado::Dormindo => 0.0,
-        Estado::Trabalhando | Estado::Comemorando => (tt * 45.0).sin() * 0.55,
-        Estado::Aguardando => (tt * 18.0).sin() * 0.35,
-        Estado::Bugado => (aleatorio((tt * 14.0) as u32, 7) - 0.5) * 0.9,
+        Estado::Trabalhando | Estado::Comemorando => (tt * 45.0).sin() * 0.5 + 0.5,
+        Estado::Aguardando => (tt * 21.0).sin() * 0.5 + 0.5,
+        Estado::Bugado => aleatorio((tt * 14.0) as u32, 7),
     };
-    // Asas translúcidas, presas nas costas e abertas para os lados.
-    let asa = Color32::from_rgba_unmultiplied(200, 228, 255, 85);
-    let brilho = Color32::from_rgba_unmultiplied(235, 245, 255, 70);
-    let (inclinacao, altura) = if estado == Estado::Dormindo { (0.35, -22.0) } else { (0.6, -26.0) };
+    let asa = Color32::from_rgba_unmultiplied(190, 174, 255, 97);
+    let (raio, x, y, giro) = if dorme { (12.0, 30.0, -20.0, 24.0_f32) } else { (15.0, 37.0, -27.0, 32.0) };
     for lado in [-1.0_f32, 1.0] {
-        let angulo = (inclinacao + batida) * lado;
-        p.elipse(36.0 * lado, altura, 17.0, 10.0, angulo, asa);
-        p.elipse(33.0 * lado, altura - 2.0, 9.0, 4.5, angulo, brilho);
+        let (s, c) = (giro * lado).to_radians().sin_cos();
+        let achatar = 1.0 - 0.45 * batida;
+        let colocar = |q: Pos2| {
+            let (qx, qy) = (q.x, q.y * achatar);
+            pos2(x * lado + qx * c - qy * s, y + qx * s + qy * c)
+        };
+        let celula: Vec<Pos2> = hexagono(Pos2::ZERO, raio, false).into_iter().map(colocar).collect();
+        p.poligono(&celula, asa, Some((1.6, ROXO.gamma_multiply(0.75))));
+        let (a, b) = (colocar(pos2(-6.0 * lado, -5.0)), colocar(pos2(2.0 * lado, -9.0)));
+        p.linha(a.x, a.y, b.x, b.y, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 115));
     }
 
-    // Antenas; mexem quando está esperando você.
+    // Antenas com a luz do estado; mexem quando está esperando você.
     let balanco = if estado == Estado::Aguardando { (tt * 10.0).sin() * 3.0 } else { 0.0 };
-    p.linha(-9.0, -26.0, -17.0 + balanco, -44.0, 2.4, listra);
-    p.linha(9.0, -26.0, 17.0 + balanco, -44.0, 2.4, listra);
     let luz = estado.cor_luz();
-    p.circulo(-18.0 + balanco, -46.0, 4.2, luz);
-    p.circulo(18.0 + balanco, -46.0, 4.2, luz);
-
-    // Bracinhos.
     for lado in [-1.0_f32, 1.0] {
-        let (ox, oy) = (38.0 * lado, 12.0);
+        p.linha(9.0 * lado, -24.0, 17.0 * lado + balanco, -42.0, 2.6, LISTRA);
+        if !dorme {
+            p.circulo(17.5 * lado + balanco, -44.0, 7.5, luz.gamma_multiply(0.22));
+        }
+        p.circulo(17.5 * lado + balanco, -44.0, 4.4, luz);
+    }
+
+    // Bracinhos com a mão redonda.
+    for lado in [-1.0_f32, 1.0] {
+        let (ox, oy) = (39.0 * lado, 12.0);
         let (mx, my) = mao(lado, estado, tt);
-        p.linha(ox, oy, ox + mx * 0.7, oy + my * 0.7, 5.0, listra);
+        p.linha(ox, oy, ox + mx, oy + my, 5.0, LISTRA);
+        p.circulo(ox + mx, oy + my, 3.4, LISTRA);
     }
 
-    // Corpo redondo com listras que acompanham a curva.
-    let (cy, raio, meio) = (4.0, 34.0, 8.0);
-    p.caixa(0.0, cy, 84.0, 68.0, raio, amarelo);
-    for y in [17.0_f32, 27.0] {
-        let dy = y - cy;
-        let meia = meio + (raio * raio - dy * dy).max(0.0).sqrt() - 2.0;
-        p.caixa(0.0, y, meia * 2.0, 5.0, 2.5, listra);
+    // Corpo de mel com cantos redondos; as listras e a sombra de baixo cortadas no contorno.
+    let corpo = arredondar(&CORPO.map(|(x, y)| pos2(x, y)), 6.0);
+    p.poligono(&corpo, MEL, None);
+    for (y0, y1, cor) in [(18.0, 24.5, LISTRA), (29.5, 36.0, LISTRA), (38.0, 50.0, MEL_SOMBRA)] {
+        let parte = faixa(&corpo, y0, y1);
+        if parte.len() >= 3 {
+            p.poligono(&parte, cor, None);
+        }
     }
-    p.circulo(-24.0, -14.0, 4.5, Color32::from_rgba_unmultiplied(255, 255, 255, 150));
 
-    rosto(p, 0.0, -4.0, estado, t);
+    rosto(p, 0.0, -4.5, estado, t);
 }
 
 /// A tela no rosto: é ela que mostra a expressão.
 fn rosto(p: Pincel, x: f32, y: f32, estado: Estado, t: Tempo) {
     let tt = t.total;
-    p.caixa(x, y, 52.0, 32.0, 11.0, TELA);
+    p.caixa(x, y, 52.0, 31.0, 10.0, TELA);
+    p.moldura((x, y), (52.0, 31.0), 10.0, 2.0, ROXO);
+    p.linha(x - 19.0, y - 12.5, x - 7.0, y - 12.5, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30));
 
-    let olho = if estado == Estado::Dormindo { Color32::from_rgba_unmultiplied(111, 227, 240, 120) } else { OLHO };
+    let olho = if estado == Estado::Dormindo { Color32::from_rgba_unmultiplied(127, 230, 242, 128) } else { OLHO };
     for lado in [-1.0_f32, 1.0] {
         let ox = x + 11.0 * lado;
         match estado {
@@ -289,7 +395,7 @@ fn rosto(p: Pincel, x: f32, y: f32, estado: Estado, t: Tempo) {
         Estado::Trabalhando => {
             for i in 0..3 {
                 let fase = ((tt * 3.0 - i as f32 * 0.35).sin() * 0.5 + 0.5) * 200.0 + 55.0;
-                p.circulo(x - 6.0 + i as f32 * 6.0, y + 10.0, 1.6, Color32::from_rgba_unmultiplied(111, 227, 240, fase as u8));
+                p.circulo(x - 6.0 + i as f32 * 6.0, y + 10.0, 1.6, Color32::from_rgba_unmultiplied(127, 230, 242, fase as u8));
             }
         }
         Estado::Comemorando => {
@@ -309,21 +415,19 @@ fn extras(p: Pincel, estado: Estado, t: Tempo) {
             for i in 0..3 {
                 let fase = (tt * 0.45 + i as f32 / 3.0).fract();
                 let alfa = ((1.0 - fase) * 220.0) as u8;
-                p.texto(28.0 + fase * 16.0, -38.0 - fase * 26.0, 9.0 + fase * 7.0, "z", Color32::from_rgba_unmultiplied(200, 205, 215, alfa));
+                p.texto(34.0 + fase * 16.0, -34.0 - fase * 26.0, 9.0 + fase * 7.0, "z", Color32::from_rgba_unmultiplied(170, 176, 194, alfa));
             }
         }
         Estado::Aguardando => {
+            // O balão com o "!" desenhado (a fonte não entra na conta do tamanho).
             let salto = -(tt * 5.0).sin().abs() * 3.0;
-            p.circulo(42.0, -46.0 + salto, 11.0, Color32::from_rgb(0xf2, 0xb3, 0x5b));
-            p.texto(42.0, -46.5 + salto, 15.0, "!", Color32::from_rgb(0x1a, 0x1a, 0x1f));
+            let tinta = Color32::from_rgb(0x1a, 0x1a, 0x1f);
+            p.circulo(44.0, -46.0 + salto, 11.0, AMBAR);
+            p.caixa(44.0, -48.5 + salto, 3.2, 9.0, 1.6, tinta);
+            p.circulo(44.0, -39.6 + salto, 1.9, tinta);
         }
         Estado::Comemorando => {
-            let cores = [
-                Color32::from_rgb(0xc7, 0x92, 0xea),
-                Color32::from_rgb(0x7f, 0xd1, 0x8b),
-                Color32::from_rgb(0xf2, 0xb3, 0x5b),
-                Color32::from_rgb(0x6f, 0xe3, 0xf0),
-            ];
+            let cores = [ROXO_CLARO, VERDE, AMBAR, OLHO];
             for i in 0..26u32 {
                 let x0 = (aleatorio(i, 1) - 0.5) * 150.0;
                 let velocidade = 0.6 + aleatorio(i, 2) * 0.8;
@@ -349,6 +453,27 @@ mod testes {
                 assert_eq!(x, aleatorio(a, b), "o mesmo quadro tem que desenhar sempre igual");
             }
         }
+    }
+
+    #[test]
+    fn cantos_redondos_crescem_o_poligono_pelo_raio() {
+        let hex = hexagono(Pos2::ZERO, 10.0, false);
+        let redondo = arredondar(&hex, 2.0);
+        assert_eq!(redondo.len(), 6 * 5);
+        // Todo ponto fica a 2 de algum vértice ou além da aresta: nenhum entra no hexágono.
+        for q in &redondo {
+            let d = q.to_vec2().length();
+            assert!((10.0 * 0.866 + 2.0 - 0.01..=12.0 + 0.01).contains(&d), "{q:?} a {d}");
+        }
+    }
+
+    #[test]
+    fn faixa_corta_entre_as_alturas() {
+        let corpo = arredondar(&CORPO.map(|(x, y)| pos2(x, y)), 6.0);
+        let listra = faixa(&corpo, 18.0, 24.5);
+        assert!(listra.len() >= 4);
+        assert!(listra.iter().all(|q| (18.0 - 1e-3..=24.5 + 1e-3).contains(&q.y)));
+        assert!(faixa(&corpo, 100.0, 120.0).is_empty());
     }
 
     #[test]

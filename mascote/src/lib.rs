@@ -2,4 +2,4 @@
 
 mod mascote;
 
-pub use mascote::{Estado, Tempo, desenhar};
+pub use mascote::{Estado, Tempo, arredondar, desenhar, hexagono};

@@ -4,12 +4,13 @@
 use eframe::egui::{self, Color32, RichText};
 use mascote::{Estado, Tempo};
 
-const FUNDO: Color32 = Color32::from_rgb(0x0e, 0x11, 0x17);
-const PAINEL: Color32 = Color32::from_rgb(0x15, 0x1a, 0x22);
-const BORDA: Color32 = Color32::from_rgb(0x26, 0x2d, 0x39);
-const TEXTO: Color32 = Color32::from_rgb(0xe4, 0xe8, 0xef);
-const SUAVE: Color32 = Color32::from_rgb(0x8e, 0x97, 0xa8);
-const DESTAQUE: Color32 = Color32::from_rgb(0xb7, 0x94, 0xf6);
+// As cores do tema escuro da Colmeia.
+const FUNDO: Color32 = Color32::from_rgb(0x0b, 0x0d, 0x15);
+const PAINEL: Color32 = Color32::from_rgb(0x12, 0x14, 0x1f);
+const BORDA: Color32 = Color32::from_rgb(0x2c, 0x32, 0x48);
+const TEXTO: Color32 = Color32::from_rgb(0xe7, 0xe9, 0xf2);
+const SUAVE: Color32 = Color32::from_rgb(0x9d, 0xa4, 0xba);
+const DESTAQUE: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
 const SEGUNDOS_POR_ESTADO: f64 = 3.0;
 
 struct Vitrine {

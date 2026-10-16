@@ -22,8 +22,12 @@ pub const RAIO_SUPERFICIE: u8 = 12;
 pub const RAIO_JANELA: u8 = 16;
 
 pub struct Paleta {
+    /// Fundo do conteúdo: o cartão principal e as telas que ocupam a janela.
     pub fundo: Color32,
-    pub lateral: Color32,
+    /// A janela por trás do cartão (a cor de base do gradiente).
+    pub janela: Color32,
+    /// A barra lateral quando ela tem fundo próprio.
+    pub trilho: Color32,
     /// Colunas do quadro e áreas recuadas.
     pub superficie: Color32,
     /// Cartões, menus e janelas: o que fica "por cima".
@@ -37,55 +41,97 @@ pub struct Paleta {
     pub alerta: Color32,
     pub erro: Color32,
     pub favo: Color32,
+    /// Fio de luz de 1 px logo abaixo da borda de cima dos cartões.
+    pub luz: Color32,
+    /// Os três pontos do gradiente da janela, de baixo à esquerda para cima à direita (35°).
+    pub gradiente: [Color32; 3],
+    /// O brilho do destaque no canto de baixo à esquerda da janela.
+    pub brilho: Color32,
+    /// Sombra longa e fraca dos cartões.
+    pub sombra: Color32,
+    pub marca: CoresMarca,
     pub terminal_fundo: Color32,
     pub terminal_texto: Color32,
     pub ansi: [Color32; 16],
 }
 
+/// As cores da logo: as asas, o corpo e a cabeça de mel. Um jogo para fundo
+/// escuro e outro para claro (as asas trocam de tom com o corpo).
+#[derive(Clone, Copy)]
+pub struct CoresMarca {
+    pub asa: Color32,
+    pub corpo: Color32,
+    pub mel: Color32,
+}
+
+const MARCA_ESCURO: CoresMarca = CoresMarca { asa: rgb(0x5b47bd), corpo: rgb(0x8f72f6), mel: rgb(0xf4b544) };
+const MARCA_CLARO: CoresMarca = CoresMarca { asa: rgb(0xae98f6), corpo: rgb(0x6a45e0), mel: rgb(0xeba22a) };
+
 const fn rgb(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
+/// Cor translúcida (alfa de 0 a 255), pré-multiplicada como o egui guarda.
+const fn rgba(v: u32, alfa: u8) -> Color32 {
+    let a = alfa as u32;
+    let (r, g, b) = ((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+    Color32::from_rgba_premultiplied(((r * a + 127) / 255) as u8, ((g * a + 127) / 255) as u8, ((b * a + 127) / 255) as u8, alfa)
+}
+
+/// Escuro: azul-noite com um fio de violeta.
 #[rustfmt::skip]
 pub const ESCURO: Paleta = Paleta {
-    fundo: rgb(0x0e1117),
-    lateral: rgb(0x11151c),
-    superficie: rgb(0x151a22),
-    superficie_alta: rgb(0x1b212b),
-    realce: rgb(0x232a36),
-    borda: rgb(0x262d39),
-    texto: rgb(0xe4e8ef),
-    suave: rgb(0x8e97a8),
-    destaque: rgb(0xb794f6),
-    ok: rgb(0x7fd18b),
-    alerta: rgb(0xf2b35b),
-    erro: rgb(0xf2616f),
+    fundo: rgb(0x12141f),
+    janela: rgb(0x0b0d15),
+    trilho: rgb(0x0e1019),
+    superficie: rgb(0x181b28),
+    superficie_alta: rgb(0x1e2232),
+    realce: rgb(0x272c40),
+    borda: rgb(0x2c3248),
+    texto: rgb(0xe7e9f2),
+    suave: rgb(0x9da4ba),
+    destaque: rgb(0xae8ff7),
+    ok: rgb(0x6fd49b),
+    alerta: rgb(0xf1b65f),
+    erro: rgb(0xf4707c),
     favo: Color32::from_rgba_premultiplied(13, 13, 14, 13),
-    terminal_fundo: rgb(0x0f131a),
-    terminal_texto: rgb(0xd7dae0),
+    luz: rgba(0xffffff, 13),
+    gradiente: [rgb(0x1a1436), rgb(0x0e0f1b), rgb(0x0b0d15)],
+    brilho: rgba(0xae8ff7, 51),
+    sombra: rgba(0x000000, 90),
+    marca: MARCA_ESCURO,
+    terminal_fundo: rgb(0x0d0f18),
+    terminal_texto: rgb(0xd9dce6),
     ansi: [
         rgb(0x1b1f27), rgb(0xf2616f), rgb(0x7fd18b), rgb(0xf2c46b), rgb(0x6aa7f8), rgb(0xc792ea), rgb(0x5fd7e6), rgb(0xd7dae0),
         rgb(0x5c6370), rgb(0xff7b86), rgb(0x9be3a5), rgb(0xffd98a), rgb(0x8cbcff), rgb(0xdcb0f5), rgb(0x86e6f0), rgb(0xffffff),
     ],
 };
 
+/// Claro: branco com um toque de lavanda e texto firme.
 #[rustfmt::skip]
 pub const CLARO: Paleta = Paleta {
-    fundo: rgb(0xf4f5f8),
-    lateral: rgb(0xeceef3),
-    superficie: rgb(0xe9ecf1),
+    fundo: rgb(0xfbfbfe),
+    janela: rgb(0xeceef6),
+    trilho: rgb(0xe3e6f1),
+    superficie: rgb(0xf2f3f9),
     superficie_alta: rgb(0xffffff),
-    realce: rgb(0xe2e6ee),
-    borda: rgb(0xd9dde5),
-    texto: rgb(0x1b1f27),
-    suave: rgb(0x667085),
-    destaque: rgb(0x7c4ddb),
-    ok: rgb(0x1f8450),
-    alerta: rgb(0xa86400),
-    erro: rgb(0xd6364a),
+    realce: rgb(0xe6e8f2),
+    borda: rgb(0xd8dbe8),
+    texto: rgb(0x181b26),
+    suave: rgb(0x596075),
+    destaque: rgb(0x6a43d4),
+    ok: rgb(0x14703f),
+    alerta: rgb(0x8f5600),
+    erro: rgb(0xc22f45),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 13),
-    terminal_fundo: rgb(0xfbfbfd),
-    terminal_texto: rgb(0x1b1f27),
+    luz: rgba(0xffffff, 230),
+    gradiente: [rgb(0xe2dcf6), rgb(0xeaecf5), rgb(0xeef1f8)],
+    brilho: rgba(0x6a43d4, 31),
+    sombra: rgba(0x28285a, 25),
+    marca: MARCA_CLARO,
+    terminal_fundo: rgb(0xf6f7fb),
+    terminal_texto: rgb(0x181b26),
     ansi: [
         rgb(0x1b1f27), rgb(0xc4283a), rgb(0x1f8a4c), rgb(0x9a6a00), rgb(0x2463c9), rgb(0x8a3fd1), rgb(0x0f7f91), rgb(0x5c6370),
         rgb(0x667085), rgb(0xd6364a), rgb(0x23915a), rgb(0xb07d0c), rgb(0x3b7be0), rgb(0x9c57e0), rgb(0x1596a8), rgb(0x1b1f27),
@@ -93,50 +139,61 @@ pub const CLARO: Paleta = Paleta {
 };
 
 /// Tema leitura: tons quentes de papel, contraste suave para ler por muito tempo.
+/// O destaque é ameixa: quente, mas longe do âmbar do alerta e do vermelho do erro.
 #[rustfmt::skip]
 pub const LEITURA: Paleta = Paleta {
-    fundo: rgb(0xf3ecdc),
-    lateral: rgb(0xebe2cd),
-    superficie: rgb(0xe7ddc6),
-    superficie_alta: rgb(0xfbf7ee),
-    realce: rgb(0xe0d4b8),
-    borda: rgb(0xd6c8a8),
-    texto: rgb(0x3a2f24),
-    suave: rgb(0x77695a),
-    destaque: rgb(0x9a4a22),
-    ok: rgb(0x4d7a36),
-    // Âmbar puxado para o amarelo: perto do destaque (ferrugem) e do erro,
-    // um marrom a mais não se distinguia no telão.
-    alerta: rgb(0x806300),
-    erro: rgb(0xb3372d),
+    fundo: rgb(0xfaf5ea),
+    janela: rgb(0xede3cf),
+    trilho: rgb(0xe6dac1),
+    superficie: rgb(0xf3ebda),
+    superficie_alta: rgb(0xfffcf4),
+    realce: rgb(0xe8dcc2),
+    borda: rgb(0xd8c9a8),
+    texto: rgb(0x36291e),
+    suave: rgb(0x6a5b4a),
+    destaque: rgb(0x7a4486),
+    ok: rgb(0x3f6829),
+    alerta: rgb(0x7a5c00),
+    erro: rgb(0xad3429),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 12),
-    terminal_fundo: rgb(0xf7f1e3),
-    terminal_texto: rgb(0x3a2f24),
+    luz: rgba(0xffffff, 179),
+    gradiente: [rgb(0xe6d6cf), rgb(0xebe0cc), rgb(0xefe6d3)],
+    brilho: rgba(0x7a4486, 26),
+    sombra: rgba(0x503714, 25),
+    marca: MARCA_CLARO,
+    terminal_fundo: rgb(0xf6efe0),
+    terminal_texto: rgb(0x36291e),
     ansi: [
         rgb(0x3a2f24), rgb(0xb3372d), rgb(0x4d7a36), rgb(0x8a6410), rgb(0x3b5e8c), rgb(0x86457a), rgb(0x2f7470), rgb(0x77695a),
         rgb(0x8a7c6a), rgb(0xc7473c), rgb(0x5e8f45), rgb(0xa07418), rgb(0x4a70a3), rgb(0x9a568d), rgb(0x3a8781), rgb(0x3a2f24),
     ],
 };
 
-/// Tema fosco: cinza-carvão sem brilho, contraste mais baixo que o escuro e
+/// Tema fosco: carvão morno sem brilho, contraste mais baixo que o escuro e
 /// cores de estado apagadas, para uma tela que não chama atenção.
 #[rustfmt::skip]
 pub const FOSCO: Paleta = Paleta {
-    fundo: rgb(0x1f2022),
-    lateral: rgb(0x232426),
-    superficie: rgb(0x28292c),
-    superficie_alta: rgb(0x2f3033),
-    realce: rgb(0x38393d),
-    borda: rgb(0x3c3d41),
-    texto: rgb(0xd3d1cb),
-    suave: rgb(0x8f8e89),
-    destaque: rgb(0xa394cc),
-    ok: rgb(0x8db992),
-    alerta: rgb(0xd2ad70),
-    erro: rgb(0xd1848a),
+    fundo: rgb(0x212126),
+    janela: rgb(0x19191d),
+    trilho: rgb(0x1c1c21),
+    superficie: rgb(0x27272d),
+    superficie_alta: rgb(0x2e2e35),
+    realce: rgb(0x37373f),
+    borda: rgb(0x3b3b44),
+    texto: rgb(0xdbd9d2),
+    suave: rgb(0xa6a49c),
+    destaque: rgb(0xab9ad9),
+    ok: rgb(0x93c29b),
+    alerta: rgb(0xd8b277),
+    erro: rgb(0xdc8e95),
     favo: Color32::from_rgba_premultiplied(12, 12, 12, 12),
-    terminal_fundo: rgb(0x1c1d1f),
-    terminal_texto: rgb(0xcdcbc5),
+    luz: rgba(0xffffff, 10),
+    gradiente: [rgb(0x25212f), rgb(0x1b1b20), rgb(0x19191d)],
+    brilho: rgba(0xab9ad9, 36),
+    sombra: rgba(0x000000, 80),
+    marca: MARCA_ESCURO,
+    terminal_fundo: rgb(0x1c1c20),
+    terminal_texto: rgb(0xd0cec7),
     ansi: [
         rgb(0x2a2b2e), rgb(0xd1848a), rgb(0x8db992), rgb(0xd2bb7a), rgb(0x8aa6cf), rgb(0xb39ccc), rgb(0x86bcc3), rgb(0xcdcbc5),
         rgb(0x6c6b67), rgb(0xe09aa0), rgb(0xa5cda9), rgb(0xe0cb90), rgb(0xa3bcdd), rgb(0xc7b3dc), rgb(0xa0d0d6), rgb(0xe8e6e0),
@@ -325,19 +382,36 @@ fn visuais(p: &Paleta, mut v: Visuals) -> Visuals {
     v
 }
 
-/// Logo: um favo com a célula do meio preenchida.
+/// Logo (três células): duas asas e o corpo encaixados na grade do favo, com
+/// a cabeça de mel; a abelha vista de cima. A geometria é a da grade de 64 do
+/// desenho original e ocupa um quadro de `raio` × 2,3 de lado. Até 24 px entra
+/// a versão pequena (células menores e cabeça maior, para ler em 16 px).
 pub fn logo(pintor: &egui::Painter, centro: Pos2, raio: f32) {
-    let p = cores();
-    let hexagono = |c: Pos2, r: f32| -> Vec<Pos2> {
-        (0..6)
-            .map(|i| {
-                let a = std::f32::consts::PI / 180.0 * (60.0 * i as f32 - 90.0);
-                c + vec2(a.cos() * r, a.sin() * r)
-            })
-            .collect()
-    };
-    pintor.add(Shape::convex_polygon(hexagono(centro, raio), p.destaque.gamma_multiply(0.18), Stroke::new(1.5, p.destaque)));
-    pintor.add(Shape::convex_polygon(hexagono(centro, raio * 0.45), p.destaque, Stroke::NONE));
+    let m = cores().marca;
+    let escala = raio * 2.3 / 64.0;
+    let pequena = raio * 2.3 <= 24.0;
+    let (celula, y_mel, mel, canto) = if pequena { (11.4, 9.2, 5.4, 1.0) } else { (12.0, 9.6, 4.6, 1.2) };
+    let dx = 3.0_f32.sqrt() * 14.0 / 2.0;
+    // O desenho vai de y 5 a 61 na grade: o meio é 33.
+    let ponto = |x: f32, y: f32| centro + vec2(x - 32.0, y - 33.0) * escala;
+    for (x, y, r, cor) in [(32.0 - dx, 28.0, celula, m.asa), (32.0 + dx, 28.0, celula, m.asa), (32.0, 49.0, celula, m.corpo), (32.0, y_mel, mel, m.mel)] {
+        let pontos = mascote::arredondar(&mascote::hexagono(ponto(x, y), r * escala, false), canto * escala);
+        pintor.add(Shape::convex_polygon(pontos, cor, Stroke::NONE));
+    }
+}
+
+/// Duração das transições de cor (mouse em cima, escolhido).
+pub const TRANSICAO: f32 = 0.15;
+
+/// Quanto do estado "ligado" já entrou, de 0 a 1, em `TRANSICAO`. O egui só
+/// pede quadros enquanto a transição anda: parada, a tela não redesenha.
+pub fn transicao(ui: &egui::Ui, id: egui::Id, ligado: bool) -> f32 {
+    ui.ctx().animate_bool_with_time(id, ligado, TRANSICAO)
+}
+
+/// A cor que vai de `parada` a `ligada` com a transição (cores translúcidas também).
+pub fn cor_animada(ui: &egui::Ui, id: egui::Id, ligado: bool, parada: Color32, ligada: Color32) -> Color32 {
+    parada.lerp_to_gamma(ligada, transicao(ui, id, ligado))
 }
 
 /// Seta para baixo desenhada, sem depender de a fonte ter o símbolo.
@@ -377,15 +451,13 @@ pub fn chip_com_largura(ui: &mut egui::Ui, rotulo: &str, valor: &str, em_uso: bo
     let largura = fixo + texto_valor.size().x;
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let fundo = if em_uso {
-        p.destaque.gamma_multiply(if claro() { 0.12 } else { 0.18 })
-    } else if resposta.hovered() {
-        p.realce
-    } else {
-        p.superficie_alta
-    };
+    let tingido = misturar(p.superficie_alta, p.destaque, if claro() { 0.12 } else { 0.18 });
+    let fundo = cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, p.realce);
+    let uso = transicao(ui, resposta.id.with("uso"), em_uso);
+    let fundo = fundo.lerp_to_gamma(tingido, uso);
+    let borda = p.borda.lerp_to_gamma(misturar(p.superficie_alta, p.destaque, 0.6), uso);
     let pintor = ui.painter();
-    pintor.rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, if em_uso { p.destaque.gamma_multiply(0.6) } else { p.borda }), egui::StrokeKind::Inside);
+    pintor.rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
     let y = rect.center().y;
     let x = rect.left() + 14.0;
     pintor.galley(pos2(x, y - texto_rotulo.size().y / 2.0), texto_rotulo.clone(), cor_rotulo);
@@ -411,25 +483,44 @@ pub fn segmentado_com_largura(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usi
     };
     let (rect, _) = ui.allocate_exact_size(vec2(larguras.iter().sum::<f32>() + 8.0, 34.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(17), p.superficie);
+    let mut partes = Vec::with_capacity(opcoes.len());
     let mut x = rect.left() + 4.0;
+    for largura in &larguras {
+        partes.push(Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(*largura, rect.height() - 8.0)));
+        x += largura;
+    }
+    let id = ui.id().with(("segmentado", opcoes[0]));
+    // A pílula da escolhida desliza até a nova escolha.
+    let posicao = ui.ctx().animate_value_with_time(id.with("pilula"), escolhida as f32, TRANSICAO);
+    let (de, para) = (posicao.floor() as usize, (posicao.ceil() as usize).min(partes.len().saturating_sub(1)));
+    if let (Some(a), Some(b)) = (partes.get(de), partes.get(para)) {
+        let t = posicao - de as f32;
+        let pilula = Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t));
+        ui.painter().rect(pilula, CornerRadius::same(12), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+    }
     let mut clicada = None;
-    for (i, (opcao, largura)) in opcoes.iter().zip(&larguras).enumerate() {
-        let parte = Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(*largura, rect.height() - 8.0));
-        let resposta = ui.interact(parte, ui.id().with(("segmentado", opcoes[0], i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if i == escolhida {
-            ui.painter().rect(parte, CornerRadius::same(12), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
-        } else if resposta.hovered() {
-            ui.painter().rect_filled(parte, CornerRadius::same(12), p.realce);
+    for (i, (opcao, parte)) in opcoes.iter().zip(&partes).enumerate() {
+        let resposta = ui.interact(*parte, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let mouse = transicao(ui, resposta.id.with("mouse"), resposta.hovered() && i != escolhida);
+        if mouse > 0.0 {
+            ui.painter().rect_filled(*parte, CornerRadius::same(12), p.realce.gamma_multiply(mouse));
         }
-        let cor = if i == escolhida { p.texto } else { p.suave };
+        let cor = cor_animada(ui, resposta.id.with("cor"), i == escolhida, p.suave, p.texto);
         let fonte = if i == escolhida { forte(13.0) } else { fonte.clone() };
         ui.painter().text(parte.center(), egui::Align2::CENTER_CENTER, *opcao, fonte, cor);
         if resposta.clicked() {
             clicada = Some(i);
         }
-        x += largura;
     }
     clicada
+}
+
+/// O `realce` que entra e sai com o mouse (itens de menu e de lista).
+pub fn fundo_ao_passar(ui: &egui::Ui, resposta: &Response, rect: Rect, raio: u8, ativo: bool) {
+    let t = transicao(ui, resposta.id.with("mouse"), ativo && resposta.hovered());
+    if t > 0.0 {
+        ui.painter().rect_filled(rect, CornerRadius::same(raio), cores().realce.gamma_multiply(t));
+    }
 }
 
 /// Item de menu com respiro nas laterais, fundo ao passar o mouse e marca na
@@ -442,9 +533,7 @@ pub fn opcao_menu(ui: &mut egui::Ui, texto: &str, marcada: bool) -> bool {
     // menu de contexto tomar a tela inteira.
     let largura = (galeria.size().x + 56.0).max(ui.min_rect().width());
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
-    if resposta.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(6), p.realce);
-    }
+    fundo_ao_passar(ui, &resposta, rect, RAIO_ETIQUETA, true);
     ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
     if marcada {
         ui.painter().circle_filled(pos2(rect.right() - 16.0, rect.center().y), 3.5, p.destaque);
@@ -463,9 +552,7 @@ pub fn opcao_menu_arvore(ui: &mut egui::Ui, texto: &str, detalhe: Option<&str>, 
     let recuo = 16.0 * nivel as f32;
     let largura = (galeria.size().x + detalhe.as_ref().map_or(0.0, |d| d.size().x + 6.0) + recuo + 56.0).max(ui.min_rect().width());
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
-    if resposta.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_ETIQUETA), p.realce);
-    }
+    fundo_ao_passar(ui, &resposta, rect, RAIO_ETIQUETA, true);
     let x = rect.left() + 14.0 + recuo;
     let largura_texto = galeria.size().x;
     ui.painter().galley(pos2(x, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
@@ -575,13 +662,7 @@ pub fn botao_principal(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response 
     let p = cores();
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), forte(13.5), p.texto);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 32.0, 34.0), if ativo { Sense::click() } else { Sense::hover() });
-    let fundo = if !ativo {
-        p.realce
-    } else if resposta.hovered() {
-        p.destaque.gamma_multiply(0.85)
-    } else {
-        p.destaque
-    };
+    let fundo = if ativo { cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.destaque, misturar(p.destaque, p.fundo, 0.15)) } else { p.realce };
     let cor = if !ativo {
         p.suave
     } else if claro() {
@@ -606,10 +687,10 @@ pub fn botao_secundario_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Resp
     let cor = if ativo { p.texto } else { p.suave };
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), cor);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), if ativo { Sense::click() } else { Sense::hover() });
-    let (fundo, borda) = match (ativo, resposta.hovered()) {
-        (false, _) => (Color32::TRANSPARENT, p.borda.gamma_multiply(0.5)),
-        (true, true) => (p.realce, p.borda),
-        (true, false) => (p.superficie_alta, p.borda),
+    let (fundo, borda) = if ativo {
+        (cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, p.realce), p.borda)
+    } else {
+        (Color32::TRANSPARENT, p.borda.gamma_multiply(0.5))
     };
     // Com o foco do teclado (a confirmação de escrita começa em "Cancelar"), o contorno de foco.
     let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, borda) };
@@ -625,7 +706,7 @@ pub fn botao_alerta(ui: &mut egui::Ui, texto: &str) -> Response {
     let p = cores();
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.erro);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
-    let fundo = if resposta.hovered() { p.erro.gamma_multiply(0.12) } else { p.superficie_alta };
+    let fundo = cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, misturar(p.superficie_alta, p.erro, 0.12));
     let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, p.erro) };
     ui.painter().rect(rect, CornerRadius::same(16), fundo, borda, egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.erro);
@@ -858,18 +939,9 @@ pub fn botao_icone_com(ui: &mut egui::Ui, icone: Icone, lado: f32, ativo: bool) 
 
 fn pintar_icone(ui: &egui::Ui, rect: Rect, icone: Icone, resposta: &Response) {
     let p = cores();
-    let pintor = ui.painter();
-    if resposta.hovered() {
-        pintor.rect_filled(rect, CornerRadius::same(RAIO_CONTROLE), p.realce);
-    }
-    let cor = if resposta.hovered() && icone == Icone::Apagar {
-        p.erro
-    } else if resposta.hovered() {
-        p.texto
-    } else {
-        p.suave
-    };
-    desenhar_icone(pintor, rect.center(), icone, cor);
+    fundo_ao_passar(ui, resposta, rect, RAIO_CONTROLE, true);
+    let cor = cor_animada(ui, resposta.id.with("cor"), resposta.hovered(), p.suave, if icone == Icone::Apagar { p.erro } else { p.texto });
+    desenhar_icone(ui.painter(), rect.center(), icone, cor);
 }
 
 /// O desenho de um ícone em 16×16 (traço de 1,5), centrado em `c`.
@@ -1155,11 +1227,13 @@ pub fn botao_dividido(ui: &mut egui::Ui, texto: &str, ponto: Option<Color32>) ->
     let pintor = ui.painter();
     pintor.rect(rect, CornerRadius::same(16), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
     // O realce cobre só a metade sob o mouse.
-    if r_esq.hovered() {
-        pintor.rect_filled(esquerda.shrink(1.0), CornerRadius { nw: 15, sw: 15, ne: 0, se: 0 }, p.realce);
-    }
-    if r_dir.hovered() {
-        pintor.rect_filled(direita.shrink(1.0), CornerRadius { nw: 0, sw: 0, ne: 15, se: 15 }, p.realce);
+    for (resposta, parte, cantos) in
+        [(&r_esq, esquerda, CornerRadius { nw: 15, sw: 15, ne: 0, se: 0 }), (&r_dir, direita, CornerRadius { nw: 0, sw: 0, ne: 15, se: 15 })]
+    {
+        let t = transicao(ui, resposta.id.with("mouse"), resposta.hovered());
+        if t > 0.0 {
+            pintor.rect_filled(parte.shrink(1.0), cantos, p.realce.gamma_multiply(t));
+        }
     }
     let x = rect.left() + 14.0;
     match ponto {
@@ -1187,7 +1261,7 @@ pub fn play(pintor: &egui::Painter, centro: Pos2, tamanho: f32, cor: Color32) {
 
 /// Cor do texto (ou do ícone) sobre o destaque, como no botão principal.
 pub fn sobre_destaque() -> Color32 {
-    if claro() { Color32::WHITE } else { cores().fundo }
+    if claro() { Color32::WHITE } else { cores().janela }
 }
 
 /// Pílula de estado: ponto na cor do estado e a palavra na cor do texto, sobre
@@ -1274,13 +1348,10 @@ pub fn chip_alternar(ui: &mut egui::Ui, rotulo: &str, ativo: bool) -> Response {
     let largura = ui.painter().layout_no_wrap(rotulo.to_owned(), forte(13.0), p.texto).size().x;
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura + 28.0, 32.0), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let (fundo, borda) = if ativo {
-        (p.destaque.gamma_multiply(if claro() { 0.12 } else { 0.18 }), p.destaque.gamma_multiply(0.6))
-    } else if resposta.hovered() {
-        (p.realce, p.borda)
-    } else {
-        (p.superficie_alta, p.borda)
-    };
+    let fundo = cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, p.realce);
+    let ligado = transicao(ui, resposta.id.with("ligado"), ativo);
+    let fundo = fundo.lerp_to_gamma(misturar(p.superficie_alta, p.destaque, if claro() { 0.12 } else { 0.18 }), ligado);
+    let borda = p.borda.lerp_to_gamma(misturar(p.superficie_alta, p.destaque, 0.6), ligado);
     ui.painter().rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.texto);
     resposta
@@ -1306,9 +1377,7 @@ pub fn secao_recolhivel(ui: &mut egui::Ui, titulo: &str, aberta: &mut bool) -> R
     let galeria = ui.painter().layout_no_wrap(titulo.to_owned(), forte(13.5), p.texto);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 40.0, 32.0), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if resposta.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_CONTROLE), p.realce);
-    }
+    fundo_ao_passar(ui, &resposta, rect, RAIO_CONTROLE, true);
     let centro = pos2(rect.left() + 14.0, rect.center().y);
     let pontos = if *aberta {
         vec![centro + vec2(-3.5, -1.5), centro + vec2(3.5, -1.5), centro + vec2(0.0, 2.5)]
@@ -1521,9 +1590,7 @@ pub fn opcao_menu_com(ui: &mut egui::Ui, texto: &str, atalho: Option<&str>, ativ
     let atalho = atalho.map(|a| ui.painter().layout_no_wrap(a.to_owned(), FontId::proportional(12.0), p.suave));
     let largura = (galeria.size().x + atalho.as_ref().map_or(0.0, |a| a.size().x + 24.0) + 40.0).max(ui.min_rect().width());
     let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), if ativa { Sense::click() } else { Sense::hover() });
-    if ativa && resposta.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RAIO_ETIQUETA), p.realce);
-    }
+    fundo_ao_passar(ui, &resposta, rect, RAIO_ETIQUETA, ativa);
     ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galeria.size().y / 2.0), galeria, cor);
     if let Some(a) = atalho {
         ui.painter().galley(pos2(rect.right() - 14.0 - a.size().x, rect.center().y - a.size().y / 2.0), a, p.suave);
@@ -1720,6 +1787,98 @@ impl Favo {
     }
 }
 
+/// Raio do cartão principal e a distância dele até a borda da janela.
+pub const RAIO_MOLDURA: u8 = 18;
+pub const MARGEM_MOLDURA: f32 = 10.0;
+
+/// Fundo da janela: gradiente de 35° em três pontos com o brilho do destaque
+/// no canto de baixo à esquerda, numa malha de vértices só (o egui interpola
+/// as cores entre eles). Refeita só quando o tamanho ou o tema mudam.
+#[derive(Default)]
+pub struct Gradiente {
+    feito_para: Option<(Rect, u8)>,
+    malha: Option<Arc<Mesh>>,
+}
+
+impl Gradiente {
+    pub fn desenhar(&mut self, pintor: &egui::Painter, area: Rect) {
+        let tema = ATUAL.load(Ordering::Relaxed);
+        if self.feito_para != Some((area, tema)) {
+            self.malha = Some(Arc::new(malha_gradiente(area, cores())));
+            self.feito_para = Some((area, tema));
+        }
+        if let Some(malha) = &self.malha {
+            pintor.add(Shape::Mesh(malha.clone()));
+        }
+    }
+}
+
+/// A cor do gradiente num ponto da janela: a posição ao longo do eixo de 35°
+/// (paradas em 0, 42% e 100%) e, por cima, o brilho que some a 70% da elipse.
+fn cor_do_gradiente(p: &Paleta, area: Rect, ponto: Pos2) -> Color32 {
+    let eixo = vec2(35.0_f32.to_radians().sin(), -35.0_f32.to_radians().cos());
+    let comprimento = area.width() * eixo.x.abs() + area.height() * eixo.y.abs();
+    let t = ((ponto - area.center()).dot(eixo) / comprimento + 0.5).clamp(0.0, 1.0);
+    let [a, b, c] = p.gradiente;
+    let base = if t < 0.42 { misturar(a, b, t / 0.42) } else { misturar(b, c, (t - 0.42) / 0.58) };
+    let d = (ponto - area.left_bottom()) / vec2(630.0, 364.0);
+    let forca = (1.0 - d.length()).max(0.0);
+    let brilho = p.brilho.to_srgba_unmultiplied();
+    let alfa = brilho[3] as f32 / 255.0 * forca * forca * (3.0 - 2.0 * forca);
+    misturar(base, Color32::from_rgb(brilho[0], brilho[1], brilho[2]), alfa)
+}
+
+fn malha_gradiente(area: Rect, p: &Paleta) -> Mesh {
+    // Uma grade de 40 px basta: a cor muda devagar e o egui interpola no meio.
+    let colunas = (area.width() / 40.0).ceil().max(1.0) as u32;
+    let linhas = (area.height() / 40.0).ceil().max(1.0) as u32;
+    let mut malha = Mesh::default();
+    for l in 0..=linhas {
+        for c in 0..=colunas {
+            let ponto = area.min + vec2(area.width() * c as f32 / colunas as f32, area.height() * l as f32 / linhas as f32);
+            malha.colored_vertex(ponto, cor_do_gradiente(p, area, ponto));
+        }
+    }
+    for l in 0..linhas {
+        for c in 0..colunas {
+            let i = l * (colunas + 1) + c;
+            malha.add_triangle(i, i + 1, i + colunas + 1);
+            malha.add_triangle(i + 1, i + colunas + 2, i + colunas + 1);
+        }
+    }
+    malha
+}
+
+/// Fundo da barra lateral: o trilho a 70%, o gradiente aparece de leve por
+/// baixo e o `suave` continua acima de 4,5:1 até no canto do brilho.
+pub fn fundo_lateral(p: &Paleta) -> Color32 {
+    p.trilho.gamma_multiply(OPACIDADE_TRILHO)
+}
+
+const OPACIDADE_TRILHO: f32 = 0.7;
+
+/// O item escolhido (ou sob o mouse) na barra lateral. Nos temas claros o
+/// `realce` tem quase a cor do trilho e sumiria: lá o item vira papel claro.
+pub fn realce_lateral(p: &Paleta) -> Color32 {
+    if claro() { p.superficie_alta } else { p.realce }
+}
+
+/// Onde fica o cartão principal: à direita de `esquerda` (a barra lateral),
+/// solto da borda da janela.
+pub fn rect_cartao_principal(janela: Rect, esquerda: f32) -> Rect {
+    Rect::from_min_max(pos2(janela.left() + esquerda, janela.top() + MARGEM_MOLDURA), janela.max - vec2(MARGEM_MOLDURA, MARGEM_MOLDURA))
+}
+
+/// O cartão do conteúdo: sombra longa e fraca, borda suave e o fio de luz no topo.
+pub fn cartao_principal(pintor: &egui::Painter, rect: Rect) {
+    let p = cores();
+    let raio = CornerRadius::same(RAIO_MOLDURA);
+    pintor.add(egui::Shadow { offset: [0, 18], blur: 40, spread: 0, color: p.sombra }.as_shape(rect, raio));
+    pintor.rect(rect, raio, p.fundo, Stroke::new(1.0, misturar(p.borda, p.fundo, 0.2)), egui::StrokeKind::Inside);
+    let curva = RAIO_MOLDURA as f32;
+    pintor.hline((rect.left() + curva)..=(rect.right() - curva), rect.top() + 1.5, Stroke::new(1.0, p.luz));
+}
+
 fn malha_favo(area: Rect, cor: Color32) -> Mesh {
     let raio = 26.0;
     let largura = 3.0_f32.sqrt() * raio;
@@ -1774,6 +1933,8 @@ fn linha_suave(malha: &mut Mesh, a: Pos2, b: Pos2, espessura: f32, cor: Color32)
 mod testes {
     use super::*;
 
+    const TEMAS: [(&str, &Paleta); 4] = [("escuro", &ESCURO), ("fosco", &FOSCO), ("claro", &CLARO), ("leitura", &LEITURA)];
+
     #[test]
     fn temas_vao_e_voltam_pela_chave_do_perfil() {
         for e in Escolha::TODAS {
@@ -1796,7 +1957,7 @@ mod testes {
     #[test]
     fn textos_de_estado_sao_legiveis_nos_cartoes() {
         // Os estados aparecem em texto de 12 px sobre os cartões: pelo menos 4,5:1.
-        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+        for (nome, p) in TEMAS {
             for (cor, c) in [("ok", p.ok), ("alerta", p.alerta), ("erro", p.erro), ("suave", p.suave)] {
                 let r = contraste(c, p.superficie_alta);
                 assert!(r >= 4.5, "{cor} no tema {nome}: {r:.2}");
@@ -1808,7 +1969,7 @@ mod testes {
     fn link_e_legivel_sobre_o_fundo_e_os_cartoes() {
         // O link não ganha fundo de realce ao passar o mouse: sobre o realce
         // ele ficaria abaixo de 4,5:1 nos temas claros.
-        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+        for (nome, p) in TEMAS {
             for (onde, fundo) in [("fundo", p.fundo), ("superficie_alta", p.superficie_alta)] {
                 let r = contraste(p.destaque, fundo);
                 assert!(r >= 4.5, "link sobre {onde} no tema {nome}: {r:.2}");
@@ -1822,7 +1983,7 @@ mod testes {
     fn suave_e_legivel_sobre_o_fundo_e_os_cartoes() {
         // `suave` (horas, títulos de tarefa removida, rótulos) só vai sobre o
         // fundo e o cartão: sobre `superficie` não passa de 4,5:1 nos claros.
-        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+        for (nome, p) in TEMAS {
             for (onde, fundo) in [("fundo", p.fundo), ("superficie_alta", p.superficie_alta)] {
                 let r = contraste(p.suave, fundo);
                 assert!(r >= 4.5, "suave sobre {onde} no tema {nome}: {r:.2}");
@@ -1847,7 +2008,7 @@ mod testes {
             };
             h * 60.0
         };
-        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+        for (nome, p) in TEMAS {
             for (outra, c) in [("destaque", p.destaque), ("erro", p.erro)] {
                 let distancia = (matiz(p.alerta) - matiz(c)).abs();
                 assert!(distancia.min(360.0 - distancia) > 20.0, "alerta e {outra} no tema {nome}: {distancia:.0}°");
@@ -1855,6 +2016,58 @@ mod testes {
         }
         // No leitura o alerta também vai sobre o fundo (capa, números).
         assert!(contraste(LEITURA.alerta, LEITURA.fundo) >= 4.5, "alerta sobre o fundo no tema leitura");
+    }
+
+    #[test]
+    fn textos_sao_legiveis_em_todas_as_superficies() {
+        // Todo texto (texto, suave, destaque e os estados) passa de 4,5:1 sobre o
+        // cartão, a superfície, a superfície alta e o realce, nos quatro temas.
+        for (nome, p) in TEMAS {
+            for (cor, c) in [("texto", p.texto), ("suave", p.suave), ("destaque", p.destaque), ("ok", p.ok), ("alerta", p.alerta), ("erro", p.erro)] {
+                for (onde, fundo) in [("cartão", p.fundo), ("superfície", p.superficie), ("superfície alta", p.superficie_alta), ("realce", p.realce)] {
+                    if cor == "destaque" && onde == "realce" {
+                        continue;
+                    }
+                    let r = contraste(c, fundo);
+                    assert!(r >= 4.5, "{cor} sobre {onde} no tema {nome}: {r:.2}");
+                }
+            }
+        }
+    }
+
+    /// A cor opaca de `cima` (translúcida, pré-multiplicada) sobre `baixo`.
+    fn sobre(cima: Color32, baixo: Color32) -> Color32 {
+        let resto = 1.0 - cima.a() as f32 / 255.0;
+        let canal = |c: u8, b: u8| (c as f32 + b as f32 * resto).round().min(255.0) as u8;
+        Color32::from_rgb(canal(cima.r(), baixo.r()), canal(cima.g(), baixo.g()), canal(cima.b(), baixo.b()))
+    }
+
+    #[test]
+    fn barra_lateral_e_legivel_sobre_o_gradiente() {
+        // A lateral é o trilho translúcido sobre o gradiente: o suave passa de
+        // 4,5:1 em qualquer ponto, até no canto do brilho.
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
+        for (nome, p) in TEMAS {
+            for x in [0.0, 120.0, 236.0] {
+                for y in [0.0, 300.0, 600.0, 900.0] {
+                    let fundo = sobre(fundo_lateral(p), cor_do_gradiente(p, area, pos2(x, y)));
+                    let r = contraste(p.suave, fundo);
+                    assert!(r >= 4.5, "suave na lateral em ({x}, {y}) no tema {nome}: {r:.2}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gradiente_vai_do_primeiro_ao_ultimo_ponto() {
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0));
+        for (nome, p) in TEMAS {
+            // Longe do brilho, o canto de cima à direita é o último ponto.
+            assert_eq!(cor_do_gradiente(p, area, area.right_top()), p.gradiente[2], "tema {nome}");
+            let malha = malha_gradiente(area, p);
+            assert_eq!(malha.vertices.len(), 26 * 16);
+            assert!(malha.indices.iter().all(|&i| (i as usize) < malha.vertices.len()));
+        }
     }
 
     #[test]
@@ -1915,7 +2128,7 @@ mod testes {
     fn faixas_tingidas_sao_opacas_e_legiveis() {
         // A faixa "Núcleo desconectado" (alerta) e a de núcleo antigo (erro):
         // texto do tema sobre o fundo tingido, pelo menos 4,5:1.
-        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+        for (nome, p, eh_claro) in TEMAS.map(|(nome, p)| (nome, p, matches!(nome, "claro" | "leitura"))) {
             for (cor, c) in [("alerta", p.alerta), ("erro", p.erro)] {
                 let fundo = fundo_tingido(p, c, eh_claro);
                 assert_eq!(fundo.a(), 255, "faixa de {cor} no tema {nome} não é opaca");
@@ -1929,7 +2142,7 @@ mod testes {
     fn pilulas_sao_legiveis_em_todos_os_temas() {
         // A pílula de estado põe a palavra em `texto` sobre o fundo tingido
         // da cor do estado: pelo menos 4,5:1 com destaque e ok também.
-        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+        for (nome, p, eh_claro) in TEMAS.map(|(nome, p)| (nome, p, matches!(nome, "claro" | "leitura"))) {
             for (cor, c) in [("destaque", p.destaque), ("ok", p.ok), ("suave", p.suave), ("alerta", p.alerta), ("erro", p.erro)] {
                 let r = contraste(p.texto, fundo_tingido(p, c, eh_claro));
                 assert!(r >= 4.5, "texto na pílula de {cor} no tema {nome}: {r:.2}");
@@ -1941,7 +2154,7 @@ mod testes {
     fn linha_escolhida_e_calha_do_terminal_sao_legiveis() {
         // A linha escolhida da árvore leva `texto`; os números de linha da
         // pré-visualização vão em `suave` sobre o fundo do terminal.
-        for (nome, p, eh_claro) in [("escuro", &ESCURO, false), ("claro", &CLARO, true), ("leitura", &LEITURA, true)] {
+        for (nome, p, eh_claro) in TEMAS.map(|(nome, p)| (nome, p, matches!(nome, "claro" | "leitura"))) {
             let escolhido = escolhido_em(p, eh_claro);
             let r = contraste(p.texto, escolhido);
             assert!(r >= 4.5, "texto na linha escolhida no tema {nome}: {r:.2}");
@@ -2019,7 +2232,7 @@ mod testes {
 
     #[test]
     fn selecao_aparece_no_fundo() {
-        for (nome, p) in [("escuro", &ESCURO), ("claro", &CLARO), ("leitura", &LEITURA)] {
+        for (nome, p) in TEMAS {
             let r = contraste(p.destaque, p.fundo);
             assert!(r >= 3.0, "destaque sobre o fundo no tema {nome}: {r:.2}");
         }
@@ -2029,7 +2242,7 @@ mod testes {
     fn texto_e_fundo_tem_contraste_em_todos_os_temas() {
         // Diferença de luminosidade simples entre texto e fundo, para nenhum tema ficar ilegível.
         let luz = |c: Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
-        for p in [&ESCURO, &CLARO, &LEITURA] {
+        for (_, p) in TEMAS {
             assert!((luz(p.texto) - luz(p.fundo)).abs() > 150.0);
             assert!((luz(p.terminal_texto) - luz(p.terminal_fundo)).abs() > 150.0);
         }

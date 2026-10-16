@@ -29,7 +29,7 @@ jobs:
           CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo ./cmd/colmeia-nucleo
           cargo build --release --locked -p colmeia
           cp target/release/colmeia dist/
-          cp packaging/colmeia.desktop packaging/colmeia.svg scripts/instalar.sh LICENSE-MIT LICENSE-APACHE dist/
+          cp packaging/colmeia.desktop packaging/colmeia.svg packaging/colmeia-pequeno.svg scripts/instalar.sh LICENSE-MIT LICENSE-APACHE dist/
       - name: Empacotar
         run: tar -C dist -czf colmeia-linux-x86_64.tar.gz .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -29,17 +29,22 @@ tela=$(achar "$raiz/colmeia" "$raiz/target/release/colmeia") || { echo "não ach
 nucleo=$(achar "$raiz/colmeia-nucleo" "$raiz/bin/colmeia-nucleo") || { echo "não achei o colmeia-nucleo (compile com: go -C nucleo build -o ../bin/colmeia-nucleo ./cmd/colmeia-nucleo)"; exit 1; }
 atalho=$(achar "$raiz/colmeia.desktop" "$raiz/packaging/colmeia.desktop")
 icone=$(achar "$raiz/colmeia.svg" "$raiz/packaging/colmeia.svg")
+icone_pequeno=$(achar "$raiz/colmeia-pequeno.svg" "$raiz/packaging/colmeia-pequeno.svg")
 
 bin="$HOME/.local/bin"
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-icones="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
-mkdir -p "$bin" "$apps" "$icones"
+hicolor="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+icones="$hicolor/scalable/apps"
+mkdir -p "$bin" "$apps" "$icones" "$hicolor/16x16/apps" "$hicolor/24x24/apps"
 install -m 0755 "$tela" "$bin/colmeia"
 install -m 0755 "$nucleo" "$bin/colmeia-nucleo"
 # O atalho aponta para o caminho completo: funciona mesmo sem ~/.local/bin no PATH.
 sed "s|^Exec=colmeia$|Exec=$bin/colmeia|" "$atalho" > "$apps/colmeia.desktop"
 chmod 0644 "$apps/colmeia.desktop"
 install -m 0644 "$icone" "$icones/colmeia.svg"
+# Em 16 e 24 px, a versão simplificada da logo (a placa inteira some de tão pequena).
+install -m 0644 "$icone_pequeno" "$hicolor/16x16/apps/colmeia.svg"
+install -m 0644 "$icone_pequeno" "$hicolor/24x24/apps/colmeia.svg"
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps" 2>/dev/null || true
 
 echo "Colmeia instalada em $bin."
