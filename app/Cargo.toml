@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 mascote = { path = "../mascote" }
+canal = { path = "../canal" }
 alacritty_terminal = "0.26"
 eframe.workspace = true
 tungstenite = "0.30"
@@ -24,6 +25,4 @@ rfd = "0.17.2"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# Socket Unix (AF_UNIX) no Windows 10 1803+ e 11: o mesmo canal do Linux.
-uds_windows = "1.2"
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_SystemInformation", "Win32_System_Threading"] }

@@ -75,6 +75,8 @@ pub enum Dialogo {
         copia: bool,
         erro: Option<String>,
     },
+    /// Escolher o acabamento e o nome da abelha do perfil.
+    Mascote(EscolhaMascote),
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -264,6 +266,7 @@ impl Dialogo {
                     }
                     Dialogo::Fechar { rodando, erro } => fechar(ui, *rodando, erro),
                     Dialogo::LimparHistorico { agente, nome, guardadas, erro } => limpar_historico(ui, *agente, nome, *guardadas, erro),
+                    Dialogo::Mascote(d) => escolher_mascote(ui, d, perfil),
                     Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
                 }
             });
@@ -271,6 +274,89 @@ impl Dialogo {
             Resultado::Continua if modal.should_close() => Resultado::Fechar,
             outro => outro,
         }
+    }
+}
+
+pub struct EscolhaMascote {
+    modelo: mascote::Modelo,
+    nome: String,
+    erro: Option<String>,
+}
+
+impl EscolhaMascote {
+    pub fn new(modelo: &str, nome: &str) -> Self {
+        EscolhaMascote { modelo: mascote::Modelo::do_codigo(modelo), nome: nome.to_string(), erro: None }
+    }
+}
+
+/// Um instante fixo para as prévias: o diálogo parado não redesenha.
+const INSTANTE_DA_PREVIA: mascote::Tempo = mascote::Tempo { total: 1.3, no_estado: 0.6 };
+
+/// O acabamento e o nome da abelha: os cinco modelos lado a lado, os cinco
+/// estados do escolhido e o nome, que aparece no resumo, nos balões e na
+/// abelha fixa. Grava no perfil; as outras telas recebem pelo evento.
+fn escolher_mascote(ui: &mut egui::Ui, d: &mut EscolhaMascote, perfil: i64) -> Resultado {
+    tema::cabecalho(ui, "A abelha deste perfil", "A mesma personagem em cinco acabamentos. O nome aparece no resumo, nos balões e na abelha fixa.");
+    ui.add_space(16.0);
+    let p = cores();
+    let (vao, lado) = (6.0, (ui.available_width() - 4.0 * 6.0) / 5.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = vao;
+        for modelo in mascote::Modelo::TODOS {
+            let (rect, resposta) = ui.allocate_exact_size(egui::vec2(lado, lado + 18.0), egui::Sense::click());
+            let escolhido = modelo == d.modelo;
+            if escolhido {
+                ui.painter().rect_filled(rect, 12, tema::fundo_escolhido());
+                ui.painter().rect_stroke(rect, 12, egui::Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
+            } else {
+                tema::fundo_ao_passar(ui, &resposta, rect, 12, true);
+            }
+            let caixa = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 4.0), egui::vec2(lado, lado)).shrink(10.0);
+            mascote::desenhar(&ui.painter_at(rect), caixa.center(), caixa.height(), modelo, mascote::Estado::Trabalhando, INSTANTE_DA_PREVIA);
+            let cor = if escolhido { p.texto } else { p.suave };
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                egui::Align2::CENTER_CENTER,
+                modelo.nome(),
+                egui::FontId::proportional(11.5),
+                cor,
+            );
+            if resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                d.modelo = modelo;
+            }
+        }
+    });
+    ui.add_space(14.0);
+    rotulo(ui, "Os estados");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = vao;
+        for estado in mascote::Estado::TODOS {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(lado, lado * 0.8 + 16.0), egui::Sense::hover());
+            let caixa = egui::Rect::from_min_size(rect.min, egui::vec2(lado, lado * 0.8)).shrink(8.0);
+            mascote::desenhar(&ui.painter_at(rect), caixa.center(), caixa.height(), d.modelo, estado, INSTANTE_DA_PREVIA);
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 8.0),
+                egui::Align2::CENTER_CENTER,
+                estado.nome(),
+                egui::FontId::proportional(11.0),
+                p.suave,
+            );
+        }
+    });
+    ui.add_space(14.0);
+    tema::campo(ui, "Nome", &mut d.nome, api::NOME_DA_ABELHA);
+    mostrar_erro(ui, &d.erro);
+    let nome = d.nome.trim();
+    match rodape(ui, "Salvar", !nome.is_empty()) {
+        (true, _) => Resultado::Fechar,
+        (_, true) => match api::definir_mascote(perfil, d.modelo.codigo(), nome) {
+            Ok(()) => Resultado::Fechar,
+            Err(e) => {
+                d.erro = Some(format!("Não consegui salvar a abelha: {e}"));
+                Resultado::Continua
+            }
+        },
+        _ => Resultado::Continua,
     }
 }
 

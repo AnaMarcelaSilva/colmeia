@@ -541,6 +541,35 @@ pub enum Evento {
         #[serde(default)]
         mostrar: bool,
     },
+    /// A abelha do perfil mudou (nesta ou em outra tela).
+    #[serde(rename = "perfil.mascote")]
+    PerfilMascote {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        modelo: String,
+        #[serde(default)]
+        nome: String,
+    },
+    /// A abelha fixa foi ligada ou desligada (aqui ou nela mesma, no Desafixar).
+    #[serde(rename = "perfil.abelha_fixa")]
+    PerfilAbelhaFixa {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        ligada: bool,
+    },
+    /// A abelha fixa pediu para mostrar uma tarefa (0: só a janela).
+    #[serde(rename = "tela.abrir")]
+    TelaAbrir {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+        #[serde(default)]
+        agente_id: i64,
+    },
     /// Um workspace foi recolhido ou aberto na barra lateral (nesta ou em outra tela).
     #[serde(rename = "workspace.recolhido")]
     WorkspaceRecolhido { seq: u64 },
@@ -596,6 +625,9 @@ impl Evento {
             | Evento::ConexaoMudou { seq, .. }
             | Evento::BancoConsulta { seq, .. }
             | Evento::PerfilTempoAgentes { seq, .. }
+            | Evento::PerfilMascote { seq, .. }
+            | Evento::PerfilAbelhaFixa { seq, .. }
+            | Evento::TelaAbrir { seq, .. }
             | Evento::WorkspaceRecolhido { seq, .. }
             | Evento::ComandoIniciou { seq, .. }
             | Evento::ComandoTerminou { seq, .. }
@@ -612,6 +644,7 @@ impl Evento {
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
+            Evento::PerfilMascote { .. } | Evento::PerfilAbelhaFixa { .. } | Evento::TelaAbrir { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
             _ => !matches!(
                 self,
@@ -695,6 +728,9 @@ impl Modelo {
             | Evento::ComandoRemovido { .. }
             // A tela principal aplica no perfil (e o registro busca de novo).
             | Evento::PerfilTempoAgentes { .. }
+            | Evento::PerfilMascote { .. }
+            | Evento::PerfilAbelhaFixa { .. }
+            | Evento::TelaAbrir { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).
             | Evento::LousaMudou { .. } => {}
             Evento::PedidoMudou { pedido, .. } => {

@@ -1,0 +1,16 @@
+[package]
+name = "canal"
+description = "Canal local da Colmeia: o socket Unix e o token do núcleo, para a tela e a abelha fixa."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tungstenite = "0.30"
+
+[target.'cfg(windows)'.dependencies]
+# Socket Unix (AF_UNIX) no Windows 10 1803+ e 11: o mesmo canal do Linux.
+uds_windows = "1.2"

@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use eframe::egui::{self, Id, Order, Pos2, Rect, RichText, Sense, vec2};
-use mascote::{Estado, Tempo};
+use mascote::{Estado, Modelo, Tempo};
 
 use crate::dados::{Coluna, Tarefa};
 use crate::tema::{EstadoVisual, cores};
@@ -26,6 +26,9 @@ pub struct Conclusao {
 pub struct Abelha {
     pub conclusoes: Vec<Conclusao>,
     pub resumo_aberto: bool,
+    /// O acabamento e o nome escolhidos no perfil.
+    pub modelo: Modelo,
+    pub nome: String,
     estado: Estado,
     mudou_em: f64,
     /// Até quando a abelha anima (troca de estado ou mouse em cima).
@@ -59,7 +62,22 @@ pub fn estado_base<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, agentes_rodand
 
 impl Abelha {
     pub fn new() -> Self {
-        Self { conclusoes: Vec::new(), resumo_aberto: false, estado: Estado::Dormindo, mudou_em: 0.0, animar_ate: 0.0, em_cima: false }
+        Self {
+            conclusoes: Vec::new(),
+            resumo_aberto: false,
+            modelo: Modelo::default(),
+            nome: crate::api::NOME_DA_ABELHA.into(),
+            estado: Estado::Dormindo,
+            mudou_em: 0.0,
+            animar_ate: 0.0,
+            em_cima: false,
+        }
+    }
+
+    /// A abelha escolhida no perfil (ao entrar nele e quando muda em outra tela).
+    pub fn vestir(&mut self, modelo: &str, nome: &str) {
+        self.modelo = Modelo::do_codigo(modelo);
+        self.nome = if nome.trim().is_empty() { crate::api::NOME_DA_ABELHA.into() } else { nome.to_string() };
     }
 
     pub fn concluiu(&mut self, id: i64, projeto_id: i64, agora: f64) {
@@ -87,7 +105,7 @@ impl Abelha {
     }
 
     /// O nome do estado de agora ("Aguardando você"), para a linha ao lado dela.
-    pub fn nome(&self) -> &'static str {
+    pub fn nome_do_estado(&self) -> &'static str {
         self.estado.nome()
     }
 
@@ -114,7 +132,7 @@ impl Abelha {
             self.tempo_parado()
         };
         let tempo = Tempo { total: t_visual as f32, no_estado: (t_visual - self.mudou_em) as f32 };
-        mascote::desenhar(ui.painter(), rect.center(), rect.height(), self.estado, tempo);
+        mascote::desenhar(ui.painter(), rect.center(), rect.height(), self.modelo, self.estado, tempo);
         resposta
     }
 
@@ -159,8 +177,10 @@ pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tar
 /// Resumo aberto ao clicar na abelha: uma linha por agente que precisa de
 /// você (e por tarefa concluída), que leva à tarefa com foco nesse agente.
 /// Retorna a tarefa (e o agente) clicados e a resposta da área, para fechar ao clicar fora.
+#[allow(clippy::too_many_arguments)]
 pub fn resumo(
     ctx: &egui::Context,
+    nome: &str,
     ancora: Pos2,
     tarefas: &[Tarefa],
     no_escopo: impl Fn(i64) -> bool,
@@ -172,7 +192,11 @@ pub fn resumo(
     let area = egui::Area::new(Id::new("resumo-abelha")).order(Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(cores().superficie_alta).corner_radius(crate::tema::RAIO_SUPERFICIE).inner_margin(14).show(ui, |ui| {
             ui.set_width(360.0);
-            ui.label(crate::tema::texto_forte("O que está acontecendo", 14.0).color(cores().texto));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(crate::tema::texto_forte(nome, 14.0).color(cores().texto));
+                ui.label(RichText::new("o que está acontecendo").size(13.0).color(cores().suave));
+            });
             ui.add_space(6.0);
             let mut vazio = true;
             // Cada texto vem em duas partes: o começo pode ser cortado com "…",

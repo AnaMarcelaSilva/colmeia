@@ -71,6 +71,12 @@ Ao lado do nome do projeto, o resumo ("2 esperam você · 1 trabalhando · 1 com
 
 Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a janela em segundo plano, o título vira "Colmeia · 2 esperando você". Ctrl+Shift+P leva direto ao próximo agente que está esperando.
 
+### A abelha e a abelha fixa
+
+A abelha no pé da barra lateral resume o perfil: dorme, trabalha, espera você, dá erro ou comemora, e o clique abre o que está acontecendo. Em Ajustes, **Abelha** escolhe o acabamento dela entre cinco (a da identidade, a antiga, o meio-termo, o robô do favo e o zangão) e o nome, Colmeia por padrão, que aparece no resumo e nos balões.
+
+**Fixar a abelha na área de trabalho** abre o `colmeia-abelha`, um programa à parte, pequeno e sem moldura, sempre por cima e em todas as áreas de trabalho, que continua lá com a janela da Colmeia fechada (o núcleo segue rodando). Parada, ela mostra um ponto da cor do que mais pede você, ou um contador vermelho com os erros. O clique abre o resumo ("2 esperam você · 1 trabalhando · 0 com erro"), que fica até você fechar, com a tarefa que pede você, Abrir a Colmeia e Desafixar. Quando um agente espera você, dá erro ou uma tarefa é concluída, um balão sai dela e some em 8 s (parado com o mouse em cima). Abrir e Ver o erro levam à tarefa na janela aberta ou abrem a Colmeia já nela. A abelha se arrasta e lembra onde ficou, e só redesenha quando algo muda. No Wayland ela fica por cima só onde o compositor deixa, como uma janela comum ([decisão 0013](docs/decisoes/0013-abelha-fixa-em-programa-a-parte.md)).
+
 ### Histórico, daily e sprint
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
@@ -207,12 +213,14 @@ Para testar sem afetar os dados reais, aponte `COLMEIA_DIR` e `COLMEIA_DADOS` pa
 | `COLMEIA_CHAVEIRO_SERVICO` | Nome do serviço no chaveiro (padrão `Colmeia`) |
 | `COLMEIA_TEMA` | `escuro`, `fosco`, `claro` ou `leitura`, antes de escolher um perfil |
 | `COLMEIA_SEM_ABELHA=1` | Desliga a abelha |
+| `COLMEIA_ABELHA` | Caminho do `colmeia-abelha` (a abelha fixa), se ele não estiver ao lado da tela nem no PATH |
+| `COLMEIA_APP` | Caminho do `colmeia`, para a abelha fixa abrir a janela |
 | `COLMEIA_TAMANHO` | Tamanho inicial da janela, como `1280x720` |
 | `COLMEIA_FPS=1` | Mostra o contador de quadros, para medir desempenho |
 
 </details>
 
-O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha, com uma vitrine em `cargo run --release -p mascote --example vitrine`), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
+O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha nos cinco acabamentos, com uma vitrine em `cargo run --release -p mascote --example vitrine`; `MASCOTE_GALERIA=1` mostra todos), `abelha-fixa/` (o programa `colmeia-abelha`, a abelha fixa na área de trabalho), `canal/` (o socket e o token do núcleo, usados pela tela e pela abelha fixa), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
 
 ## Plataformas
 

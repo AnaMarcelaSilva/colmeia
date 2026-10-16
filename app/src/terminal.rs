@@ -18,7 +18,6 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use eframe::egui::{self, Color32, FontId, Sense, text::LayoutJob, text::TextFormat};
 use tungstenite::Message;
 
-use crate::canal;
 use crate::tema::cores;
 
 /// O que separa as palavras no clique duplo.

@@ -1,8 +1,10 @@
 //! Vitrine da abelha-robô: os cinco estados em ciclo automático ou escolhidos
-//! nos botões. MASCOTE_ESTADO=0..4 abre num estado fixo, sem ciclo.
+//! nos botões, em cada modelo. MASCOTE_ESTADO=0..4 abre num estado fixo, sem
+//! ciclo; MASCOTE_MODELO=antiga (ou meio-termo, favo, zangao) abre num modelo.
+//! MASCOTE_GALERIA=1 mostra todos os modelos em todos os estados, parados.
 
 use eframe::egui::{self, Color32, RichText};
-use mascote::{Estado, Tempo};
+use mascote::{Estado, Modelo, Tempo};
 
 // As cores do tema escuro da Colmeia.
 const FUNDO: Color32 = Color32::from_rgb(0x0b, 0x0d, 0x15);
@@ -14,9 +16,11 @@ const DESTAQUE: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
 const SEGUNDOS_POR_ESTADO: f64 = 3.0;
 
 struct Vitrine {
+    modelo: Modelo,
     estado: Estado,
     desde: f64,
     ciclo: bool,
+    galeria: bool,
 }
 
 impl eframe::App for Vitrine {
@@ -28,6 +32,10 @@ impl eframe::App for Vitrine {
             self.desde = agora;
         }
         let tempo = Tempo { total: agora as f32, no_estado: (agora - self.desde) as f32 };
+        if self.galeria {
+            galeria(ui);
+            return;
+        }
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(FUNDO).inner_margin(20)).show(ui, |ui| {
             let area = ui.available_rect_before_wrap();
@@ -35,7 +43,7 @@ impl eframe::App for Vitrine {
             let pintor = ui.painter_at(cartao);
             pintor.rect_filled(cartao, 12.0, PAINEL);
             let tamanho = (cartao.height() * 0.6).min(cartao.width() * 0.5);
-            mascote::desenhar(&pintor, cartao.center() - egui::vec2(0.0, 26.0), tamanho, self.estado, tempo);
+            mascote::desenhar(&pintor, cartao.center() - egui::vec2(0.0, 26.0), tamanho, self.modelo, self.estado, tempo);
             pintor.text(
                 cartao.center_bottom() - egui::vec2(0.0, 52.0),
                 egui::Align2::CENTER_CENTER,
@@ -51,7 +59,16 @@ impl eframe::App for Vitrine {
                 SUAVE,
             );
 
-            ui.allocate_space(egui::vec2(area.width(), cartao.height() + 12.0));
+            ui.allocate_space(egui::vec2(area.width(), cartao.height() - 24.0));
+            ui.horizontal(|ui| {
+                for modelo in Modelo::TODOS {
+                    let ativo = modelo == self.modelo;
+                    let botao = egui::Button::new(RichText::new(modelo.nome()).color(if ativo { DESTAQUE } else { SUAVE })).frame(false);
+                    if ui.add(botao).clicked() {
+                        self.modelo = modelo;
+                    }
+                }
+            });
             ui.horizontal(|ui| {
                 for estado in Estado::TODOS {
                     let ativo = estado == self.estado;
@@ -74,11 +91,29 @@ impl eframe::App for Vitrine {
     }
 }
 
+/// Uma linha por modelo, uma coluna por estado, num instante fixo.
+fn galeria(ui: &mut egui::Ui) {
+    let area = ui.max_rect();
+    let pintor = ui.painter();
+    pintor.rect_filled(area, 0.0, FUNDO);
+    let (lado, margem) = (100.0, 130.0);
+    for (i, modelo) in Modelo::TODOS.into_iter().enumerate() {
+        let y = area.top() + 70.0 + i as f32 * lado * 1.15;
+        pintor.text(egui::pos2(area.left() + 12.0, y), egui::Align2::LEFT_CENTER, modelo.nome(), egui::FontId::proportional(14.0), TEXTO);
+        for (j, estado) in Estado::TODOS.into_iter().enumerate() {
+            let centro = egui::pos2(area.left() + margem + 60.0 + j as f32 * lado * 1.6, y);
+            mascote::desenhar(pintor, centro, lado * 0.8, modelo, estado, Tempo { total: 1.3, no_estado: 0.6 });
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     let fixo = std::env::var("MASCOTE_ESTADO").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| Estado::TODOS.get(i).copied());
     let (estado, ciclo) = fixo.map_or((Estado::Dormindo, true), |e| (e, false));
+    let galeria = std::env::var("MASCOTE_GALERIA").is_ok_and(|v| v == "1");
+    let modelo = Modelo::do_codigo(&std::env::var("MASCOTE_MODELO").unwrap_or_default());
     let opcoes = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("Colmeia · mascote").with_inner_size([720.0, 520.0]),
+        viewport: egui::ViewportBuilder::default().with_title("Colmeia · mascote").with_inner_size(if galeria { [1000.0, 700.0] } else { [720.0, 520.0] }),
         ..Default::default()
     };
     eframe::run_native(
@@ -86,7 +121,7 @@ fn main() -> eframe::Result {
         opcoes,
         Box::new(move |cc| {
             cc.egui_ctx.global_style_mut(|s| s.interaction.selectable_labels = false);
-            Ok(Box::new(Vitrine { estado, desde: 0.0, ciclo }))
+            Ok(Box::new(Vitrine { modelo, estado, desde: 0.0, ciclo, galeria }))
         }),
     )
 }

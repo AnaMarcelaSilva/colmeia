@@ -42,7 +42,8 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/terminais/{id}` | Só com `--demo`: WebSocket de um terminal de teste |
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
-| `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`), o aviso antes de capturar (`aviso_captura`) ou a exibição do tempo dos agentes no registro (`tempo_agentes`, desligada por padrão; gera o evento `perfil.tempo_agentes`, levado às telas só com o booleano) |
+| `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`), o aviso antes de capturar (`aviso_captura`) ou a exibição do tempo dos agentes no registro (`tempo_agentes`, desligada por padrão; gera o evento `perfil.tempo_agentes`, levado às telas só com o booleano), o Autocompletar do console de bancos (`autocompletar_sql`), a abelha (`mascote_modelo`, um de `identidade`, `antiga`, `meio-termo`, `favo` e `zangao`, e `mascote_nome`, até 24 caracteres numa linha; padrão `identidade` e `Colmeia`; evento `perfil.mascote`) ou a abelha fixa (`abelha_fixa`, desligada por padrão; evento `perfil.abelha_fixa`) |
+| `POST /v1/perfis/{id}/abrir` | `{tarefa_id?, agente_id?}`: pede às janelas abertas do perfil que mostrem a tarefa (o evento `tela.abrir`, fora da corrente); responde `{janelas}`, sem contar a abelha fixa. Com 0, quem pediu abre o app (`colmeia --perfil N --tarefa M`). A tarefa e o agente têm de ser do perfil |
 | `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes, uso, frases}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=` ou `workspace=` (nunca os dois: 400; de outro perfil: 404) ou `tarefa=` (só os eventos dela, a aba Linha do tempo), `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
@@ -139,7 +140,7 @@ Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválid
 
 ### Eventos
 
-O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de outro site. A tela não manda nada por ele: o que chegar é descartado. Cada mensagem é um JSON com `tipo` e `seq`, e as que vêm do histórico trazem também `evento` (o id gravado):
+O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de outro site. A tela não manda nada por ele: o que chegar é descartado. A abelha fixa, um programa à parte com o mesmo token, se liga com `?quem=abelha`: recebe o mesmo, mas não conta como janela aberta no `/abrir`. Cada mensagem é um JSON com `tipo` e `seq`, e as que vêm do histórico trazem também `evento` (o id gravado):
 
 | Tipo | Campos |
 | --- | --- |
@@ -162,6 +163,9 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `banco.consulta` | `conexao_id`, `tarefa_id`, `agente_id`: houve consulta ou alteração (sem SQL nem resultado); a tela relê o histórico se estiver nele |
 | `banco.aprovacao` | Fora da corrente (leva o SQL, que só vai para a tela): `acao: "pedida"` com `aprovacao` (`id, conexao_id, conexao, tipo, agente_id, tarefa_id, agente, tarefa, sql, banco, limite, criada_hora, expira, expira_hora, precisa_senha`) ou `acao: "resolvida"` com `aprovacao_id`, `resultado` (`aprovada`, `recusada`, `expirou`, `cancelada`), `linhas`, `ms`, `hora` e `erro` |
 | `workspace.recolhido` | `workspace_id`, `recolhido`: o workspace foi recolhido ou aberto na barra lateral |
+| `perfil.mascote` | `perfil_id`, `modelo`, `nome`: a abelha do perfil mudou; a tela e a abelha fixa redesenham |
+| `perfil.abelha_fixa` | `perfil_id`, `ligada`: desligada, o programa da abelha fixa sai ([decisão 0013](decisoes/0013-abelha-fixa-em-programa-a-parte.md)) |
+| `tela.abrir` | `tarefa_id`, `agente_id` (0 é só a janela): fora da corrente; a janela aberta mostra a tarefa e vem para a frente |
 | `perfil.tempo_agentes` | `perfil_id`, `mostrar`: a opção "Mostrar tempo dos agentes" mudou; as telas do perfil escondem na hora ou buscam de novo ([decisão 0010](decisoes/0010-tempo-dos-agentes-opcional.md)) |
 | `lousa.mudou` | `lousa_id`, `dono` (`workspace_id` ou `tarefa_id`), `elementos` (os itens inteiros, com o texto) e `removidos`; com `agente_id` e `evento` quando foi o agente (o evento `lousa.agente` no histórico não tem texto). Mudanças da tela não ficam no histórico ([decisão 0008](decisoes/0008-lousa-fora-da-corrente.md)) |
 

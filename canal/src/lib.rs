@@ -157,12 +157,13 @@ mod local {
         Ok((status, resposta[fim + 4..].to_vec()))
     }
 
-    /// Procura o executável do núcleo: COLMEIA_NUCLEO, ao lado do app ou no PATH.
-    fn executavel_nucleo() -> Option<PathBuf> {
-        if let Some(c) = std::env::var_os("COLMEIA_NUCLEO") {
+    /// Procura um executável da Colmeia: a variável `variavel` (ex.:
+    /// COLMEIA_NUCLEO), ao lado do programa que está rodando ou no PATH.
+    pub fn executavel(nome: &str, variavel: &str) -> Option<PathBuf> {
+        if let Some(c) = std::env::var_os(variavel) {
             return Some(PathBuf::from(c));
         }
-        let nome = format!("colmeia-nucleo{}", std::env::consts::EXE_SUFFIX);
+        let nome = format!("{nome}{}", std::env::consts::EXE_SUFFIX);
         let vizinho = std::env::current_exe().ok()?.with_file_name(&nome);
         if vizinho.is_file() {
             return Some(vizinho);
@@ -170,8 +171,35 @@ mod local {
         std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(&nome)).find(|c| c.is_file()))
     }
 
+    /// Prepara o comando para um programa que vive por conta própria: sem
+    /// entrada nem saída e num grupo próprio, para fechar quem abriu (ou o
+    /// terminal de onde veio) não levar o programa junto.
+    pub fn soltar(comando: &mut Command) {
+        comando.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(comando, 0);
+        // No Windows, sem console e fora do grupo de quem abriu.
+        #[cfg(windows)]
+        {
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            std::os::windows::process::CommandExt::creation_flags(comando, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+    }
+
+    /// Inicia um programa solto e recolhe o processo quando ele sair (sem
+    /// isso, ele fica como zumbi até quem abriu fechar).
+    pub fn iniciar_solto(mut comando: Command) -> std::io::Result<()> {
+        soltar(&mut comando);
+        let mut filho = comando.spawn()?;
+        let _ = std::thread::Builder::new().name("filho-solto".into()).spawn(move || {
+            let _ = filho.wait();
+        });
+        Ok(())
+    }
+
     /// Os casos comuns em português; o resto como o sistema descreve.
-    fn erro_ao_iniciar(e: &std::io::Error) -> String {
+    pub fn erro_ao_iniciar(e: &std::io::Error) -> String {
         match e.kind() {
             std::io::ErrorKind::NotFound => "arquivo não encontrado".into(),
             std::io::ErrorKind::PermissionDenied => "sem permissão para executar".into(),
@@ -187,28 +215,13 @@ mod local {
         if pedir("GET", "/v1/versao").is_ok() {
             return Ok(());
         }
-        let caminho = executavel_nucleo().ok_or("não encontrei o executável colmeia-nucleo (defina COLMEIA_NUCLEO)")?;
+        let caminho = executavel("colmeia-nucleo", "COLMEIA_NUCLEO").ok_or("não encontrei o executável colmeia-nucleo (defina COLMEIA_NUCLEO)")?;
         let mut comando = Command::new(&caminho);
         if std::env::var("COLMEIA_DEMO").is_ok_and(|v| v == "1") {
             comando.arg("--demo");
         }
-        comando.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        // Em grupo próprio: fechar a tela (ou o terminal que a abriu) não leva o núcleo junto.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut comando, 0);
-        // No Windows, sem console e fora do grupo da tela.
-        #[cfg(windows)]
-        {
-            const DETACHED_PROCESS: u32 = 0x0000_0008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            std::os::windows::process::CommandExt::creation_flags(&mut comando, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-        let mut filho = comando.spawn().map_err(|e| format!("iniciando {}: {}", caminho.display(), erro_ao_iniciar(&e)))?;
-        // Recolhe o filho quando ele sair; sem isso, um núcleo que caiu fica
-        // como zumbi até a tela fechar. A thread só espera e não segura a saída.
-        let _ = std::thread::Builder::new().name("nucleo-filho".into()).spawn(move || {
-            let _ = filho.wait();
-        });
+        // Solto: fechar a tela não leva o núcleo junto (ele é dono dos terminais).
+        iniciar_solto(comando).map_err(|e| format!("iniciando {}: {}", caminho.display(), erro_ao_iniciar(&e)))?;
         let limite = Instant::now() + Duration::from_secs(5);
         while Instant::now() < limite {
             if pedir("GET", "/v1/versao").is_ok() {
@@ -249,5 +262,14 @@ mod outros {
     }
     pub fn garantir_nucleo() -> Result<(), String> {
         Err(AVISO.into())
+    }
+    pub fn executavel(_: &str, _: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+    pub fn iniciar_solto(_: std::process::Command) -> std::io::Result<()> {
+        Err(std::io::Error::other(AVISO))
+    }
+    pub fn erro_ao_iniciar(e: &std::io::Error) -> String {
+        e.to_string()
     }
 }

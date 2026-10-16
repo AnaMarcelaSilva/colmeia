@@ -27,8 +27,8 @@ jobs:
       - name: Compilar
         run: |
           CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo ./cmd/colmeia-nucleo
-          cargo build --release --locked -p colmeia
-          cp target/release/colmeia dist/
+          cargo build --release --locked -p colmeia -p colmeia-abelha
+          cp target/release/colmeia target/release/colmeia-abelha dist/
           cp packaging/colmeia.desktop packaging/colmeia.svg packaging/colmeia-pequeno.svg scripts/instalar.sh LICENSE-MIT LICENSE-APACHE dist/
       - name: Empacotar
         run: tar -C dist -czf colmeia-linux-x86_64.tar.gz .
@@ -54,8 +54,8 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo.exe ./cmd/colmeia-nucleo
-          cargo build --release --locked -p colmeia
-          cp target/release/colmeia.exe dist/
+          cargo build --release --locked -p colmeia -p colmeia-abelha
+          cp target/release/colmeia.exe target/release/colmeia-abelha.exe dist/
           cp scripts/instalar.ps1 LICENSE-MIT LICENSE-APACHE dist/
       - name: Empacotar
         run: Compress-Archive -Path dist\* -DestinationPath colmeia-windows-x86_64.zip

@@ -12,7 +12,6 @@ mod api;
 mod apresentacao;
 mod arquivos;
 mod banco;
-mod canal;
 mod compositor;
 mod dados;
 mod descricao;
@@ -229,6 +228,9 @@ struct Colmeia {
     conexao: Conexao,
     /// O primeiro retrato do perfil escolhe o projeto em foco.
     primeira_carga: bool,
+    /// A tarefa (e o agente) pedida na linha de comando pela abelha fixa,
+    /// aberta quando o primeiro retrato chegar.
+    abrir_ao_carregar: Option<(i64, Option<i64>)>,
     registro: registro::Registro,
     /// A apresentação da daily ou da sprint, por cima de tudo (a tela de
     /// baixo fica guardada para a volta).
@@ -314,7 +316,7 @@ struct Colmeia {
 }
 
 impl Colmeia {
-    fn new(cc: &eframe::CreationContext, problema: Option<String>) -> Self {
+    fn new(cc: &eframe::CreationContext, problema: Option<String>, pedido: PedidoDeAbertura) -> Self {
         tema::instalar(&cc.egui_ctx);
         // COLMEIA_TEMA=claro | escuro | leitura escolhe o tema antes de entrar num perfil.
         let escolha = tema::Escolha::da_chave(&std::env::var("COLMEIA_TEMA").unwrap_or_default());
@@ -352,6 +354,7 @@ impl Colmeia {
             ouvinte: None,
             conexao: Conexao::Ligado,
             primeira_carga: false,
+            abrir_ao_carregar: None,
             registro: registro::Registro::default(),
             apresentacao: None,
             tela_cheia_antes: false,
@@ -402,6 +405,11 @@ impl Colmeia {
         app.compositor.focar = true;
         if !demo {
             app.tela = Tela::Entrada(Box::new(entrada::Entrada::new(false)));
+            // Aberta pela abelha fixa: entra direto no perfil e abre a tarefa.
+            if let Some(perfil) = pedido.perfil.and_then(|id| api::perfis().ok()?.into_iter().find(|p| p.id == id)) {
+                app.entrar(perfil, &cc.egui_ctx);
+                app.abrir_ao_carregar = pedido.tarefa.map(|t| (t, pedido.agente));
+            }
             return app;
         }
 
@@ -414,6 +422,9 @@ impl Colmeia {
             aviso_captura: false,
             tempo_agentes: false,
             autocompletar_sql: false,
+            mascote_modelo: String::new(),
+            mascote_nome: api::NOME_DA_ABELHA.into(),
+            abelha_fixa: false,
         });
         app.modelo.projetos = dados::projetos_demo();
         let cartoes = std::env::var("COLMEIA_CARTOES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
@@ -506,6 +517,14 @@ impl Colmeia {
         self.banco = banco::Bancos::novo(perfil.id);
         self.banco.nome_perfil = perfil.nome.clone();
         self.banco.autocompletar = perfil.autocompletar_sql;
+        self.abelha.vestir(&perfil.mascote_modelo, &perfil.mascote_nome);
+        // A abelha fixa volta com a Colmeia (se já estiver aberta, a nova sai sozinha).
+        if perfil.abelha_fixa
+            && !self.demo
+            && let Err(e) = sistema::abrir_abelha_fixa(perfil.id)
+        {
+            eprintln!("abrindo a abelha fixa: {e}");
+        }
         self.tela_antes_do_banco = None;
         self.pedidos_consulta.clear();
         // O retrato do quadro chega pela thread de eventos, fora da thread da tela.
@@ -542,6 +561,9 @@ impl Colmeia {
                         self.primeira_carga = false;
                         self.escopo = self.modelo.projetos.first().map_or(Escopo::Perfil, |p| Escopo::Projeto(p.id));
                         self.carregar_branches();
+                        if let Some((tarefa, agente)) = self.abrir_ao_carregar.take() {
+                            self.abrir_tarefa(tarefa, agente);
+                        }
                     }
                     if let Escopo::Projeto(id) = self.escopo
                         && !self.modelo.projetos.iter().any(|p| p.id == id)
@@ -573,6 +595,21 @@ impl Colmeia {
                         && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
                     {
                         p.tempo_agentes = *mostrar;
+                    }
+                    if let dados::Evento::PerfilMascote { perfil_id, modelo, nome, .. } = &e
+                        && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
+                    {
+                        p.mascote_modelo = modelo.clone();
+                        p.mascote_nome = nome.clone();
+                        self.abelha.vestir(modelo, nome);
+                    }
+                    if let dados::Evento::PerfilAbelhaFixa { perfil_id, ligada, .. } = &e
+                        && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
+                    {
+                        p.abelha_fixa = *ligada;
+                    }
+                    if let dados::Evento::TelaAbrir { tarefa_id, agente_id, .. } = &e {
+                        self.atender_abertura(*tarefa_id, *agente_id, ctx);
                     }
                     if let dados::Evento::LousaMudou { lousa_id, dono, elementos, removidos, agente_id, .. } = &e {
                         self.lousa_mudou(*lousa_id, *dono, elementos.clone(), removidos, *agente_id, agora);
@@ -1771,6 +1808,36 @@ impl Colmeia {
         }
     }
 
+    /// Liga ou desliga a abelha fixa do perfil. Ligar grava e abre o programa
+    /// dela; desligar só grava: a abelha recebe o evento e sai sozinha.
+    fn fixar_abelha(&mut self, ligar: bool, agora: f64) {
+        let Some(perfil) = self.perfil.as_mut() else { return };
+        if let Err(e) = api::definir_abelha_fixa(perfil.id, ligar) {
+            self.erro(format!("Não consegui salvar a abelha fixa: {e}"), agora);
+            return;
+        }
+        perfil.abelha_fixa = ligar;
+        let id = perfil.id;
+        if ligar && let Err(e) = sistema::abrir_abelha_fixa(id) {
+            // Sem o programa, a opção volta a desligada para não mentir.
+            let _ = api::definir_abelha_fixa(id, false);
+            if let Some(p) = self.perfil.as_mut() {
+                p.abelha_fixa = false;
+            }
+            self.erro(format!("Não consegui abrir a abelha fixa: {e}"), agora);
+        }
+    }
+
+    /// A abelha fixa pediu para mostrar uma tarefa (ou só a janela): abre e
+    /// traz a janela para a frente.
+    fn atender_abertura(&mut self, tarefa: i64, agente: i64, ctx: &egui::Context) {
+        if tarefa != 0 {
+            self.abrir_tarefa(tarefa, (agente != 0).then_some(agente));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     /// Perfil sem projeto: um convite para adicionar o primeiro.
     fn sem_projetos(&mut self, ui: &mut egui::Ui) {
         let pode = self.pode_mudar();
@@ -1864,6 +1931,12 @@ impl Colmeia {
                         let _ = api::definir_aviso_captura(perfil.id, mostrar);
                     }
                 }
+                Acao::Mascote => {
+                    if let Some(perfil) = &self.perfil {
+                        self.dialogo = Some(Dialogo::Mascote(dialogos::EscolhaMascote::new(&perfil.mascote_modelo, &perfil.mascote_nome)));
+                    }
+                }
+                Acao::AbelhaFixa(ligar) => self.fixar_abelha(ligar, ctx.input(|i| i.time)),
                 Acao::Proximo => self.proximo_que_precisa(),
                 Acao::Linha => self.alternar_linha(),
                 Acao::Daily => self.abrir_daily(),
@@ -3100,7 +3173,8 @@ impl eframe::App for Colmeia {
             && let Some(caixa) = caixa_abelha
         {
             let ancora = egui::pos2(caixa.right() + 20.0, caixa.bottom());
-            let (clicada, area) = abelha::resumo(&ctx, ancora, &self.modelo.tarefas, |p| no_escopo.contains(&p), &self.abelha.conclusoes, rodando, agora);
+            let (clicada, area) =
+                abelha::resumo(&ctx, &self.abelha.nome, ancora, &self.modelo.tarefas, |p| no_escopo.contains(&p), &self.abelha.conclusoes, rodando, agora);
             if let Some((tarefa, agente)) = clicada {
                 self.abrir_tarefa(tarefa, agente);
             } else if area.clicked_elsewhere() && !abelha_clicada {
@@ -3140,7 +3214,40 @@ fn main() -> eframe::Result {
     let icone = eframe::icon_data::from_png_bytes(include_bytes!("../../packaging/colmeia-64.png")).unwrap_or_default();
     let viewport = egui::ViewportBuilder::default().with_title("Colmeia").with_inner_size(tamanho).with_icon(Arc::new(icone));
     let opcoes = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, problema)))))
+    let pedido = PedidoDeAbertura::da_linha(std::env::args().skip(1));
+    eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, problema, pedido)))))
+}
+
+/// `--perfil N [--tarefa M [--agente A]]`: a abelha fixa abre a Colmeia já
+/// numa tarefa quando não há janela aberta. O resto é ignorado.
+#[derive(Default, Debug, PartialEq)]
+struct PedidoDeAbertura {
+    perfil: Option<i64>,
+    tarefa: Option<i64>,
+    agente: Option<i64>,
+}
+
+impl PedidoDeAbertura {
+    fn da_linha(argumentos: impl Iterator<Item = String>) -> Self {
+        let mut pedido = PedidoDeAbertura::default();
+        let mut argumentos = argumentos.peekable();
+        while let Some(a) = argumentos.next() {
+            let campo = match a.as_str() {
+                "--perfil" => &mut pedido.perfil,
+                "--tarefa" => &mut pedido.tarefa,
+                "--agente" => &mut pedido.agente,
+                _ => continue,
+            };
+            *campo = argumentos.next_if(|v| v.parse::<i64>().is_ok_and(|n| n > 0)).and_then(|v| v.parse().ok());
+        }
+        if pedido.perfil.is_none() {
+            return PedidoDeAbertura::default();
+        }
+        if pedido.tarefa.is_none() {
+            pedido.agente = None;
+        }
+        pedido
+    }
 }
 
 #[cfg(test)]
@@ -3148,6 +3255,19 @@ mod testes {
     use super::*;
 
     const PECAS: PecasBarra = PecasBarra { apresentar: 120.0, copiar: 110.0, mais: 48.0, caixa: 220.0, caixa_curta: 160.0 };
+
+    #[test]
+    fn pedido_de_abertura_pela_linha_de_comando() {
+        let ler = |linha: &str| PedidoDeAbertura::da_linha(linha.split_whitespace().map(String::from));
+        assert_eq!(ler("--perfil 2 --tarefa 7 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: Some(7), agente: Some(3) });
+        assert_eq!(ler("--perfil 2"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        // Sem perfil, nada; agente sem tarefa, só o perfil; números estranhos são ignorados.
+        assert_eq!(ler("--tarefa 7"), PedidoDeAbertura::default());
+        assert_eq!(ler("--perfil 2 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        assert_eq!(ler("--perfil -1 --tarefa x"), PedidoDeAbertura::default());
+        assert_eq!(ler("--perfil 2 --tarefa --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        assert_eq!(ler(""), PedidoDeAbertura::default());
+    }
 
     #[test]
     fn barra_do_registro_nunca_cobre_o_chip_ver() {

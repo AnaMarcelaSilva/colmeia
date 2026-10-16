@@ -16,6 +16,16 @@ O que entra no binário do núcleo (`go version -m colmeia-nucleo`), conferido p
 | github.com/godbus/dbus/v5 | v5.2.2 | BSD-2-Clause | Secret Service pelo D-Bus (dependência do go-keyring) |
 | golang.org/x/crypto, x/sync, x/sys, x/text | | BSD-3-Clause | Biblioteca estendida do Go (no Windows, x/sys/windows: ConPTY, jobs e listas de acesso) |
 
+## A abelha fixa (`colmeia-abelha`)
+
+O programa da abelha fixa usa as mesmas bibliotecas da tela (eframe, tungstenite, serde) e o canal dela, agora no crate `canal`. Ele chama diretamente três que já vinham no binário da tela por dependência do eframe e do winit, sem nenhum crate de fora novo no `Cargo.lock`:
+
+| Crate | Versão | Licença | Para quê |
+| --- | --- | --- | --- |
+| x11rb | 0.13 | MIT OR Apache-2.0 | Pedir ao gerenciador de janelas do X11 que a abelha fique em todas as áreas de trabalho e fora da barra de tarefas, e saber se há compositor (só no Linux) |
+| raw-window-handle | 0.6 | MIT OR Apache-2.0 OR Zlib | O número da janela no X11 (só no Linux) |
+| libc | 0.2 | MIT OR Apache-2.0 | `flock`: uma abelha só por perfil (só no Unix) |
+
 Para conferir de novo:
 
 ```bash

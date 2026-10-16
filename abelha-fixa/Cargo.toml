@@ -1,0 +1,26 @@
+[package]
+name = "colmeia-abelha"
+description = "A abelha fixa da Colmeia: um programa à parte, por cima das janelas, com o resumo e os avisos do perfil."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mascote = { path = "../mascote" }
+canal = { path = "../canal" }
+eframe.workspace = true
+tungstenite = "0.30"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[target.'cfg(unix)'.dependencies]
+# flock(2): uma abelha só por perfil.
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pedir ao gerenciador de janelas do X11 que a abelha fique em todas as áreas de trabalho.
+x11rb = "0.13"
+raw-window-handle = "0.6"

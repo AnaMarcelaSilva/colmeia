@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Instala a Colmeia só para o seu usuário, sem sudo:
-#   ~/.local/bin/colmeia e ~/.local/bin/colmeia-nucleo
+#   ~/.local/bin/colmeia, ~/.local/bin/colmeia-nucleo e ~/.local/bin/colmeia-abelha (a abelha fixa)
 #   o atalho em ~/.local/share/applications e o ícone em ~/.local/share/icons
 # Roda de dentro da pasta da release (com os binários ao lado) ou da raiz do
-# repositório depois de compilar (target/release/colmeia e bin/colmeia-nucleo).
+# repositório depois de compilar (target/release/colmeia, target/release/colmeia-abelha
+# e bin/colmeia-nucleo).
 set -euo pipefail
 aqui=$(cd "$(dirname "$0")" && pwd)
 raiz=$aqui
@@ -21,11 +22,12 @@ if [ -d "$raiz/nucleo" ]; then
 	elif [ -f "$raiz/bin/colmeia-nucleo" ] && [ -n "$(find "$raiz/nucleo" -name '*.go' -newer "$raiz/bin/colmeia-nucleo" -print -quit)" ]; then
 		echo "Aviso: bin/colmeia-nucleo é mais velho que o código do núcleo e o Go não está instalado para recompilar."
 	fi
-	if [ -f "$raiz/target/release/colmeia" ] && [ -n "$(find "$raiz/app" "$raiz/mascote" -name '*.rs' -newer "$raiz/target/release/colmeia" -print -quit)" ]; then
+	if [ -f "$raiz/target/release/colmeia" ] && [ -n "$(find "$raiz/app" "$raiz/mascote" "$raiz/canal" "$raiz/abelha-fixa" -name '*.rs' -newer "$raiz/target/release/colmeia" -print -quit)" ]; then
 		echo "Aviso: target/release/colmeia é mais velho que o código da tela. Rode 'cargo build --release' antes de instalar."
 	fi
 fi
 tela=$(achar "$raiz/colmeia" "$raiz/target/release/colmeia") || { echo "não achei o binário colmeia (compile com: cargo build --release)"; exit 1; }
+abelha=$(achar "$raiz/colmeia-abelha" "$raiz/target/release/colmeia-abelha") || { echo "não achei o binário colmeia-abelha (compile com: cargo build --release)"; exit 1; }
 nucleo=$(achar "$raiz/colmeia-nucleo" "$raiz/bin/colmeia-nucleo") || { echo "não achei o colmeia-nucleo (compile com: go -C nucleo build -o ../bin/colmeia-nucleo ./cmd/colmeia-nucleo)"; exit 1; }
 atalho=$(achar "$raiz/colmeia.desktop" "$raiz/packaging/colmeia.desktop")
 icone=$(achar "$raiz/colmeia.svg" "$raiz/packaging/colmeia.svg")
@@ -38,6 +40,7 @@ icones="$hicolor/scalable/apps"
 mkdir -p "$bin" "$apps" "$icones" "$hicolor/16x16/apps" "$hicolor/24x24/apps"
 install -m 0755 "$tela" "$bin/colmeia"
 install -m 0755 "$nucleo" "$bin/colmeia-nucleo"
+install -m 0755 "$abelha" "$bin/colmeia-abelha"
 # O atalho aponta para o caminho completo: funciona mesmo sem ~/.local/bin no PATH.
 sed "s|^Exec=colmeia$|Exec=$bin/colmeia|" "$atalho" > "$apps/colmeia.desktop"
 chmod 0644 "$apps/colmeia.desktop"

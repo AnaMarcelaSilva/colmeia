@@ -183,6 +183,16 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
     Ok(())
 }
 
+/// Abre o programa da abelha fixa do perfil, solto da janela (fechar a
+/// Colmeia não leva a abelha). Se ela já está aberta, a nova sai sozinha.
+/// COLMEIA_ABELHA aponta outro executável (para testar).
+pub fn abrir_abelha_fixa(perfil: i64) -> Result<(), String> {
+    let caminho = canal::executavel("colmeia-abelha", "COLMEIA_ABELHA").ok_or("não encontrei o programa colmeia-abelha ao lado da Colmeia")?;
+    let mut comando = Command::new(&caminho);
+    comando.arg("--perfil").arg(perfil.to_string());
+    canal::iniciar_solto(comando).map_err(|e| canal::erro_ao_iniciar(&e))
+}
+
 /// O dia de hoje no fuso do computador, "2026-10-16": o mesmo formato do
 /// `data` que o núcleo manda no fim do agente (o Concluído mostra só o de hoje).
 pub fn hoje() -> String {

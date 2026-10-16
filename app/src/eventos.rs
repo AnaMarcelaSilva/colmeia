@@ -16,7 +16,6 @@ use eframe::egui;
 use tungstenite::Message;
 
 use crate::api;
-use crate::canal;
 use crate::dados::Evento;
 
 /// O que a thread conta para a tela.

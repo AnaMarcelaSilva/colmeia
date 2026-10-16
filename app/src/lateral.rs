@@ -89,6 +89,10 @@ pub enum Acao {
     Tema(tema::Escolha),
     TempoAgentes(bool),
     AvisoCaptura(bool),
+    /// Escolher o acabamento e o nome da abelha.
+    Mascote,
+    /// Fixar (ou desafixar) a abelha na área de trabalho.
+    AbelhaFixa(bool),
     Proximo,
     Linha,
     Daily,
@@ -429,6 +433,20 @@ impl Lateral {
                     ui.close();
                 }
             }
+            ui.separator();
+            let nome = v.perfil.map_or(api::NOME_DA_ABELHA, |p| p.mascote_nome.as_str());
+            let modelo = mascote::Modelo::do_codigo(v.perfil.map_or("", |p| p.mascote_modelo.as_str())).nome();
+            if tema::opcao_menu_com(ui, &format!("Abelha: {nome}"), Some(modelo), pode) {
+                saida.acoes.push(Acao::Mascote);
+                ui.close();
+            }
+            let fixa = v.perfil.is_some_and(|p| p.abelha_fixa);
+            let texto = "Fixar a abelha na área de trabalho";
+            let clicou = if pode { tema::opcao_menu(ui, texto, fixa) } else { tema::opcao_menu_com(ui, texto, Some("desligado"), false) };
+            if clicou {
+                saida.acoes.push(Acao::AbelhaFixa(!fixa));
+                ui.close();
+            }
         });
 
         let dica = if self.aberto { "Recolher o painel" } else { "Abrir o painel" };
@@ -445,7 +463,8 @@ impl Lateral {
                 ui.painter().rect_filled(caixa, CornerRadius::same(11), tema::realce_lateral(p).gamma_multiply(t));
             }
             let resposta = abelha.mostrar(ui, caixa, caixa.shrink(3.0), Id::new("abelha-trilho"), v.agora);
-            let resposta = if abelha.resumo_aberto { resposta } else { resposta.on_hover_text(format!("{} · {}", abelha.nome(), v.linha)) };
+            let resposta =
+                if abelha.resumo_aberto { resposta } else { resposta.on_hover_text(format!("{} · {} · {}", abelha.nome, abelha.nome_do_estado(), v.linha)) };
             if resposta.clicked() {
                 saida.acoes.push(Acao::Abelha);
             }
@@ -1057,7 +1076,8 @@ fn bloco_do_uso(ui: &mut Ui, rect: Rect, abelha: &mut Abelha, uso: &Uso, v: &Vis
     saida.abelha = Some(linha);
     let x = caixa.right() + 8.0;
     let largura = linha.right() - 8.0 - x;
-    let estado = tema::cortar(ui.painter(), abelha.nome(), egui::TextFormat::simple(tema::forte(12.5), p.texto), largura, 1, false);
+    let titulo = format!("{} · {}", abelha.nome, abelha.nome_do_estado());
+    let estado = tema::cortar(ui.painter(), &titulo, egui::TextFormat::simple(tema::forte(12.5), p.texto), largura, 1, false);
     let resumo = tema::cortar(ui.painter(), v.linha, egui::TextFormat::simple(FontId::proportional(11.0), p.suave), largura, 1, false);
     let y = linha.center().y - (estado.size().y + resumo.size().y) / 2.0;
     ui.painter().galley(pos2(x, y), estado.clone(), p.texto);

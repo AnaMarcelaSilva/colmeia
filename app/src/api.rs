@@ -7,8 +7,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::canal;
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct Perfil {
     pub id: i64,
@@ -24,10 +22,25 @@ pub struct Perfil {
     /// Sugestões no console de bancos (desligado por padrão).
     #[serde(default)]
     pub autocompletar_sql: bool,
+    /// O acabamento da abelha (o código de `mascote::Modelo`) e o nome dela.
+    #[serde(default)]
+    pub mascote_modelo: String,
+    #[serde(default = "nome_da_abelha")]
+    pub mascote_nome: String,
+    /// A abelha fixa na área de trabalho, num programa à parte.
+    #[serde(default)]
+    pub abelha_fixa: bool,
 }
 
 fn verdadeiro() -> bool {
     true
+}
+
+/// O nome da abelha quando o núcleo não manda (um núcleo antigo).
+pub const NOME_DA_ABELHA: &str = "Colmeia";
+
+fn nome_da_abelha() -> String {
+    NOME_DA_ABELHA.into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -961,6 +974,14 @@ pub fn definir_aviso_captura(perfil: i64, mostrar: bool) -> Result<(), String> {
 
 pub fn definir_autocompletar_sql(perfil: i64, ligado: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "autocompletar_sql": ligado }))).map(|_| ())
+}
+
+pub fn definir_mascote(perfil: i64, modelo: &str, nome: &str) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "mascote_modelo": modelo, "mascote_nome": nome }))).map(|_| ())
+}
+
+pub fn definir_abelha_fixa(perfil: i64, ligada: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "abelha_fixa": ligada }))).map(|_| ())
 }
 
 pub fn definir_tempo_agentes(perfil: i64, mostrar: bool) -> Result<(), String> {
