@@ -20,6 +20,9 @@ func (s *Servidor) rotasSprints(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/sprints/{id}/assuntos/tarefas", s.definirAssunto)
 	mux.HandleFunc("PATCH /v1/assuntos/{id}", s.renomearAssunto)
 	mux.HandleFunc("DELETE /v1/assuntos/{id}", s.removerAssunto)
+	mux.HandleFunc("POST /v1/perfis/{id}/sprints/gerar", s.gerarSprint)
+	mux.HandleFunc("POST /v1/propostas/{id}/aceitar", s.aceitarProposta)
+	mux.HandleFunc("DELETE /v1/propostas/{id}", s.descartarProposta)
 }
 
 // listarSprints traz as sprints do perfil e a atual (a que tem hoje), que é

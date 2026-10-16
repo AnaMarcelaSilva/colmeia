@@ -191,6 +191,22 @@ func TestCompletarComAnexosENotas(t *testing.T) {
 	}
 }
 
+func TestDailyComAFraseDeOntem(t *testing.T) {
+	d := Deck{Tipo: "daily", ChaveNota: "2026-09-28", Slides: []Slide{{TarefaID: 1}, {TarefaID: 2}}}
+	notas := map[int64]dados.Nota{2: {TarefaID: 2, Periodo: "2026-09-28", Texto: "A busca acha pelo telefone."}}
+	anteriores := map[int64]dados.Nota{
+		1: {TarefaID: 1, Periodo: "2026-09-25", Texto: "O relatório ficou pronto."},
+		2: {TarefaID: 2, Periodo: "2026-09-28", Texto: "A busca acha pelo telefone."},
+	}
+	d.Completar(nil, notas, anteriores)
+	if a := d.Slides[0].NotaAnterior; d.Slides[0].Nota != "" || a == nil || a.Texto != "O relatório ficou pronto." || a.Periodo != "25/09" {
+		t.Errorf("frase de ontem: %+v", d.Slides[0])
+	}
+	if d.Slides[1].NotaAnterior != nil {
+		t.Errorf("com a frase de hoje, a anterior não vem: %+v", d.Slides[1].NotaAnterior)
+	}
+}
+
 func TestLinhaComVideoENota(t *testing.T) {
 	h := &historico{t: t}
 	t1 := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1}

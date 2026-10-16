@@ -93,6 +93,8 @@ type Servidor struct {
 	uso memoriaUso
 	// A frase da reunião pedida aos agentes (veja frase.go).
 	frases frases
+	// As propostas de "Gerar sprint com IA" esperando aceitar (veja proposta.go).
+	propostas propostas
 }
 
 func (s *Servidor) Rotas() http.Handler {

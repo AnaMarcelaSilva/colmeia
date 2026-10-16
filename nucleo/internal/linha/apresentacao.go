@@ -674,8 +674,9 @@ func (d *Deck) Tarefas() []int64 {
 }
 
 // Completar põe nos slides os anexos (não removidos, do mais novo ao mais
-// antigo) e as notas. `anteriores` são as últimas notas de sprint de outros
-// períodos, para quando não há nota neste.
+// antigo) e as notas. `anteriores` são as últimas notas do mesmo tipo, de
+// outros períodos, para quando não há nota neste (na daily, a frase que o
+// agente deixou ontem para a tarefa que aparece em "Ontem").
 func (d *Deck) Completar(anexos []dados.Anexo, notas, anteriores map[int64]dados.Nota) {
 	porTarefa := map[int64][]AnexoSlide{}
 	for _, a := range anexos {
@@ -711,18 +712,19 @@ func (d *Deck) CompletarLousas(lousas map[int64]dados.ResumoLousa) {
 	}
 }
 
-// periodoLegivel: "2026-09-21..2026-10-02" vira "21/09 a 02/10".
+// periodoLegivel: "2026-09-21..2026-10-02" vira "21/09 a 02/10"; o dia de
+// uma daily ("2026-10-15") vira "15/10".
 func periodoLegivel(p string) string {
-	de, ate, ok := strings.Cut(p, "..")
-	if !ok {
-		return p
-	}
 	curto := func(v string) string {
 		t, err := time.Parse("2006-01-02", v)
 		if err != nil {
 			return v
 		}
 		return t.Format("02/01")
+	}
+	de, ate, ok := strings.Cut(p, "..")
+	if !ok {
+		return curto(p)
 	}
 	return curto(de) + " a " + curto(ate)
 }

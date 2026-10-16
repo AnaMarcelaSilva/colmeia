@@ -376,30 +376,36 @@ func responderMarkdown(w http.ResponseWriter, texto string) {
 // (tipo=sprint, com o período como no resumo): uma tarefa por slide, com os
 // anexos e as notas de cada uma.
 func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
-	perfil, err := idDaRota(r)
-	if err != nil {
-		responderErro(w, err)
-		return
-	}
-	p, err := s.Banco.Perfil(r.Context(), perfil)
-	if err != nil {
-		responderErro(w, err)
-		return
-	}
-	rc, err := recorteDoPedido(r)
-	if err != nil {
-		responderErro(w, err)
-		return
-	}
 	tipo := r.URL.Query().Get("tipo")
 	if tipo != "daily" && tipo != "sprint" {
 		responderErro(w, dados.ErrInvalido{Motivo: "tipo precisa ser daily ou sprint"})
 		return
 	}
-	c, err := s.contextoDaLinha(r.Context(), p, rc)
+	deck, err := s.montarDeck(r, tipo)
 	if err != nil {
 		responderErro(w, err)
 		return
+	}
+	responderJSON(w, deck)
+}
+
+// montarDeck é o deck do perfil da rota, no recorte e no período do pedido.
+func (s *Servidor) montarDeck(r *http.Request, tipo string) (linha.Deck, error) {
+	perfil, err := idDaRota(r)
+	if err != nil {
+		return linha.Deck{}, err
+	}
+	p, err := s.Banco.Perfil(r.Context(), perfil)
+	if err != nil {
+		return linha.Deck{}, err
+	}
+	rc, err := recorteDoPedido(r)
+	if err != nil {
+		return linha.Deck{}, err
+	}
+	c, err := s.contextoDaLinha(r.Context(), p, rc)
+	if err != nil {
+		return linha.Deck{}, err
 	}
 	var deck linha.Deck
 	if tipo == "daily" {
@@ -407,24 +413,20 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 		inicio := time.Date(hoje.Year(), hoje.Month(), hoje.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -linha.JanelaDaily)
 		eventos, err := s.Banco.ListarEventos(r.Context(), rc.desde(perfil, inicioDoDia(inicio)))
 		if err != nil {
-			responderErro(w, err)
-			return
+			return linha.Deck{}, err
 		}
 		if c.ForaDaDaily, err = s.Banco.ForaDaDaily(r.Context(), perfil, hoje.Format("2006-01-02")); err != nil {
-			responderErro(w, err)
-			return
+			return linha.Deck{}, err
 		}
 		deck = linha.Apresentacao(eventos, time.Time{}, time.Time{}, c, tipo)
 	} else {
 		de, ate, sprint, err := s.periodoDaSprint(r, &c)
 		if err != nil {
-			responderErro(w, err)
-			return
+			return linha.Deck{}, err
 		}
 		eventos, err := s.Banco.ListarEventos(r.Context(), rc.ate(perfil, inicioDoDia(ate.AddDate(0, 0, 1))))
 		if err != nil {
-			responderErro(w, err)
-			return
+			return linha.Deck{}, err
 		}
 		deck = linha.Apresentacao(eventos, de, ate, c, tipo)
 		deck.SprintID = sprint
@@ -435,27 +437,23 @@ func (s *Servidor) apresentacao(w http.ResponseWriter, r *http.Request) {
 	fim, _ := time.ParseInLocation("2006-01-02", deck.Ate, time.Local)
 	anexos, err := s.Banco.AnexosDasTarefas(r.Context(), ids, inicioDoDia(inicio), inicioDoDia(fim.AddDate(0, 0, 1)))
 	if err != nil {
-		responderErro(w, err)
-		return
+		return linha.Deck{}, err
 	}
 	notas, err := s.Banco.NotasDoPeriodo(r.Context(), ids, tipo, deck.ChaveNota)
 	if err != nil {
-		responderErro(w, err)
-		return
+		return linha.Deck{}, err
 	}
-	var anteriores map[int64]dados.Nota
-	if tipo == "sprint" {
-		if anteriores, err = s.Banco.UltimasNotas(r.Context(), ids, tipo); err != nil {
-			responderErro(w, err)
-			return
-		}
+	// Sem nota neste período, a última de outro: na sprint, a da sprint
+	// anterior; na daily, a frase de ontem.
+	anteriores, err := s.Banco.UltimasNotas(r.Context(), ids, tipo)
+	if err != nil {
+		return linha.Deck{}, err
 	}
 	deck.Completar(anexos, notas, anteriores)
 	lousas, err := s.Banco.LousasDasTarefas(r.Context(), ids)
 	if err != nil {
-		responderErro(w, err)
-		return
+		return linha.Deck{}, err
 	}
 	deck.CompletarLousas(lousas)
-	responderJSON(w, deck)
+	return deck, nil
 }
