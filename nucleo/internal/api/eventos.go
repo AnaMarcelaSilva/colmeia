@@ -229,6 +229,7 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 		if err := s.Banco.Registrar(ctx, "agente.terminou", c.Escopo(), d); err != nil {
 			log.Printf("agente %d: gravando o fim: %v", c.ID, err)
 		}
+		s.regraDoFim(ctx, c, motivo, erro)
 		// O token do agente morre com ele; o que ele não respondeu, falhou.
 		// (Se ele já foi iniciado de novo, o token e os pedidos são da sessão nova.)
 		if !s.Agentes.Ativa(c.ID) {
@@ -238,9 +239,20 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 	}
 }
 
-// regraDeColuna move o cartão sozinho entre Trabalhando e Aguardando. Só a
-// volta de uma mudança que o próprio núcleo fez: se você moveu o cartão, ele
-// fica onde você pôs. Nada vai para Revisão ou Concluído sozinho.
+// Regras de coluna: a tarefa anda sozinha com os agentes.
+//
+//	Backlog → Trabalhando      um agente (não o terminal comum) começa (abrirTerminal)
+//	Trabalhando ⇄ Aguardando   o agente espera você e volta a trabalhar
+//	→ Revisão                  todos os agentes da tarefa terminam bem
+//	Revisão → Concluído        um agente com papel revisor termina bem
+//
+// Terminar bem é sair sem erro e sem ser parado pela Colmeia; o terminal
+// comum não conta. Sem revisor, a tarefa fica em Revisão. Mover à mão manda:
+// o núcleo só desfaz o Aguardando que ele mesmo pôs (ColunaAuto), não tira
+// do Backlog nem do Concluído o que você pôs lá, e não sai de um Aguardando
+// seu. Parar o agente pela tela não move nada: a tela pergunta o que fazer.
+
+// regraDeColuna: Trabalhando ⇄ Aguardando, pelo estado do agente.
 func (s *Servidor) regraDeColuna(ctx context.Context, c dados.ContextoAgente, estado string) {
 	t, _, _, err := s.Banco.Tarefa(ctx, c.TarefaID)
 	if err != nil {
@@ -255,8 +267,62 @@ func (s *Servidor) regraDeColuna(ctx context.Context, c dados.ContextoAgente, es
 	default:
 		return
 	}
-	if _, err := s.Banco.AtualizarTarefa(ctx, t.ID, dados.Mudanca{Coluna: &destino}, dados.OrigemAutomatica); err != nil && !errors.Is(err, dados.ErrNaoEncontrado) {
-		log.Printf("tarefa %d: mudança automática de coluna: %v", t.ID, err)
+	s.moverSozinho(ctx, t.ID, destino)
+}
+
+// regraDoFim: Revisão e Concluído, quando um agente termina bem.
+func (s *Servidor) regraDoFim(ctx context.Context, c dados.ContextoAgente, motivo string, erro bool) {
+	if c.Ferramenta == "shell" || motivo != "terminou" || erro || s.Agentes.Ativa(c.ID) {
+		return
+	}
+	t, _, _, err := s.Banco.Tarefa(ctx, c.TarefaID)
+	if err != nil {
+		return
+	}
+	var destino string
+	switch {
+	case t.Coluna == "revisao" && c.Papel == "revisor":
+		destino = "concluido"
+	case (t.Coluna == "trabalhando" || t.Coluna == "aguardando" && t.ColunaAuto) && s.todosTerminaramBem(ctx, t.ID):
+		destino = "revisao"
+	default:
+		return
+	}
+	s.moverSozinho(ctx, t.ID, destino)
+}
+
+// todosTerminaramBem: nenhum agente da tarefa roda, e o último fim de cada
+// um (fora o terminal comum) foi sem erro e sem ser parado pela Colmeia.
+func (s *Servidor) todosTerminaramBem(ctx context.Context, tarefa int64) bool {
+	agentes, err := s.Banco.ListarAgentes(ctx, tarefa)
+	if err != nil {
+		return false
+	}
+	fins, err := s.Banco.UltimosFinsDaTarefa(ctx, tarefa)
+	if err != nil {
+		return false
+	}
+	algum := false
+	for _, a := range agentes {
+		if a.Ferramenta == "shell" {
+			continue
+		}
+		e, ok := fins[a.ID]
+		if s.Agentes.Ativa(a.ID) || !ok {
+			return false
+		}
+		var d terminouDados
+		if json.Unmarshal(e.Dados, &d) != nil || d.Motivo != "terminou" || d.Erro {
+			return false
+		}
+		algum = true
+	}
+	return algum
+}
+
+func (s *Servidor) moverSozinho(ctx context.Context, tarefa int64, destino string) {
+	if _, err := s.Banco.AtualizarTarefa(ctx, tarefa, dados.Mudanca{Coluna: &destino}, dados.OrigemAutomatica); err != nil && !errors.Is(err, dados.ErrNaoEncontrado) {
+		log.Printf("tarefa %d: mudança automática de coluna: %v", tarefa, err)
 	}
 }
 

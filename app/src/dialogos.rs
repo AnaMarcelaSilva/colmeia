@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use eframe::egui::{self, RichText};
 
 use crate::api;
-use crate::dados::Projeto;
+use crate::dados::{Coluna, Projeto};
 use crate::tema::{self, cores};
 
 /// Seletor de pasta nativo, aberto numa thread para a tela não travar.
@@ -66,6 +66,15 @@ pub enum Dialogo {
         rodando: usize,
         erro: Option<String>,
     },
+    /// Você parou um agente rodando: mover a tarefa, excluir ou deixar.
+    /// Nada é gravado até a escolha.
+    AgenteParado {
+        tarefa: i64,
+        titulo: String,
+        coluna: Coluna,
+        copia: bool,
+        erro: Option<String>,
+    },
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -91,6 +100,12 @@ pub enum Resultado {
     },
     /// O histórico de mensagens do agente foi apagado no núcleo.
     HistoricoLimpo(i64),
+    /// Excluir a tarefa: passa à confirmação de sempre.
+    RemoverTarefa {
+        id: i64,
+        titulo: String,
+        copia: bool,
+    },
     /// Fechar só a janela: os agentes seguem no núcleo.
     FecharJanela,
     /// O núcleo já foi encerrado (e os agentes com ele): fechar a janela.
@@ -241,6 +256,7 @@ impl Dialogo {
                     }
                     Dialogo::Fechar { rodando, erro } => fechar(ui, *rodando, erro),
                     Dialogo::LimparHistorico { agente, nome, guardadas, erro } => limpar_historico(ui, *agente, nome, *guardadas, erro),
+                    Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
                 }
             });
         match modal.inner {
@@ -337,6 +353,46 @@ fn limpar_historico(ui: &mut egui::Ui, agente: i64, nome: &str, guardadas: usize
         };
     }
     Resultado::Continua
+}
+
+/// Depois de parar um agente pela tela: para onde vai a tarefa. As colunas
+/// são botões; a atual fica de fora. Esc ou "Deixar como está" não mudam nada.
+fn agente_parado(ui: &mut egui::Ui, tarefa: i64, titulo: &str, coluna: Coluna, copia: bool, erro: &mut Option<String>) -> Resultado {
+    tema::cabecalho(ui, "Você parou o agente. O que fazer com a tarefa?", &format!("\"{titulo}\" está em {}. Nada muda até você escolher.", coluna.nome()));
+    mostrar_erro(ui, erro);
+    ui.add_space(14.0);
+    ui.label(RichText::new("Mover para").color(cores().suave).size(12.5));
+    ui.add_space(6.0);
+    let mut destino = None;
+    ui.horizontal_wrapped(|ui| {
+        for c in Coluna::TODAS.into_iter().filter(|c| *c != coluna) {
+            if tema::botao_secundario(ui, c.nome()).clicked() {
+                destino = Some(c);
+            }
+        }
+    });
+    let (mut deixar, mut excluir) = (false, false);
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        deixar = tema::botao_secundario(ui, "Deixar como está").on_hover_text("Esc").clicked();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            excluir = tema::botao_alerta(ui, "Excluir tarefa…").clicked();
+        });
+    });
+    if deixar {
+        return Resultado::Fechar;
+    }
+    if excluir {
+        return Resultado::RemoverTarefa { id: tarefa, titulo: titulo.to_string(), copia };
+    }
+    match destino.map(|c| api::mover_tarefa(tarefa, c.chave())) {
+        Some(Ok(_)) => Resultado::Mudou,
+        Some(Err(e)) => {
+            *erro = Some(format!("Não consegui mover a tarefa: {e}"));
+            Resultado::Continua
+        }
+        None => Resultado::Continua,
+    }
 }
 
 fn novo_projeto(ui: &mut egui::Ui, d: &mut NovoProjeto, perfil: i64) -> Resultado {

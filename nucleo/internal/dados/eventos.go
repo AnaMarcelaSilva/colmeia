@@ -81,8 +81,18 @@ func (b *Banco) ListarEventos(ctx context.Context, f FiltroEventos) ([]Evento, e
 // ao abrir a tela, um erro ou o fim de um agente parado aparecem sem esperar
 // a próxima mudança.
 func (b *Banco) UltimosFins(ctx context.Context, perfil int64) (map[int64]Evento, error) {
+	return b.ultimosFins(ctx, `perfil_id`, perfil)
+}
+
+// UltimosFinsDaTarefa é o mesmo, só dos agentes de uma tarefa.
+func (b *Banco) UltimosFinsDaTarefa(ctx context.Context, tarefa int64) (map[int64]Evento, error) {
+	return b.ultimosFins(ctx, `tarefa_id`, tarefa)
+}
+
+// coluna é uma das duas acima, nunca algo de fora.
+func (b *Banco) ultimosFins(ctx context.Context, coluna string, id int64) (map[int64]Evento, error) {
 	linhas, err := b.db.QueryContext(ctx, `SELECT id, momento, tipo, dados, agente_id FROM eventos
-		WHERE id IN (SELECT MAX(id) FROM eventos WHERE perfil_id = ? AND tipo = 'agente.terminou' GROUP BY agente_id)`, perfil)
+		WHERE id IN (SELECT MAX(id) FROM eventos WHERE `+coluna+` = ? AND tipo = 'agente.terminou' GROUP BY agente_id)`, id)
 	if err != nil {
 		return nil, err
 	}

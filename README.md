@@ -65,7 +65,7 @@ O cartão mostra o que cada agente está fazendo, com a mesma cor e o mesmo text
 | Parado | "Parado desde 14:10" |
 | Terminou ou deu erro | "Terminou às 14:40", "Parou com erro (código 1) às 14:40" |
 
-O estado "Sua vez" é uma estimativa. Depois de alguns segundos sem saída, a Colmeia considera que o agente terminou e aguarda você, por isso a tela usa "parece" ([decisão 0005](docs/decisoes/0005-estado-do-agente-por-heuristica.md)). O cartão se move automaticamente entre "Agente trabalhando" e "Aguardando você", mas nunca vai para Revisão ou Concluído sem você mandar.
+O estado "Sua vez" é uma estimativa. Depois de alguns segundos sem saída, a Colmeia considera que o agente terminou e aguarda você, por isso a tela usa "parece" ([decisão 0005](docs/decisoes/0005-estado-do-agente-por-heuristica.md)). O cartão se move automaticamente entre "Agente trabalhando" e "Aguardando você"; quando todos os agentes da tarefa terminam bem, vai para Revisão, e quando um agente com papel revisor termina bem, para Concluído. Se você mover o cartão, ele fica onde você pôs. Se você parar um agente pela tela, a Colmeia pergunta o que fazer com a tarefa.
 
 Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a janela em segundo plano, o título vira "Colmeia · 2 esperando você". Ctrl+Shift+P leva direto ao próximo agente que está esperando.
 

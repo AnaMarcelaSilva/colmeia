@@ -209,6 +209,8 @@ struct Colmeia {
     tela: Tela,
     escopo: Escopo,
     dialogo: Option<Dialogo>,
+    /// Diálogo pedido por um clique: entra no quadro seguinte.
+    dialogo_seguinte: Option<Dialogo>,
     abelha: Abelha,
     lateral: lateral::Lateral,
     sem_abelha: bool,
@@ -333,6 +335,7 @@ impl Colmeia {
             tela: Tela::Quadro,
             escopo: Escopo::Perfil,
             dialogo: None,
+            dialogo_seguinte: None,
             abelha: Abelha::new(),
             lateral: lateral::Lateral::default(),
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
@@ -820,9 +823,20 @@ impl Colmeia {
     }
 
     fn remover_agente(&mut self, id: i64, agora: f64) {
+        // Parar um agente que rodava não move a tarefa: a tela pergunta o que fazer.
+        let parado = self.modelo.tarefas.iter().find(|t| t.agentes.iter().any(|a| a.id == id && a.ativo)).map(|t| Dialogo::AgenteParado {
+            tarefa: t.id,
+            titulo: t.titulo.clone(),
+            coluna: t.coluna,
+            copia: t.em_copia,
+            erro: None,
+        });
         if let Err(e) = api::remover_agente(id) {
             return self.erro(format!("Não consegui remover o agente: {e}"), agora);
         }
+        // Abre no próximo quadro: o clique que parou o agente fecharia o diálogo
+        // (conta como clique fora dele).
+        self.dialogo_seguinte = parado;
         self.terminais.remove(&id);
         self.compositor.esquecer(id);
         for t in &mut self.modelo.tarefas {
@@ -3504,6 +3518,7 @@ impl eframe::App for Colmeia {
         }
 
         self.play.mostrar_dialogo(&ctx);
+        let seguinte = self.dialogo_seguinte.take();
         if let Some(dialogo) = &mut self.dialogo {
             let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
             let resultado = dialogo.mostrar(&ctx, perfil);
@@ -3531,6 +3546,9 @@ impl eframe::App for Colmeia {
                     }
                     self.captura = Some(Captura::Agendada { agente, tarefa, quadros: 1 });
                 }
+                Resultado::RemoverTarefa { id, titulo, copia } => {
+                    self.dialogo = Some(Dialogo::RemoverTarefa { id, titulo, copia, erro: None });
+                }
                 Resultado::HistoricoLimpo(agente) => {
                     self.dialogo = None;
                     self.compositor.historico_limpo(agente);
@@ -3549,6 +3567,13 @@ impl eframe::App for Colmeia {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+        }
+
+        if let Some(d) = seguinte {
+            if self.dialogo.is_none() {
+                self.dialogo = Some(d);
+            }
+            ctx.request_repaint();
         }
 
         if self.abelha.resumo_aberto

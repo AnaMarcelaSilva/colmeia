@@ -393,3 +393,108 @@ func TestTerminalComumNaoTiraDoBacklog(t *testing.T) {
 		t.Errorf("um terminal aberto tirou a tarefa do Backlog: %v", lista[0])
 	}
 }
+
+// claudeQueSai é um "claude" que espera você e sai com 0 em "sair" ou com
+// 3 em "falhar".
+func claudeQueSai(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho pronto\nwhile read linha; do\n[ \"$linha\" = sair ] && exit 0\n[ \"$linha\" = falhar ] && exit 3\nsleep 0.2; echo \"fazendo $linha\"\ndone\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+}
+
+// digitar escreve uma linha no terminal do agente.
+func digitar(t *testing.T, url string, agente, linha string) {
+	t.Helper()
+	ctx, cancelar := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelar()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+"/v1/agentes/"+agente+"/terminal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	conn.Write(ctx, websocket.MessageBinary, []byte(linha+"\r"))
+}
+
+func terminou(agente float64) func(map[string]any) bool {
+	return func(m map[string]any) bool { return m["tipo"] == "agente.terminou" && m["agente_id"] == agente }
+}
+
+func TestTarefaVaiParaRevisaoEConcluidoSozinha(t *testing.T) {
+	claudeQueSai(t)
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/workspaces", map[string]string{"nome": "W"})
+	pedir(t, "POST", srv.URL+"/v1/workspaces/1/projetos", map[string]string{"nome": "loja-web", "caminho": t.TempDir()})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Nova tela de pedidos"})
+	eventos := ouvir(t, srv.URL, "1")
+
+	// Dois agentes de IA e um terminal comum, que não conta.
+	pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "testador"})
+	pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "shell", "papel": "dev"})
+	eventos.esperar("tarefa aguardando", coluna("tarefa.atualizada", "aguardando", "automatico"))
+
+	// Um termina, o outro ainda roda: a tarefa fica.
+	digitar(t, srv.URL, "1", "sair")
+	eventos.esperar("fim do primeiro", terminou(1))
+	if _, lista := pedirLista(t, srv.URL+"/v1/projetos/1/tarefas"); lista[0]["coluna"] != "aguardando" {
+		t.Errorf("andou com um agente ainda rodando: %v", lista[0]["coluna"])
+	}
+	// O segundo termina bem: todos terminaram, vai para Revisão.
+	digitar(t, srv.URL, "2", "sair")
+	eventos.esperar("tarefa em revisão", coluna("tarefa.atualizada", "revisao", "automatico"))
+
+	// O revisor entra e termina bem: Concluído.
+	pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "revisor"})
+	eventos.esperar("revisor iniciou", func(m map[string]any) bool { return m["tipo"] == "agente.iniciou" && m["agente_id"] == 4.0 })
+	digitar(t, srv.URL, "4", "sair")
+	eventos.esperar("tarefa concluída", coluna("tarefa.atualizada", "concluido", "automatico"))
+}
+
+func TestTarefaNaoAndaComErroNemComMudancaSua(t *testing.T) {
+	claudeQueSai(t)
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/workspaces", map[string]string{"nome": "W"})
+	pedir(t, "POST", srv.URL+"/v1/workspaces/1/projetos", map[string]string{"nome": "loja-web", "caminho": t.TempDir()})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Com erro"})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "No backlog"})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Revisão sem revisor"})
+	eventos := ouvir(t, srv.URL, "1")
+
+	// Um agente que sai com erro não leva a tarefa para Revisão.
+	pedir(t, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	eventos.esperar("tarefa 1 aguardando", coluna("tarefa.atualizada", "aguardando", "automatico"))
+	digitar(t, srv.URL, "1", "falhar")
+	eventos.esperar("fim com erro", terminou(1))
+
+	// Você pôs a tarefa de volta no Backlog: o fim do agente não a tira de lá.
+	pedir(t, "POST", srv.URL+"/v1/tarefas/2/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	eventos.esperar("agente 2 iniciou", func(m map[string]any) bool { return m["tipo"] == "agente.iniciou" && m["agente_id"] == 2.0 })
+	pedir(t, "PATCH", srv.URL+"/v1/tarefas/2", map[string]string{"coluna": "backlog"})
+	digitar(t, srv.URL, "2", "sair")
+	eventos.esperar("fim do agente 2", terminou(2))
+
+	// Em Revisão, um agente que não é revisor terminando não conclui.
+	pedir(t, "PATCH", srv.URL+"/v1/tarefas/3", map[string]string{"coluna": "revisao"})
+	pedir(t, "POST", srv.URL+"/v1/tarefas/3/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	eventos.esperar("agente 3 iniciou", func(m map[string]any) bool { return m["tipo"] == "agente.iniciou" && m["agente_id"] == 3.0 })
+	digitar(t, srv.URL, "3", "sair")
+	eventos.esperar("fim do agente 3", terminou(3))
+
+	// As regras rodam logo depois de o fim ser gravado: um instante basta.
+	time.Sleep(300 * time.Millisecond)
+	_, lista := pedirLista(t, srv.URL+"/v1/projetos/1/tarefas")
+	colunas := map[any]any{}
+	for _, tarefa := range lista {
+		colunas[tarefa["titulo"]] = tarefa["coluna"]
+	}
+	if colunas["Com erro"] != "aguardando" || colunas["No backlog"] != "backlog" || colunas["Revisão sem revisor"] != "revisao" {
+		t.Errorf("colunas: %v", colunas)
+	}
+}
