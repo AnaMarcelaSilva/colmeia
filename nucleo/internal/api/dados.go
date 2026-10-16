@@ -127,6 +127,7 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 		MascoteModelo *string `json:"mascote_modelo"`
 		MascoteNome   *string `json:"mascote_nome"`
 		AbelhaFixa    *bool   `json:"abelha_fixa"`
+		Ditado        *bool   `json:"ditado"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -177,6 +178,12 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 	}
 	if pedido.AbelhaFixa != nil {
 		if err := s.Banco.DefinirAbelhaFixa(r.Context(), id, *pedido.AbelhaFixa); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if pedido.Ditado != nil {
+		if err := s.definirDitado(r.Context(), id, *pedido.Ditado); err != nil {
 			responderErro(w, err)
 			return
 		}

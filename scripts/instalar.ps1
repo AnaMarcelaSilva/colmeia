@@ -1,6 +1,6 @@
 # Instala a Colmeia no Windows só para o seu usuário, sem administrador:
 #   %LOCALAPPDATA%\Programs\Colmeia\colmeia.exe, colmeia-nucleo.exe e
-#   colmeia-abelha.exe (a abelha fixa)
+#   colmeia-abelha.exe (a abelha fixa) e colmeia-voz.exe (o ditado)
 #   e o atalho "Colmeia" no menu Iniciar.
 # Rode de dentro da pasta da release (com os .exe ao lado):
 #   powershell -ExecutionPolicy Bypass -File .\instalar.ps1
@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path
 $destino = Join-Path $env:LOCALAPPDATA 'Programs\Colmeia'
 
-foreach ($exe in 'colmeia.exe', 'colmeia-nucleo.exe', 'colmeia-abelha.exe') {
+foreach ($exe in 'colmeia.exe', 'colmeia-nucleo.exe', 'colmeia-abelha.exe', 'colmeia-voz.exe') {
     if (-not (Test-Path (Join-Path $aqui $exe))) {
         Write-Error "não achei $exe ao lado deste script"
     }
@@ -26,6 +26,7 @@ New-Item -ItemType Directory -Force -Path $destino | Out-Null
 Copy-Item (Join-Path $aqui 'colmeia.exe') $destino -Force
 Copy-Item (Join-Path $aqui 'colmeia-nucleo.exe') $destino -Force
 Copy-Item (Join-Path $aqui 'colmeia-abelha.exe') $destino -Force
+Copy-Item (Join-Path $aqui 'colmeia-voz.exe') $destino -Force
 
 $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Colmeia.lnk'
 $shell = New-Object -ComObject WScript.Shell

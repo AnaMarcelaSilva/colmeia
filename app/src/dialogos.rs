@@ -77,6 +77,8 @@ pub enum Dialogo {
     },
     /// Escolher o acabamento e o nome da abelha do perfil.
     Mascote(EscolhaMascote),
+    /// Ligar o ditado por voz: o tamanho do modelo, o download e o progresso.
+    Ditado(AjustesDitado),
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -110,6 +112,8 @@ pub enum Resultado {
     },
     /// Fechar só a janela: os agentes seguem no núcleo.
     FecharJanela,
+    /// O ditado do perfil ligou ou desligou no núcleo.
+    Ditado(bool),
     /// O núcleo já foi encerrado (e os agentes com ele): fechar a janela.
     PararEFechar,
 }
@@ -267,6 +271,7 @@ impl Dialogo {
                     Dialogo::Fechar { rodando, erro } => fechar(ui, *rodando, erro),
                     Dialogo::LimparHistorico { agente, nome, guardadas, erro } => limpar_historico(ui, *agente, nome, *guardadas, erro),
                     Dialogo::Mascote(d) => escolher_mascote(ui, d, perfil),
+                    Dialogo::Ditado(d) => ajustes_ditado(ui, d, perfil),
                     Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
                 }
             });
@@ -357,6 +362,125 @@ fn escolher_mascote(ui: &mut egui::Ui, d: &mut EscolhaMascote, perfil: i64) -> R
             }
         },
         _ => Resultado::Continua,
+    }
+}
+
+pub struct AjustesDitado {
+    pub modelo: api::EstadoVoz,
+    pub ligado: bool,
+    erro: Option<String>,
+}
+
+impl AjustesDitado {
+    /// O estado do modelo vem do núcleo ao abrir; depois, pelos eventos.
+    pub fn new(ligado: bool) -> Self {
+        let (modelo, erro) = match api::estado_voz() {
+            Ok(m) => (m, None),
+            Err(e) => (api::EstadoVoz::default(), Some(format!("Não consegui falar com o núcleo: {e}"))),
+        };
+        AjustesDitado { modelo, ligado, erro }
+    }
+}
+
+/// "148 MB", como os gerenciadores de arquivos mostram.
+pub fn megabytes(bytes: i64) -> String {
+    format!("{} MB", (bytes as f64 / 1_000_000.0).round() as i64)
+}
+
+/// O ditado por voz: o que ele faz, o tamanho do modelo antes de baixar, o
+/// progresso com Cancelar e, com o modelo no computador, ligar, desligar e apagar.
+fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resultado {
+    tema::cabecalho(
+        ui,
+        "Ditado por voz",
+        "Fale em vez de digitar na caixa de mensagem das tarefas. O texto aparece na caixa para você revisar e nunca é enviado sozinho. A transcrição roda neste computador, sem internet e sem tokens, e o áudio não é gravado.",
+    );
+    ui.add_space(14.0);
+    let p = cores();
+    let tamanho = megabytes(d.modelo.tamanho.max(1));
+    let pronto = d.modelo.estado == "pronto";
+    let baixando = d.modelo.estado == "baixando";
+    let texto = match (d.ligado, pronto, baixando) {
+        (true, true, _) => format!("Ligado. Clique no microfone da caixa de mensagem ou segure {} enquanto fala.", crate::voz::ATALHO),
+        (_, _, true) => "Baixando o modelo. Pode fechar esta janela: o ditado liga sozinho quando o download terminar.".to_string(),
+        (_, true, _) => format!("O modelo de voz ({tamanho}) já está neste computador."),
+        _ => format!(
+            "Para ligar, a Colmeia baixa uma vez o modelo de voz Whisper base (multilíngue), com {tamanho}, do repositório oficial do whisper.cpp, e confere o arquivo antes de usar. Depois disso, o ditado funciona sem internet."
+        ),
+    };
+    ui.label(RichText::new(texto).color(p.texto).size(13.0));
+    if baixando {
+        ui.add_space(12.0);
+        let fracao = d.modelo.baixados as f32 / d.modelo.tamanho.max(1) as f32;
+        ui.add(egui::ProgressBar::new(fracao).fill(p.destaque).desired_height(8.0));
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("{} de {tamanho}", megabytes(d.modelo.baixados))).color(p.suave).size(12.0));
+    }
+    if d.modelo.estado == "erro" && !d.modelo.erro.is_empty() {
+        ui.add_space(10.0);
+        ui.label(RichText::new(&d.modelo.erro).color(p.erro).size(12.5));
+    }
+    mostrar_erro(ui, &d.erro);
+
+    let (mut fechar, mut acao, mut apagar) = (false, false, false);
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        fechar = tema::botao_secundario(ui, if baixando || d.ligado { "Fechar" } else { "Cancelar" }).clicked();
+        if pronto && !baixando {
+            apagar = tema::botao_secundario(ui, &format!("Apagar o modelo ({tamanho})"))
+                .on_hover_text("Libera o espaço; o ditado desliga em todos os perfis.")
+                .clicked();
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let rotulo = match (d.ligado && pronto, pronto, baixando) {
+                (true, _, _) => "Desligar".to_string(),
+                (_, _, true) => "Cancelar download".to_string(),
+                (_, true, _) => "Ligar".to_string(),
+                _ => format!("Baixar {tamanho} e ligar"),
+            };
+            acao = if d.ligado && pronto || baixando { tema::botao_alerta(ui, &rotulo).clicked() } else { tema::botao_principal(ui, &rotulo, true).clicked() };
+        });
+    });
+    if fechar {
+        return Resultado::Fechar;
+    }
+    let falhou = |d: &mut AjustesDitado, o_que: &str, e: String| {
+        d.erro = Some(format!("Não consegui {o_que}: {e}"));
+        Resultado::Continua
+    };
+    if apagar {
+        return match api::remover_voz() {
+            Ok(m) => {
+                d.modelo = m;
+                let estava = std::mem::replace(&mut d.ligado, false);
+                if estava { Resultado::Ditado(false) } else { Resultado::Continua }
+            }
+            Err(e) => falhou(d, "apagar o modelo", e),
+        };
+    }
+    if !acao {
+        return Resultado::Continua;
+    }
+    d.erro = None;
+    match (d.ligado && pronto, pronto, baixando) {
+        (true, _, _) | (_, true, _) => {
+            let ligar = !d.ligado;
+            match api::definir_ditado(perfil, ligar) {
+                Ok(()) => Resultado::Ditado(ligar),
+                Err(e) => falhou(d, if ligar { "ligar o ditado" } else { "desligar o ditado" }, e),
+            }
+        }
+        (_, _, true) => match api::cancelar_voz() {
+            Ok(()) => Resultado::Continua,
+            Err(e) => falhou(d, "cancelar o download", e),
+        },
+        _ => match api::baixar_voz(perfil) {
+            Ok(m) => {
+                d.modelo = m;
+                Resultado::Continua
+            }
+            Err(e) => falhou(d, "começar o download", e),
+        },
     }
 }
 

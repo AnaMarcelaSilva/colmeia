@@ -30,6 +30,9 @@ pub struct Perfil {
     /// A abelha fixa na área de trabalho, num programa à parte.
     #[serde(default)]
     pub abelha_fixa: bool,
+    /// O microfone na caixa de mensagem das tarefas (desligado por padrão).
+    #[serde(default)]
+    pub ditado: bool,
 }
 
 fn verdadeiro() -> bool {
@@ -982,6 +985,43 @@ pub fn definir_mascote(perfil: i64, modelo: &str, nome: &str) -> Result<(), Stri
 
 pub fn definir_abelha_fixa(perfil: i64, ligada: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "abelha_fixa": ligada }))).map(|_| ())
+}
+
+pub fn definir_ditado(perfil: i64, ligado: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "ditado": ligado }))).map(|_| ())
+}
+
+/// O modelo de voz no núcleo: "ausente", "baixando", "pronto" ou "erro".
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct EstadoVoz {
+    pub estado: String,
+    #[serde(default)]
+    pub baixados: i64,
+    #[serde(default)]
+    pub tamanho: i64,
+    #[serde(default)]
+    pub erro: String,
+    /// O arquivo do modelo, só quando está pronto.
+    #[serde(default)]
+    pub caminho: String,
+}
+
+pub fn estado_voz() -> Result<EstadoVoz, String> {
+    chamar("GET", "/v1/voz", None)
+}
+
+/// Começa a baixar o modelo; quando ele fica pronto, o núcleo liga o ditado do perfil.
+pub fn baixar_voz(perfil: i64) -> Result<EstadoVoz, String> {
+    chamar("POST", &format!("/v1/perfis/{perfil}/voz/baixar"), None)
+}
+
+pub fn cancelar_voz() -> Result<(), String> {
+    chamar::<serde_json::Value>("POST", "/v1/voz/cancelar", None).map(|_| ())
+}
+
+/// Apaga o modelo do disco (o ditado desliga em todos os perfis).
+pub fn remover_voz() -> Result<EstadoVoz, String> {
+    chamar("DELETE", "/v1/voz/modelo", None)
 }
 
 pub fn definir_tempo_agentes(perfil: i64, mostrar: bool) -> Result<(), String> {

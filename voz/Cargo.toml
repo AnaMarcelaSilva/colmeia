@@ -1,0 +1,23 @@
+[package]
+name = "colmeia-voz"
+description = "O ditado por voz da Colmeia: um programa à parte, aberto sob pedido, que ouve o microfone e transcreve com o Whisper no próprio computador."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# Captura do microfone (ALSA no Linux, WASAPI no Windows).
+cpal = "0.18"
+# O whisper.cpp compilado junto, só com a CPU.
+whisper-rs = "0.16"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# No Linux, o microfone pelo PulseAudio (ou o pipewire-pulse) direto: pelo
+# ALSA, o plugin do pulse acorda a thread de captura sem parar (70% de um
+# núcleo só para ouvir).
+cpal = { version = "0.18", features = ["pulseaudio"] }

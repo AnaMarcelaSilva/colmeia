@@ -561,6 +561,28 @@ pub enum Evento {
         #[serde(default)]
         ligada: bool,
     },
+    /// O ditado por voz do perfil ligou ou desligou (o download que termina liga).
+    #[serde(rename = "perfil.ditado")]
+    PerfilDitado {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        ligado: bool,
+    },
+    /// O download do modelo de voz andou, terminou ou deu erro.
+    #[serde(rename = "voz.modelo")]
+    VozModelo {
+        seq: u64,
+        #[serde(default)]
+        estado: String,
+        #[serde(default)]
+        baixados: i64,
+        #[serde(default)]
+        tamanho: i64,
+        #[serde(default)]
+        erro: String,
+    },
     /// A abelha fixa pediu para mostrar uma tarefa (0: só a janela).
     #[serde(rename = "tela.abrir")]
     TelaAbrir {
@@ -627,6 +649,8 @@ impl Evento {
             | Evento::PerfilTempoAgentes { seq, .. }
             | Evento::PerfilMascote { seq, .. }
             | Evento::PerfilAbelhaFixa { seq, .. }
+            | Evento::PerfilDitado { seq, .. }
+            | Evento::VozModelo { seq, .. }
             | Evento::TelaAbrir { seq, .. }
             | Evento::WorkspaceRecolhido { seq, .. }
             | Evento::ComandoIniciou { seq, .. }
@@ -645,6 +669,7 @@ impl Evento {
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
             Evento::PerfilMascote { .. } | Evento::PerfilAbelhaFixa { .. } | Evento::TelaAbrir { .. } => false,
+            Evento::PerfilDitado { .. } | Evento::VozModelo { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
             _ => !matches!(
                 self,
@@ -730,6 +755,8 @@ impl Modelo {
             | Evento::PerfilTempoAgentes { .. }
             | Evento::PerfilMascote { .. }
             | Evento::PerfilAbelhaFixa { .. }
+            | Evento::PerfilDitado { .. }
+            | Evento::VozModelo { .. }
             | Evento::TelaAbrir { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).
             | Evento::LousaMudou { .. } => {}

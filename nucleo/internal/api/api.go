@@ -23,6 +23,7 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/demo"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/navegador"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/voz"
 )
 
 // VersaoProtocolo muda só quando uma mudança quebra clientes antigos.
@@ -95,6 +96,10 @@ type Servidor struct {
 	frases frases
 	// As propostas de "Gerar sprint com IA" esperando aceitar (veja proposta.go).
 	propostas propostas
+
+	// O modelo do ditado por voz (veja voz.go); vazio, fica em DirDados/voz.
+	Voz         *voz.Gerente
+	baixandoVoz quemBaixa
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -131,6 +136,7 @@ func (s *Servidor) Rotas() http.Handler {
 		s.Banco.AoGravar(s.publicarEventos)
 		s.iniciarTrabalhador()
 		s.rotasDados(mux)
+		s.iniciarVoz(mux)
 	}
 	if s.Demo {
 		mux.HandleFunc("POST /v1/demo/carga", s.carga)

@@ -93,6 +93,8 @@ pub enum Acao {
     Mascote,
     /// Fixar (ou desafixar) a abelha na área de trabalho.
     AbelhaFixa(bool),
+    /// Abrir os ajustes do ditado por voz.
+    Ditado,
     Proximo,
     Linha,
     Daily,
@@ -445,6 +447,12 @@ impl Lateral {
             let clicou = if pode { tema::opcao_menu(ui, texto, fixa) } else { tema::opcao_menu_com(ui, texto, Some("desligado"), false) };
             if clicou {
                 saida.acoes.push(Acao::AbelhaFixa(!fixa));
+                ui.close();
+            }
+            ui.separator();
+            let ditado = if v.perfil.is_some_and(|p| p.ditado) { "ligado" } else { "desligado" };
+            if tema::opcao_menu_com(ui, "Ditado por voz", Some(ditado), pode) {
+                saida.acoes.push(Acao::Ditado);
                 ui.close();
             }
         });

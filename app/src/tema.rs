@@ -1032,6 +1032,8 @@ pub enum Icone {
     Terminal,
     Pasta,
     Globo,
+    // O ditado na caixa de mensagem.
+    Microfone,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1222,6 +1224,16 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
         }
         Icone::Parar => {
             pintor.rect_filled(caixa(9.0, 9.0), CornerRadius::same(2), cor);
+        }
+        Icone::Microfone => {
+            // A cápsula, o arco do suporte e a haste com o pé.
+            pintor.rect_stroke(Rect::from_center_size(c + vec2(0.0, -2.5), vec2(6.0, 10.0)), CornerRadius::same(3), traco, egui::StrokeKind::Middle);
+            let arco: Vec<Pos2> = (0..=10)
+                .map(|i| c + vec2(-5.0 * (std::f32::consts::PI * i as f32 / 10.0).cos(), -1.0 + 4.0 * (std::f32::consts::PI * i as f32 / 10.0).sin()))
+                .collect();
+            pintor.add(Shape::line(arco, traco));
+            pintor.line_segment([c + vec2(0.0, 3.0), c + vec2(0.0, 6.5)], traco);
+            pintor.line_segment([c + vec2(-3.0, 6.5), c + vec2(3.0, 6.5)], traco);
         }
         Icone::Grade => {
             for (dx, dy) in [(-3.5, -3.5), (3.5, -3.5), (-3.5, 3.5), (3.5, 3.5)] {

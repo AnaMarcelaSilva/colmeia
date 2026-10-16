@@ -479,6 +479,13 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "ligada": d.Ligada}
+	case "perfil.ditado":
+		// O download que termina liga o ditado: a janela que pediu fica sabendo.
+		var d struct {
+			Ligado bool `json:"ligado"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "ligado": d.Ligado}
 	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
 		var d struct {
 			Descricao string `json:"descricao"`

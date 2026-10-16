@@ -77,6 +77,12 @@ A abelha no pé da barra lateral resume o perfil: dorme, trabalha, espera você,
 
 **Fixar a abelha na área de trabalho** abre o `colmeia-abelha`, um programa à parte, pequeno e sem moldura, sempre por cima e em todas as áreas de trabalho, que continua lá com a janela da Colmeia fechada (o núcleo segue rodando). Parada, ela mostra um ponto da cor do que mais pede você, ou um contador vermelho com os erros. O clique abre o resumo ("2 esperam você · 1 trabalhando · 0 com erro"), que fica até você fechar, com a tarefa que pede você, Abrir a Colmeia e Desafixar. Quando um agente espera você, dá erro ou uma tarefa é concluída, um balão sai dela e some em 8 s (parado com o mouse em cima). Abrir e Ver o erro levam à tarefa na janela aberta ou abrem a Colmeia já nela. A abelha se arrasta e lembra onde ficou, e só redesenha quando algo muda. No Wayland ela fica por cima só onde o compositor deixa, como uma janela comum ([decisão 0013](docs/decisoes/0013-abelha-fixa-em-programa-a-parte.md)).
 
+### Ditado por voz
+
+Em Ajustes, **Ditado por voz** (desligado por padrão) mostra o tamanho do modelo (148 MB) e, se você aceitar, baixa uma vez o Whisper base multilíngue do repositório oficial do whisper.cpp, com barra de progresso e Cancelar. O arquivo é conferido pelo SHA-256 antes de ser usado. Ligado, aparece um microfone ao lado do Enviar na caixa de mensagem da tarefa: clique para começar e de novo para parar, ou segure Ctrl+Shift+M enquanto fala. Com o microfone aberto, o botão fica vermelho e a dica diz "Microfone ligado". O texto entra na caixa para você revisar e nunca é enviado sozinho.
+
+A transcrição roda no computador, em português, sem internet e sem tokens. Ela fica no `colmeia-voz`, um programa à parte que abre só quando você usa o microfone e sai sozinho depois de 2 minutos parado, levando o modelo da memória. O áudio fica só na memória dele e nunca é gravado ([decisão 0014](docs/decisoes/0014-ditado-em-processo-a-parte.md)).
+
 ### Histórico, daily e sprint
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
@@ -132,6 +138,7 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Ctrl+Shift+K | Bancos de dados |
 | Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
+| Ctrl+Shift+M (segurar) | Com o ditado ligado, ouve enquanto você segura e põe o texto na caixa de mensagem |
 | Ctrl+1 … Ctrl+6 | Abas da tarefa |
 | Ctrl+P / Ctrl+Shift+F | Na aba Arquivos, busca pelo nome / pelo texto |
 | Ctrl+Esc | Volta ao quadro |
@@ -162,7 +169,7 @@ Mais detalhes estão na [arquitetura](docs/arquitetura.md), as [decisões regist
 
 ## Desenvolvimento
 
-Para compilar, são necessários Go 1.26+, Rust 1.88+ e as bibliotecas de sistema do `eframe` (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo).
+Para compilar, são necessários Go 1.26+, Rust 1.88+ e as bibliotecas de sistema do `eframe` (no Ubuntu, `libxkbcommon-dev`, `libgtk-3-dev` e os drivers de vídeo). O `colmeia-voz` (o ditado) compila o whisper.cpp junto e pede também CMake, um compilador C++, o Clang (a libclang, para o bindgen) e, no Linux, `libasound2-dev` (no Ubuntu: `sudo apt install cmake g++ clang libasound2-dev`). No Windows, CMake e LLVM, que já vêm nas máquinas do GitHub Actions.
 
 ```bash
 # Núcleo
@@ -215,12 +222,14 @@ Para testar sem afetar os dados reais, aponte `COLMEIA_DIR` e `COLMEIA_DADOS` pa
 | `COLMEIA_SEM_ABELHA=1` | Desliga a abelha |
 | `COLMEIA_ABELHA` | Caminho do `colmeia-abelha` (a abelha fixa), se ele não estiver ao lado da tela nem no PATH |
 | `COLMEIA_APP` | Caminho do `colmeia`, para a abelha fixa abrir a janela |
+| `COLMEIA_VOZ` | Caminho do `colmeia-voz` (o ditado), se ele não estiver ao lado da tela nem no PATH |
+| `PULSE_SOURCE` | No Linux, a fonte de som do PulseAudio que o ditado ouve, no lugar do microfone padrão |
 | `COLMEIA_TAMANHO` | Tamanho inicial da janela, como `1280x720` |
 | `COLMEIA_FPS=1` | Mostra o contador de quadros, para medir desempenho |
 
 </details>
 
-O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha nos cinco acabamentos, com uma vitrine em `cargo run --release -p mascote --example vitrine`; `MASCOTE_GALERIA=1` mostra todos), `abelha-fixa/` (o programa `colmeia-abelha`, a abelha fixa na área de trabalho), `canal/` (o socket e o token do núcleo, usados pela tela e pela abelha fixa), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
+O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha nos cinco acabamentos, com uma vitrine em `cargo run --release -p mascote --example vitrine`; `MASCOTE_GALERIA=1` mostra todos), `abelha-fixa/` (o programa `colmeia-abelha`, a abelha fixa na área de trabalho), `canal/` (o socket e o token do núcleo, usados pela tela e pela abelha fixa), `voz/` (o programa `colmeia-voz`, o ditado; `cargo run --release -p colmeia-voz --example medir -- <modelo> <fala.wav>` mede o Whisper com um WAV de teste), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
 
 ## Plataformas
 

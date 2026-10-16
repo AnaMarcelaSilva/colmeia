@@ -27,6 +27,9 @@ type Perfil struct {
 	MascoteModelo string `json:"mascote_modelo"`
 	MascoteNome   string `json:"mascote_nome"`
 	AbelhaFixa    bool   `json:"abelha_fixa"`
+	// Ditado: o microfone na caixa de mensagem das tarefas. Desligado por
+	// padrão; só liga com o modelo de voz baixado.
+	Ditado bool `json:"ditado"`
 }
 
 // ModelosMascote são os acabamentos que a tela sabe desenhar; o primeiro é o padrão.
@@ -35,10 +38,10 @@ var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zan
 // NomeMascotePadrao é o nome da abelha de um perfil novo.
 const NomeMascotePadrao = "Colmeia"
 
-const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa`
+const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado`
 
 func (p *Perfil) campos() []any {
-	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa}
+	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado}
 }
 
 type Conta struct {
@@ -255,6 +258,40 @@ func (b *Banco) DefinirAbelhaFixa(ctx context.Context, perfil int64, ligada bool
 		}
 		return registrar(ctx, tx, "perfil.abelha_fixa", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligada": ligada})
 	})
+}
+
+// DefinirDitado liga ou desliga o ditado por voz do perfil. Quem confere se
+// o modelo está baixado é a API, que conhece o modelo.
+func (b *Banco) DefinirDitado(ctx context.Context, perfil int64, ligado bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET ditado = ? WHERE id = ?`, ligado, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.ditado", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
+	})
+}
+
+// PerfisComDitado são os perfis com o ditado ligado (para desligar todos
+// quando o modelo sai do disco).
+func (b *Banco) PerfisComDitado(ctx context.Context) ([]int64, error) {
+	linhas, err := b.db.QueryContext(ctx, `SELECT id FROM perfis WHERE ditado = 1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer linhas.Close()
+	var ids []int64
+	for linhas.Next() {
+		var id int64
+		if err := linhas.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, linhas.Err()
 }
 
 func (b *Banco) existePerfil(ctx context.Context, perfil int64) error {

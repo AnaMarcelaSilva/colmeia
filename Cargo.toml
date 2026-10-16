@@ -1,5 +1,5 @@
 [workspace]
-members = ["app", "mascote", "canal", "abelha-fixa"]
+members = ["app", "mascote", "canal", "abelha-fixa", "voz"]
 resolver = "3"
 
 [workspace.package]

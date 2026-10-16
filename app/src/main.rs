@@ -30,6 +30,7 @@ mod tarefa;
 mod teclas;
 mod tema;
 mod terminal;
+mod voz;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -222,6 +223,8 @@ struct Colmeia {
     favo: tema::Favo,
     gradiente: tema::Gradiente,
     compositor: Compositor,
+    /// O ditado por voz (o programa colmeia-voz, aberto só quando usado).
+    ditado: voz::Ditado,
     filtro: Option<String>,
     /// Eventos do perfil aberto e o estado da ligação.
     ouvinte: Option<Ouvinte>,
@@ -350,6 +353,7 @@ impl Colmeia {
             favo: tema::Favo::default(),
             gradiente: tema::Gradiente::default(),
             compositor: Compositor::default(),
+            ditado: voz::Ditado::default(),
             filtro: None,
             ouvinte: None,
             conexao: Conexao::Ligado,
@@ -425,6 +429,7 @@ impl Colmeia {
             mascote_modelo: String::new(),
             mascote_nome: api::NOME_DA_ABELHA.into(),
             abelha_fixa: false,
+            ditado: false,
         });
         app.modelo.projetos = dados::projetos_demo();
         let cartoes = std::env::var("COLMEIA_CARTOES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
@@ -517,6 +522,8 @@ impl Colmeia {
         self.banco = banco::Bancos::novo(perfil.id);
         self.banco.nome_perfil = perfil.nome.clone();
         self.banco.autocompletar = perfil.autocompletar_sql;
+        // O ditado do perfil anterior fecha (o microfone e o modelo junto).
+        self.ditado.desligar();
         self.abelha.vestir(&perfil.mascote_modelo, &perfil.mascote_nome);
         // A abelha fixa volta com a Colmeia (se já estiver aberta, a nova sai sozinha).
         if perfil.abelha_fixa
@@ -607,6 +614,16 @@ impl Colmeia {
                         && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
                     {
                         p.abelha_fixa = *ligada;
+                    }
+                    if let dados::Evento::PerfilDitado { perfil_id, ligado, .. } = &e
+                        && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
+                    {
+                        p.ditado = *ligado;
+                        self.ditado_mudou(*ligado);
+                    }
+                    if let (dados::Evento::VozModelo { estado, baixados, tamanho, erro, .. }, Some(Dialogo::Ditado(d))) = (&e, &mut self.dialogo) {
+                        d.modelo =
+                            api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() };
                     }
                     if let dados::Evento::TelaAbrir { tarefa_id, agente_id, .. } = &e {
                         self.atender_abertura(*tarefa_id, *agente_id, ctx);
@@ -1790,6 +1807,46 @@ impl Colmeia {
         self.tempo_pendente = Some((antes, recebe));
     }
 
+    /// O ditado ligou ou desligou (aqui, em outra tela ou no fim do download).
+    /// Desligado, o programa da voz fecha na hora e o modelo sai da memória.
+    fn ditado_mudou(&mut self, ligado: bool) {
+        if let Some(Dialogo::Ditado(d)) = &mut self.dialogo {
+            d.ligado = ligado;
+            if ligado && let Ok(m) = api::estado_voz() {
+                d.modelo = m;
+            }
+        }
+        if !ligado {
+            self.ditado.desligar();
+        }
+    }
+
+    /// O texto transcrito entra na caixa (nunca é enviado sozinho); os erros
+    /// viram aviso. Saindo da tarefa com o microfone aberto, ele fecha sem
+    /// transcrever.
+    fn receber_ditado(&mut self, agora: f64) {
+        for saida in self.ditado.receber() {
+            match saida {
+                voz::Saida::Texto(texto) => self.compositor.ditar(&texto),
+                voz::Saida::Erro(e) => self.avisar(TipoAviso::Erro, e, agora),
+            }
+        }
+        let na_tarefa = matches!(self.tela, Tela::Tarefa { id, .. } if id == self.ditado.tarefa);
+        if self.ditado.estado().ouvindo() && (!na_tarefa || self.dialogo.is_some()) {
+            self.ditado.cancelar();
+        }
+    }
+
+    /// O microfone da caixa (o clique ou o atalho): abre ou fecha.
+    fn alternar_ditado(&mut self, tarefa: i64, pelo_atalho: bool, ctx: &egui::Context) {
+        if self.ditado.estado().ouvindo() {
+            self.ditado.parar();
+        } else if let Err(e) = self.ditado.ouvir(ctx, tarefa, pelo_atalho) {
+            let agora = ctx.input(|i| i.time);
+            self.avisar(TipoAviso::Erro, e, agora);
+        }
+    }
+
     /// A resposta do núcleo à opção do tempo: em erro, desfaz e avisa.
     fn receber_tempo(&mut self, agora: f64) {
         let Some((antes, recebe)) = &self.tempo_pendente else { return };
@@ -1937,6 +1994,10 @@ impl Colmeia {
                     }
                 }
                 Acao::AbelhaFixa(ligar) => self.fixar_abelha(ligar, ctx.input(|i| i.time)),
+                Acao::Ditado => {
+                    let ligado = self.perfil.as_ref().is_some_and(|p| p.ditado);
+                    self.dialogo = Some(Dialogo::Ditado(dialogos::AjustesDitado::new(ligado)));
+                }
                 Acao::Proximo => self.proximo_que_precisa(),
                 Acao::Linha => self.alternar_linha(),
                 Acao::Daily => self.abrir_daily(),
@@ -2194,6 +2255,7 @@ impl Colmeia {
             if atalho(Key::E) {
                 self.alternar_aba(id, tarefa::Aba::Arquivos, ctx);
             }
+            self.atalho_do_ditado(id, ctx);
             if atalho(Key::B) && self.modelo.navegadores.contains(&id) {
                 self.capturar_navegador(id, ctx);
             }
@@ -2207,6 +2269,25 @@ impl Colmeia {
                     a.focar_texto();
                 }
             }
+        }
+    }
+
+    /// Ctrl+Shift+M: segurar para falar. Apertar abre o microfone e soltar
+    /// transcreve; as teclas saem da fila antes do terminal. Se a tecla solta
+    /// se perder (a janela perdeu o foco), o microfone fecha do mesmo jeito.
+    fn atalho_do_ditado(&mut self, tarefa: i64, ctx: &egui::Context) {
+        if !self.perfil.as_ref().is_some_and(|p| p.ditado) {
+            return;
+        }
+        let segurado = self.ditado.pelo_atalho && self.ditado.estado().ouvindo();
+        let (apertou, soltou, segurando) = ctx.input_mut(|i| {
+            let (apertou, soltou) = voz::tirar_atalho(&mut i.events, segurado);
+            (apertou, soltou, i.key_down(Key::M))
+        });
+        if apertou && !self.ditado.estado().ouvindo() {
+            self.alternar_ditado(tarefa, true, ctx);
+        } else if segurado && (soltou || !segurando) {
+            self.ditado.parar();
         }
     }
 
@@ -2859,6 +2940,7 @@ impl eframe::App for Colmeia {
         }
         self.receber_eventos(&ctx, agora);
         self.receber_tempo(agora);
+        self.receber_ditado(agora);
         self.receber_capturas(agora);
         self.receber_navegador(agora);
         self.atalhos(&ctx);
@@ -3123,6 +3205,15 @@ impl eframe::App for Colmeia {
                 Resultado::Continua => {}
                 // O resto chega pelos eventos do núcleo.
                 Resultado::Fechar | Resultado::Mudou => self.dialogo = None,
+                Resultado::Ditado(ligado) => {
+                    if let Some(p) = self.perfil.as_mut() {
+                        p.ditado = ligado;
+                    }
+                    self.ditado_mudou(ligado);
+                    if ligado {
+                        self.dialogo = None;
+                    }
+                }
                 Resultado::ProjetoCriado(id) => {
                     self.dialogo = None;
                     self.mudar_escopo(Escopo::Projeto(id));

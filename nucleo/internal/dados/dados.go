@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS comandos (
 // colunasPerfis é a definição da tabela perfis desde a versão 9 do banco
 // (com o tema fosco). A migração para ela está em migrarPerfis. As colunas
 // aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo,
-// mascote_nome e abelha_fixa nasceram em migrar e ficam lá.
+// mascote_nome, abelha_fixa e ditado nasceram em migrar e ficam lá.
 const colunasPerfis = `
 	id INTEGER PRIMARY KEY,
 	nome TEXT NOT NULL UNIQUE,
@@ -298,6 +298,8 @@ func migrar(db *sql.DB) error {
 		{"perfis", "mascote_nome", "TEXT NOT NULL DEFAULT 'Colmeia'"},
 		// A abelha fixa na área de trabalho, num programa à parte (desligada por padrão).
 		{"perfis", "abelha_fixa", "INTEGER NOT NULL DEFAULT 0"},
+		// O ditado por voz na caixa de mensagem (desligado por padrão).
+		{"perfis", "ditado", "INTEGER NOT NULL DEFAULT 0"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
@@ -430,9 +432,10 @@ func migrarPerfis(db *sql.DB) error {
 			autocompletar_sql INTEGER NOT NULL DEFAULT 0,
 			mascote_modelo TEXT NOT NULL DEFAULT 'identidade',
 			mascote_nome TEXT NOT NULL DEFAULT 'Colmeia',
-			abelha_fixa INTEGER NOT NULL DEFAULT 0)`,
-		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa)
-			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa FROM perfis`,
+			abelha_fixa INTEGER NOT NULL DEFAULT 0,
+			ditado INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado)
+			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado FROM perfis`,
 		`DROP TABLE perfis`,
 		`ALTER TABLE perfis_nova RENAME TO perfis`,
 	} {

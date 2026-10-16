@@ -9,6 +9,10 @@
 //! A seta para cima traz as mensagens já enviadas ao agente em foco, como no
 //! terminal. O histórico fica no núcleo (sobrevive a fechar a Colmeia) e é
 //! lido uma vez por agente, numa thread; nada é consultado por tempo.
+//!
+//! Com o ditado ligado no perfil, um microfone ao lado do Enviar abre e
+//! fecha o microfone (veja `voz`); o texto transcrito entra no rascunho e
+//! nunca é enviado sozinho.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,6 +23,7 @@ use crate::api;
 use crate::dados::AgenteTela;
 use crate::teclas;
 use crate::tema::{self, cores};
+use crate::voz;
 
 /// Mensagens guardadas por agente (o núcleo guarda o mesmo tanto).
 const MAX_HISTORICO: usize = 200;
@@ -144,6 +149,8 @@ pub struct Compositor {
     tinha_foco: bool,
     /// Composição de acento (IME) em andamento: o Enter dela não envia.
     composicao: teclas::Composicao,
+    /// O microfone foi clicado neste quadro (quem tem o ditado abre ou fecha).
+    pub clicou_microfone: bool,
 }
 
 impl Default for Compositor {
@@ -161,6 +168,7 @@ impl Default for Compositor {
             aviso_historico: None,
             tinha_foco: false,
             composicao: teclas::Composicao::default(),
+            clicou_microfone: false,
         }
     }
 }
@@ -194,6 +202,16 @@ impl Compositor {
         self.rascunho.push_str(texto);
         self.rascunho.push(' ');
         self.focar = true;
+    }
+
+    /// O texto ditado entra no fim do rascunho, para revisar: nada é enviado.
+    pub fn ditar(&mut self, texto: &str) {
+        if !self.rascunho.is_empty() && !self.rascunho.ends_with([' ', '\n']) {
+            self.rascunho.push(' ');
+        }
+        self.rascunho.push_str(texto.trim());
+        self.focar = true;
+        self.aviso_historico = None;
     }
 
     pub fn com_foco(ctx: &egui::Context) -> bool {
@@ -316,7 +334,18 @@ impl Compositor {
 
     /// `teclado_livre`: nenhum diálogo, menu modal ou caixa flutuante está
     /// aberto por cima. Sem ele, a caixa não mexe no Enter (que confirma o diálogo).
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: egui::Rect, agentes: &[AgenteTela], foco: i64, tarefa: i64, teclado_livre: bool) -> Option<Envio> {
+    /// `microfone`: o estado do ditado, só com ele ligado no perfil.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mostrar(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: egui::Rect,
+        agentes: &[AgenteTela],
+        foco: i64,
+        tarefa: i64,
+        teclado_livre: bool,
+        microfone: Option<voz::Estado>,
+    ) -> Option<Envio> {
         let p = cores();
         let id = egui::Id::new(ID);
         // O clique que pediu o foco (um botão da lousa, por exemplo) solta o
@@ -389,6 +418,10 @@ impl Compositor {
                 enviar = true;
             }
             ui.add_space(8.0);
+            if let Some(estado) = microfone {
+                self.clicou_microfone |= botao_microfone(ui, estado).clicked();
+                ui.add_space(4.0);
+            }
             let dica = if self.para_todos { "Mensagem para todos os agentes da tarefa".to_string() } else { format!("Mensagem para {em_foco}") };
             let campo = egui::TextEdit::multiline(&mut self.rascunho)
                 .id(id)
@@ -416,6 +449,11 @@ impl Compositor {
         };
         let tem_historico = self.tamanho_historico(foco) > 0;
         let (texto_dica, cor_dica) = match (&self.aviso, navegando, &self.aviso_historico) {
+            // O microfone aberto aparece sempre: é o aviso de que algo está ouvindo.
+            _ if microfone.is_some_and(voz::Estado::ouvindo) => {
+                ("● Microfone ligado · clique no microfone (ou solte o atalho) para transcrever".to_string(), p.erro)
+            }
+            _ if microfone == Some(voz::Estado::Transcrevendo) => ("Transcrevendo aqui no computador…".to_string(), p.suave),
             (Some(aviso), _, _) => (aviso.clone(), p.erro),
             (None, _, _) if destinos.is_empty() => (parou.to_string(), p.alerta),
             (None, Some((n, total)), _) => (format!("Mensagem {n} de {total} · ↓ mais nova · Esc volta ao rascunho"), p.suave),
@@ -505,6 +543,24 @@ impl Compositor {
 /// A dica das teclas embaixo da caixa, cortada pelo tamanho (nunca com "…"):
 /// sai primeiro o Ctrl+V, depois a seta. "Enter envia · Shift+Enter nova
 /// linha" fica sempre.
+/// O microfone ao lado do Enviar: vermelho e cheio enquanto ouve, apagado
+/// enquanto transcreve. Sem animação: a tela parada não redesenha.
+fn botao_microfone(ui: &mut egui::Ui, estado: voz::Estado) -> egui::Response {
+    let p = cores();
+    let lado = 32.0;
+    match estado {
+        voz::Estado::Parado => tema::botao_icone(ui, tema::Icone::Microfone, lado)
+            .on_hover_text(format!("Ditar · clique para começar e de novo para parar, ou segure {}", voz::ATALHO)),
+        voz::Estado::Abrindo | voz::Estado::Ouvindo => {
+            let (rect, resposta) = ui.allocate_exact_size(vec2(lado, lado), egui::Sense::click());
+            ui.painter().circle_filled(rect.center(), lado / 2.0 - 1.0, p.erro);
+            tema::desenhar_icone(ui.painter(), rect.center(), tema::Icone::Microfone, egui::Color32::WHITE);
+            resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Parar e transcrever")
+        }
+        voz::Estado::Transcrevendo => tema::botao_icone_com(ui, tema::Icone::Microfone, lado, false).on_hover_text("Transcrevendo…"),
+    }
+}
+
 fn dica_das_teclas(tem_historico: bool, cabe: impl Fn(&str) -> bool) -> String {
     let opcoes: &[&str] = if tem_historico {
         &["Enter envia · Shift+Enter nova linha · ↑ anteriores · Ctrl+V imagem", "Enter envia · Shift+Enter nova linha · ↑ anteriores"]
@@ -583,6 +639,10 @@ mod testes {
 
     /// Roda um quadro da caixa com estes eventos e devolve o que ela enviou.
     fn quadro(ctx: &egui::Context, c: &mut Compositor, eventos: Vec<Event>, livre: bool) -> Option<Envio> {
+        quadro_com_microfone(ctx, c, eventos, livre, None)
+    }
+
+    fn quadro_com_microfone(ctx: &egui::Context, c: &mut Compositor, eventos: Vec<Event>, livre: bool, microfone: Option<voz::Estado>) -> Option<Envio> {
         let agentes = [AgenteTela {
             id: 0,
             ferramenta: "claude".into(),
@@ -600,10 +660,28 @@ mod testes {
         let mut envio = None;
         let mut saida = ctx.run_ui(entrada, |ui| {
             let area = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(800.0, c.altura()));
-            envio = c.mostrar(ui, area, &agentes, 0, 1, livre);
+            envio = c.mostrar(ui, area, &agentes, 0, 1, livre, microfone);
         });
         saida.textures_delta.clear();
         envio
+    }
+
+    #[test]
+    fn o_texto_ditado_entra_no_rascunho_e_nao_e_enviado() {
+        let ctx = egui::Context::default();
+        tema::instalar(&ctx);
+        let mut c = Compositor::default();
+        quadro_com_microfone(&ctx, &mut c, vec![Event::Text("x".into())], true, Some(voz::Estado::Parado));
+        c.rascunho = "Veja isto:".into();
+        c.ditar("  rode os testes de novo. ");
+        assert_eq!(c.rascunho, "Veja isto: rode os testes de novo.");
+        assert!(c.focar);
+        // Os quadros seguintes (com o microfone ouvindo ou transcrevendo) não enviam nada sozinhos.
+        for estado in [voz::Estado::Ouvindo, voz::Estado::Transcrevendo, voz::Estado::Parado] {
+            assert!(quadro_com_microfone(&ctx, &mut c, vec![], true, Some(estado)).is_none());
+        }
+        assert_eq!(c.rascunho, "Veja isto: rode os testes de novo.");
+        assert!(!c.clicou_microfone);
     }
 
     fn tecla(modifiers: Modifiers) -> Event {

@@ -361,12 +361,16 @@ impl Colmeia {
         // Com um diálogo ou caixa por cima, o Enter é de quem está por cima.
         let teclado_livre =
             self.dialogo.is_none() && !self.banco.modal_aberto() && self.apresentacao.is_none() && self.palco.is_none() && self.popover_navegador.is_none();
-        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, agentes, foco, id, teclado_livre) {
+        let microfone = self.perfil.as_ref().is_some_and(|p| p.ditado).then(|| self.ditado.estado());
+        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, agentes, foco, id, teclado_livre, microfone) {
             for agente in envio.destinos {
                 if let Some(t) = self.terminais.get(&agente) {
                     t.enviar(&envio.texto);
                 }
             }
+        }
+        if std::mem::take(&mut self.compositor.clicou_microfone) {
+            self.alternar_ditado(id, false, ui.ctx());
         }
 
         // O mosaico: os outros agentes em miniatura, à direita.

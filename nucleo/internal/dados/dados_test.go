@@ -654,3 +654,46 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 		t.Errorf("a remoção em cascata parou de funcionar: %+v", workspaces)
 	}
 }
+
+func TestDitadoDoPerfil(t *testing.T) {
+	b, dir := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	if perfil.Ditado {
+		t.Fatal("o ditado nasce desligado")
+	}
+	if err := b.DefinirDitado(ctx, perfil.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); !p.Ditado {
+		t.Error("o ditado não ligou")
+	}
+	if p, _ := b.Perfil(ctx, outro.ID); p.Ditado {
+		t.Error("o ditado vale só para o perfil")
+	}
+	if ids, _ := b.PerfisComDitado(ctx); len(ids) != 1 || ids[0] != perfil.ID {
+		t.Errorf("perfis com ditado: %v", ids)
+	}
+	if err := b.DefinirDitado(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.ditado"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"ligado":true`) {
+		t.Errorf("evento do ditado: %+v", eventos)
+	}
+
+	// Um banco de antes do ditado (sem a coluna) abre com ele desligado.
+	if _, err := b.db.Exec(`ALTER TABLE perfis DROP COLUMN ditado`); err != nil {
+		t.Fatal(err)
+	}
+	b.Fechar()
+	b2, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b2.Fechar()
+	if p, err := b2.Perfil(ctx, perfil.ID); err != nil || p.Ditado {
+		t.Errorf("depois da migração: %+v %v", p, err)
+	}
+}

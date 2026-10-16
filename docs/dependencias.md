@@ -26,10 +26,27 @@ O programa da abelha fixa usa as mesmas bibliotecas da tela (eframe, tungstenite
 | raw-window-handle | 0.6 | MIT OR Apache-2.0 OR Zlib | O número da janela no X11 (só no Linux) |
 | libc | 0.2 | MIT OR Apache-2.0 | `flock`: uma abelha só por perfil (só no Unix) |
 
+## O ditado por voz (`colmeia-voz`)
+
+O ditado é um programa à parte ([decisão 0014](decisoes/0014-ditado-em-processo-a-parte.md)): nada disto entra no binário da tela (`cargo tree -p colmeia` não mostra nenhum deles). O núcleo baixa o modelo só com a biblioteca padrão do Go.
+
+| Crate | Versão | Licença | Para quê |
+| --- | --- | --- | --- |
+| cpal | 0.18 | Apache-2.0 | Captura do microfone (PulseAudio ou ALSA no Linux, WASAPI no Windows) |
+| pulseaudio | 0.3 | MIT | O protocolo do PulseAudio em Rust, sem a libpulse (dependência do cpal no Linux) |
+| alsa, alsa-sys | 0.11, 0.4 | MIT OR Apache-2.0, MIT | ALSA, quando não há servidor de som (dependência do cpal) |
+| whisper-rs, whisper-rs-sys | 0.16, 0.15 | Unlicense | Ligação com o whisper.cpp |
+| whisper.cpp e ggml (dentro do whisper-rs-sys) | | MIT | A transcrição, compilada junto, só na CPU |
+| dasp_sample, futures, num-derive, enum-primitive-derive, mio | | MIT OR Apache-2.0, MIT | Dependências do cpal e do pulseaudio |
+| bindgen, cmake, clang-sys, fs_extra (só na compilação) | | BSD-3-Clause, MIT OR Apache-2.0, Apache-2.0, MIT | Compilar o whisper.cpp e gerar a ligação |
+
+O Unlicense (whisper-rs) põe o código em domínio público, compatível com MIT e Apache-2.0. O modelo (`ggml-base.bin`, os pesos do Whisper da OpenAI convertidos pelo whisper.cpp) é MIT e não vai no binário nem no repositório: o núcleo baixa quando você liga o ditado.
+
 Para conferir de novo:
 
 ```bash
 go -C nucleo build -o /tmp/colmeia-nucleo ./cmd/colmeia-nucleo
 go version -m /tmp/colmeia-nucleo        # os módulos que entram no binário
 go -C nucleo list -m -f '{{.Path}} {{.Dir}}' all   # onde está o LICENSE de cada um
+cargo tree -p colmeia-voz -e normal                 # o que entra no colmeia-voz
 ```
