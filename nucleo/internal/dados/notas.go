@@ -192,6 +192,19 @@ func (b *Banco) Nota(ctx context.Context, tarefa int64, tipo, periodo string) (N
 	return n, err
 }
 
+// NotaDeAgente diz se a última gravação da nota veio de um agente (pelas
+// ferramentas da Colmeia), e não de você.
+func (b *Banco) NotaDeAgente(ctx context.Context, tarefa int64, tipo, periodo string) (bool, error) {
+	var deAgente bool
+	err := b.db.QueryRowContext(ctx, `SELECT agente_id IS NOT NULL FROM eventos
+		WHERE tarefa_id = ? AND tipo = 'nota.atualizada' AND json_extract(dados, '$.tipo') = ? AND json_extract(dados, '$.periodo') = ?
+		ORDER BY id DESC LIMIT 1`, tarefa, tipo, periodo).Scan(&deAgente)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return deAgente, err
+}
+
 // NotasDoPeriodo traz as notas das tarefas para o tipo e período, pelo id da tarefa.
 func (b *Banco) NotasDoPeriodo(ctx context.Context, tarefas []int64, tipo, periodo string) (map[int64]Nota, error) {
 	notas := map[int64]Nota{}

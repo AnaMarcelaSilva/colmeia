@@ -133,6 +133,17 @@ func (b *Banco) CriarSprint(ctx context.Context, perfil int64, inicio, fim strin
 // termina na próxima quinta, o dia da reunião. Dias sem uso entre a última e
 // hoje ficam fora de qualquer sprint (dá para olhar pelos 7 ou 14 dias).
 func (b *Banco) SprintAtual(ctx context.Context, perfil int64, hoje string) (Sprint, error) {
+	s, err := b.sprintAtual(ctx, perfil, hoje)
+	if err != nil {
+		// Outra chamada pode ter criado a sprint de hoje ao mesmo tempo: vale a dela.
+		if criada, errDeNovo := lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE perfil_id = ? AND inicio <= ? AND fim >= ?`, perfil, hoje, hoje)); errDeNovo == nil {
+			return criada, nil
+		}
+	}
+	return s, err
+}
+
+func (b *Banco) sprintAtual(ctx context.Context, perfil int64, hoje string) (Sprint, error) {
 	dia, err := time.Parse("2006-01-02", hoje)
 	if err != nil {
 		return Sprint{}, ErrInvalido{"o dia precisa estar no formato AAAA-MM-DD"}

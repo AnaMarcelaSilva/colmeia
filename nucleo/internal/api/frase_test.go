@@ -110,3 +110,30 @@ func TestFraseSemRespostaNoPrazo(t *testing.T) {
 		t.Errorf("o pedido sem resposta ficou aberto: %v", abertos)
 	}
 }
+
+func TestFraseJaGravadaPeloAgenteNaoPedeDeNovo(t *testing.T) {
+	_, linhas := claudeQueAnota(t)
+	srv, servidor := servidorComAgentes(t)
+	montarTarefas(t, srv.URL)
+	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	token := lerArquivo(servidor.DirCanal + "/agentes/1.token")
+
+	// Tarefa 1: o agente gravou a frase ao terminar, como as instruções pedem.
+	pedirComo(t, token, "PUT", srv.URL+"/v1/agente/nota", map[string]any{"texto": "Deixei pronta a tela nova de pedidos para a equipe de vendas.", "modo": "complementar"})
+	pedirComo(t, tokenTela, "PATCH", srv.URL+"/v1/tarefas/1", map[string]string{"coluna": "revisao"})
+	// Tarefa 2: ninguém gravou, entra a reserva.
+	pedirComo(t, tokenTela, "PATCH", srv.URL+"/v1/tarefas/2", map[string]string{"coluna": "concluido"})
+
+	esperarAte(t, "a frase do agente na sprint", func() bool { _, s := notaDeHoje(t, servidor, 1); return s != "" })
+	esperarAte(t, "a frase montada", func() bool { _, s := notaDeHoje(t, servidor, 2); return s != "" })
+	time.Sleep(200 * time.Millisecond)
+	if d, s := notaDeHoje(t, servidor, 1); d != "Deixei pronta a tela nova de pedidos para a equipe de vendas." || s != d {
+		t.Errorf("frase do agente: %q / %q", d, s)
+	}
+	if abertos, _ := servidor.Banco.PedidosAbertos(context.Background(), 1); len(abertos) != 0 || strings.Contains(lerArquivo(linhas), "reunião") {
+		t.Errorf("pediu a frase de novo: %v", abertos)
+	}
+	if d, s := notaDeHoje(t, servidor, 2); d != "Concluí a tarefa “Relatório do cliente-x”." || s != d {
+		t.Errorf("reserva: %q / %q", d, s)
+	}
+}

@@ -73,6 +73,7 @@ const (
 		"complementar a nota com o que foi pedido, anexar imagens, abrir e capturar o navegador da tarefa e ler e acrescentar itens à lousa (quadro livre) da tarefa. " +
 		"Quando um pedido da daily chegar no terminal, responda pela nota (complementar_nota com o número do pedido), " +
 		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide. " +
+		"Ao terminar o trabalho, antes de encerrar, grave com complementar_nota (daily) uma ou duas frases para a reunião: o que ficou pronto e para quem, sem termos técnicos. " +
 		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar)."
 )
 

@@ -17,7 +17,8 @@ import (
 // falável (pelo mesmo pedido da daily, que ele responde pela nota). Sem
 // agente rodando ou sem resposta no prazo, a frase é montada com o título e a
 // sua última mensagem. A frase só entra numa nota vazia: o que você escreveu
-// nunca é trocado.
+// nunca é trocado. As instruções do agente já pedem a frase ao terminar; se
+// ele gravou, o pedido não sai e a montada fica só como reserva.
 
 // PrazoFrase: quanto o agente tem para responder (os testes encurtam).
 var PrazoFrase = 3 * time.Minute
@@ -123,7 +124,15 @@ func (s *Servidor) pedirFrase(perfil, tarefa int64) {
 		return
 	}
 	nota, err := s.Banco.Nota(ctx, tarefa, "daily", hoje())
-	if err != nil || strings.TrimSpace(nota.Texto) != "" {
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(nota.Texto) != "" {
+		// O agente já gravou a frase ao terminar (como as instruções pedem):
+		// nada de pedir de novo, ela só vai também para a sprint.
+		if deAgente, err := s.Banco.NotaDeAgente(ctx, tarefa, "daily", hoje()); err == nil && deAgente {
+			s.gravarNaSprint(ctx, perfil, tarefa, nota.Texto)
+		}
 		return
 	}
 	t, _, _, err := s.Banco.Tarefa(ctx, tarefa)

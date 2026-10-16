@@ -114,3 +114,22 @@ func TestSprintsDoPerfil(t *testing.T) {
 		t.Fatalf("títulos de sprint removida: %v", titulos)
 	}
 }
+
+func TestSprintAtualAoMesmoTempo(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	p, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	// Duas tarefas indo para Concluído juntas no primeiro dia da sprint.
+	erros := make(chan error, 8)
+	for range 8 {
+		go func() { _, err := b.SprintAtual(ctx, p.ID, "2026-10-16"); erros <- err }()
+	}
+	for range 8 {
+		if err := <-erros; err != nil {
+			t.Errorf("sprint atual: %v", err)
+		}
+	}
+	if lista, _ := b.ListarSprints(ctx, p.ID); len(lista) != 1 {
+		t.Errorf("sprints: %v", lista)
+	}
+}
