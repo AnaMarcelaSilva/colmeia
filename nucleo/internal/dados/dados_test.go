@@ -442,6 +442,28 @@ func TestPreferenciaDoTempoDosAgentes(t *testing.T) {
 	}
 }
 
+func TestPreferenciaDoAutocompletar(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	if p, _ := b.Perfil(ctx, perfil.ID); p.AutocompletarSQL {
+		t.Error("o autocompletar começa ligado")
+	}
+	if err := b.DefinirAutocompletarSQL(ctx, perfil.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if lista, _ := b.ListarPerfis(ctx); len(lista) != 1 || !lista[0].AutocompletarSQL {
+		t.Errorf("perfis: %+v", lista)
+	}
+	if err := b.DefinirAutocompletarSQL(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.autocompletar_sql"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"ligado":true`) {
+		t.Errorf("evento da preferência: %+v", eventos)
+	}
+}
+
 func TestRecolherWorkspace(t *testing.T) {
 	b, _ := bancoDeTeste(t)
 	ctx := context.Background()
@@ -511,6 +533,9 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 	}
 	if err := b2.DefinirTema(ctx, p.ID, "fosco"); err != nil {
 		t.Fatalf("tema fosco depois da migração: %v", err)
+	}
+	if err := b2.DefinirAutocompletarSQL(ctx, p.ID, true); err != nil {
+		t.Fatalf("autocompletar depois da migração: %v", err)
 	}
 	perfil, err := b2.Perfil(ctx, p.ID)
 	if err != nil || perfil.Tema != "fosco" || perfil.Nome != "Pessoal" {

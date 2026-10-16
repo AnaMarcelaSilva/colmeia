@@ -407,7 +407,14 @@ impl Colmeia {
 
         // Modo demonstração: dados de exemplo e os terminais de teste do núcleo.
         // COLMEIA_CARTOES=500, COLMEIA_TAREFA=101 e COLMEIA_CENARIO=erro ajudam a medir sem clicar.
-        app.perfil = Some(api::Perfil { id: 0, nome: "Demonstração".into(), tema: escolha.chave().into(), aviso_captura: false, tempo_agentes: false });
+        app.perfil = Some(api::Perfil {
+            id: 0,
+            nome: "Demonstração".into(),
+            tema: escolha.chave().into(),
+            aviso_captura: false,
+            tempo_agentes: false,
+            autocompletar_sql: false,
+        });
         app.modelo.projetos = dados::projetos_demo();
         let cartoes = std::env::var("COLMEIA_CARTOES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
         app.modelo.tarefas = dados::gerar_demo(cartoes);
@@ -498,6 +505,7 @@ impl Colmeia {
         // As senhas e os consoles do perfil anterior ficam para trás.
         self.banco = banco::Bancos::novo(perfil.id);
         self.banco.nome_perfil = perfil.nome.clone();
+        self.banco.autocompletar = perfil.autocompletar_sql;
         self.tela_antes_do_banco = None;
         self.pedidos_consulta.clear();
         // O retrato do quadro chega pela thread de eventos, fora da thread da tela.
@@ -1801,6 +1809,7 @@ impl Colmeia {
             escopo: self.escopo,
             lugar,
             pedidos_banco: self.modelo.aprovacoes.len(),
+            conexoes_banco: self.banco.conexoes.len(),
             demo: self.demo,
             pode: self.pode_mudar(),
             rodando,
@@ -1810,7 +1819,17 @@ impl Colmeia {
             agora,
             uso: &self.modelo.uso,
         };
-        self.lateral.mostrar(ui, &mut self.abelha, &vista)
+        let saida = self.lateral.mostrar(ui, &mut self.abelha, &vista);
+        // Na tela de bancos, o miolo do painel é o painel dos bancos.
+        if let Some(b) = &saida.banco {
+            let mut filho = ui.new_child(egui::UiBuilder::new().id_salt("painel-bancos").max_rect(b.miolo).layout(egui::Layout::top_down(egui::Align::Min)));
+            filho.shrink_clip_rect(b.recorte);
+            if b.opacidade < 1.0 {
+                filho.multiply_opacity(b.opacidade);
+            }
+            self.banco.painel(&mut filho, &self.modelo.aprovacoes);
+        }
+        saida
     }
 
     /// O que foi pedido na barra lateral. Devolve se a abelha foi clicada
@@ -1890,6 +1909,12 @@ impl Colmeia {
                 ui.add_space(4.0);
             }
         }
+        self.responder_pedidos(ui.ctx(), respostas);
+        self.receber_respostas_pedido(agora);
+    }
+
+    /// Manda ao núcleo as respostas aos pedidos de consulta (numa thread).
+    fn responder_pedidos(&mut self, ctx: &egui::Context, respostas: Vec<(String, banco::aprovacao::Resposta)>) {
         for (id, resposta) in respostas {
             if let Some(estado) = self.pedidos_consulta.get_mut(&id) {
                 estado.enviando = true;
@@ -1897,7 +1922,7 @@ impl Colmeia {
                 estado.erro_senha = None;
             }
             let envio = self.respostas_pedido.0.clone();
-            let ctx = ui.ctx().clone();
+            let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let resultado = match resposta {
                     banco::aprovacao::Resposta::Aprovar { senha, guardar } => api::responder_aprovacao(&id, true, "", &senha, guardar),
@@ -1907,6 +1932,10 @@ impl Colmeia {
                 ctx.request_repaint();
             });
         }
+    }
+
+    /// O que o núcleo respondeu às respostas dos pedidos.
+    fn receber_respostas_pedido(&mut self, agora: f64) {
         while let Ok((id, resultado)) = self.respostas_pedido.1.try_recv() {
             let Some(estado) = self.pedidos_consulta.get_mut(&id) else { continue };
             estado.enviando = false;
@@ -2929,16 +2958,41 @@ impl eframe::App for Colmeia {
                     let nomes = |agente: i64| {
                         modelo.tarefas.iter().flat_map(|t| &t.agentes).find(|a| a.id == agente).map_or_else(|| "Um agente".to_string(), |a| a.nome_com_papel())
                     };
-                    acoes_banco = self.banco.mostrar(ui, &self.modelo.aprovacoes, &nomes, agora);
+                    let branch = |tarefa: i64| modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.branch.clone()).unwrap_or_default();
+                    // O retrato do pedido limpa o estado de quem já saiu da fila.
+                    self.pedidos_consulta.retain(|id, _| modelo.aprovacoes.iter().any(|a| a.id == *id));
+                    let cx = banco::Contexto {
+                        aprovacoes: &modelo.aprovacoes,
+                        estados: &mut self.pedidos_consulta,
+                        agentes: &nomes,
+                        branch: &branch,
+                        arvore_na_lateral: self.lateral.painel_visivel(ui.ctx()),
+                    };
+                    acoes_banco = self.banco.mostrar(ui, cx, agora);
                 }
                 Tela::Entrada(_) => {}
             }
         });
+        let mut respostas = Vec::new();
         for acao in acoes_banco {
             match acao {
                 banco::Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
                 banco::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
+                banco::Acao::Responder { id, resposta } => respostas.push((id, resposta)),
+                banco::Acao::Autocompletar(ligado) => {
+                    if let Some(perfil) = &mut self.perfil {
+                        perfil.autocompletar_sql = ligado;
+                        let id = perfil.id;
+                        std::thread::spawn(move || {
+                            let _ = api::definir_autocompletar_sql(id, ligado);
+                        });
+                    }
+                }
             }
+        }
+        if matches!(self.tela, Tela::Banco) {
+            self.responder_pedidos(&ctx, respostas);
+            self.receber_respostas_pedido(agora);
         }
         for acao in acoes {
             match acao {

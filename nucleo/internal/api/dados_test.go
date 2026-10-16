@@ -315,3 +315,31 @@ func TestRecolherWorkspace(t *testing.T) {
 		t.Errorf("workspace inexistente: status %d, esperado 404", status)
 	}
 }
+
+func TestAutocompletarDoConsolePorPerfil(t *testing.T) {
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Pessoal"})
+	_, perfis := pedirLista(t, srv.URL+"/v1/perfis")
+	for _, p := range perfis {
+		if p["autocompletar_sql"] != false {
+			t.Fatalf("o autocompletar começa ligado: %v", p)
+		}
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"autocompletar_sql": "sim"}); status != http.StatusBadRequest {
+		t.Errorf("valor que não é booleano: %d", status)
+	}
+	if status, r := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"autocompletar_sql": true}); status != http.StatusOK {
+		t.Fatalf("ligar: %d %v", status, r)
+	}
+	// Vale só para este perfil.
+	_, perfis = pedirLista(t, srv.URL+"/v1/perfis")
+	for _, p := range perfis {
+		if (p["id"] == float64(1)) != (p["autocompletar_sql"] == true) {
+			t.Errorf("perfil %v", p)
+		}
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/99", map[string]any{"autocompletar_sql": true}); status != http.StatusNotFound {
+		t.Errorf("perfil que não existe: %d", status)
+	}
+}

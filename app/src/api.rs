@@ -21,6 +21,9 @@ pub struct Perfil {
     /// na apresentação (desligado por padrão; um núcleo antigo não manda).
     #[serde(default)]
     pub tempo_agentes: bool,
+    /// Sugestões no console de bancos (desligado por padrão).
+    #[serde(default)]
+    pub autocompletar_sql: bool,
 }
 
 fn verdadeiro() -> bool {
@@ -954,6 +957,10 @@ pub fn definir_tema(perfil: i64, tema: &str) -> Result<(), String> {
 
 pub fn definir_aviso_captura(perfil: i64, mostrar: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "aviso_captura": mostrar }))).map(|_| ())
+}
+
+pub fn definir_autocompletar_sql(perfil: i64, ligado: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "autocompletar_sql": ligado }))).map(|_| ())
 }
 
 pub fn definir_tempo_agentes(perfil: i64, mostrar: bool) -> Result<(), String> {

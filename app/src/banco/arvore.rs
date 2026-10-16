@@ -95,6 +95,8 @@ pub struct Arvore {
     pub filtro: String,
     pub escolhido: Option<No>,
     pub focar_filtro: bool,
+    /// As conexões com pedido de agente esperando você (ponto âmbar).
+    pub pedidos: HashSet<i64>,
 }
 
 /// Uma linha já achatada, emprestando os nomes da árvore.
@@ -477,7 +479,8 @@ impl Arvore {
         let saida = egui::ScrollArea::vertical().id_salt("arvore-banco").auto_shrink(false).show_rows(ui, ALTURA_LINHA, linhas.len(), |ui, faixa| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in faixa {
-                if let Some(c) = linha(ui, &linhas[i], self.escolhido.as_ref(), &self.filtro, i) {
+                let pedido = matches!(&linhas[i], Linha::Conexao { c, .. } if self.pedidos.contains(&c.id));
+                if let Some(c) = linha(ui, &linhas[i], self.escolhido.as_ref(), &self.filtro, i, pedido) {
                     clique = Some((i, c));
                 }
             }
@@ -654,7 +657,7 @@ fn nome_com_filtro(pintor: &egui::Painter, nome: &str, filtro: &str, fonte: Font
     }
 }
 
-fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str, i: usize) -> Option<Clique> {
+fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str, i: usize, pedido: bool) -> Option<Clique> {
     let p = cores();
     let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
     let (rect, _) = ui.allocate_exact_size(vec2(largura, ALTURA_LINHA), Sense::hover());
@@ -820,6 +823,13 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
         pintor.circle_filled(pos2(direita - 4.0, rect.center().y), 3.5, p.erro);
         direita -= 16.0;
         let _ = e;
+    }
+    if pedido {
+        let centro = pos2(direita - 4.0, rect.center().y);
+        pintor.circle_filled(centro, 3.5, p.alerta);
+        ui.interact(Rect::from_center_size(centro, vec2(14.0, 14.0)), Id::new(("pedido-conexao", i)), Sense::hover())
+            .on_hover_text("Um agente quer consultar esta conexão");
+        direita -= 16.0;
     }
     // Selos e contagem terminam no mesmo x (8 px antes do fim da linha).
     for (icone, cor, dica) in selos.iter().rev() {

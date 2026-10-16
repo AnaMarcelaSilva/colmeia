@@ -1,19 +1,23 @@
-//! A tela de bancos de dados do perfil: a árvore das conexões à esquerda e o
-//! console da conexão escolhida à direita (editor em cima, resultado ou
-//! histórico embaixo). Tudo o que fala com o núcleo roda numa thread e
-//! acorda a tela quando volta: nada de consulta periódica; só a execução em
-//! andamento redesenha a cada segundo, para o contador.
+//! A tela de bancos de dados do perfil. O painel (na barra lateral, ou à
+//! esquerda do cartão com ela recolhida) tem os pedidos dos agentes
+//! esperando você e as conexões em árvore; o cartão tem o console da
+//! conexão escolhida (editor em cima, resultado ou histórico embaixo) e o
+//! pedido aberto numa gaveta. Tudo o que fala com o núcleo roda numa thread
+//! e acorda a tela quando volta: nada de consulta periódica; só a execução
+//! em andamento redesenha a cada segundo, para o contador.
 
 pub mod aprovacao;
 mod arvore;
 mod conexao;
 mod console;
+mod pedido;
 mod sql;
+mod sugestao;
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use eframe::egui::{self, CornerRadius, Key, Modifiers, Rect, RichText, Stroke, pos2, vec2};
+use eframe::egui::{self, CornerRadius, Key, Modifiers, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::api;
 use crate::registro;
@@ -21,8 +25,40 @@ use crate::tema::{self, TipoAviso, cores};
 
 /// O que a tela de bancos pede à tela principal.
 pub enum Acao {
-    AbrirTarefa { tarefa: i64, agente: i64 },
+    AbrirTarefa {
+        tarefa: i64,
+        agente: i64,
+    },
     Avisar(TipoAviso, String),
+    /// Aprovar ou recusar um pedido de consulta (a mesma resposta do painel da tarefa).
+    Responder {
+        id: String,
+        resposta: aprovacao::Resposta,
+    },
+    /// Guardar no perfil o autocompletar do console.
+    Autocompletar(bool),
+}
+
+/// O que a tela de bancos recebe da principal a cada quadro.
+pub struct Contexto<'a> {
+    /// Os pedidos dos agentes esperando você.
+    pub aprovacoes: &'a [api::Aprovacao],
+    /// O que você está fazendo em cada pedido (o mesmo estado do painel da tarefa).
+    pub estados: &'a mut HashMap<String, aprovacao::Estado>,
+    pub agentes: &'a dyn Fn(i64) -> String,
+    /// A branch de uma tarefa.
+    pub branch: &'a dyn Fn(i64) -> String,
+    /// O painel da barra lateral está à vista com as conexões: a árvore não
+    /// se repete no cartão.
+    pub arvore_na_lateral: bool,
+}
+
+/// "Rodar para mim antes": a execução do SQL de um pedido no seu console.
+struct Rodada {
+    pedido: api::Aprovacao,
+    ficha: String,
+    hora: String,
+    erro: Option<String>,
 }
 
 enum Resposta {
@@ -65,6 +101,7 @@ enum Pendente {
     },
     Previa(i64, String, String, String),
     Testar(i64),
+    RodarPedido(api::Aprovacao),
 }
 
 pub struct Bancos {
@@ -90,6 +127,15 @@ pub struct Bancos {
     limpar: Option<(i64, String, Option<String>)>,
     largura_arvore: f32,
     fracao_editor: f32,
+    /// Sugestões no console (do perfil; desligado não calcula nada).
+    pub autocompletar: bool,
+    /// O pedido aberto na gaveta.
+    pedido_aberto: Option<String>,
+    rodada: Option<Rodada>,
+    /// O histórico já pedido para a gaveta (não pede de novo a cada quadro).
+    historico_pedido: Option<i64>,
+    /// As colunas pedidas para a sugestão: ao chegarem, sugere de novo (conexão, cursor).
+    recalcular: Option<(i64, usize)>,
     envio: Sender<Resposta>,
     recebe: Receiver<Resposta>,
     acoes: Vec<Acao>,
@@ -119,6 +165,11 @@ impl Bancos {
             limpar: None,
             largura_arvore: 300.0,
             fracao_editor: 0.4,
+            autocompletar: false,
+            pedido_aberto: None,
+            rodada: None,
+            historico_pedido: None,
+            recalcular: None,
             envio,
             recebe,
             acoes: Vec::new(),
@@ -219,15 +270,36 @@ impl Bancos {
         self.pendente = Some(depois);
     }
 
-    fn executar(&mut self, ctx: &egui::Context, conexao: i64, sql: String, banco: String, confirmar: String, agora: f64) {
+    fn executar(&mut self, ctx: &egui::Context, conexao: i64, sql: String, banco: String, confirmar: String, agora: f64) -> String {
+        let limite = self.console(conexao).limite;
+        self.executar_com(ctx, conexao, sql, banco, confirmar, limite, agora)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn executar_com(&mut self, ctx: &egui::Context, conexao: i64, sql: String, banco: String, confirmar: String, limite: u32, agora: f64) -> String {
         let c = self.console(conexao);
         let ficha = c.nova_ficha(conexao);
-        let (limite, tempo_s) = (c.limite, c.tempo_s);
+        let tempo_s = c.tempo_s;
         c.executando = Some(console::Rodando { ficha: ficha.clone(), desde: agora, mais: false });
+        let devolver = ficha.clone();
         self.em_segundo_plano(ctx, move || {
             let resultado = api::executar(conexao, &api::Execucao { ficha: &ficha, sql: &sql, banco: &banco, limite, tempo_s, confirmar: &confirmar });
             Resposta::Executou { conexao, ficha, banco, resultado }
         });
+        devolver
+    }
+
+    /// "Rodar para mim antes": o SQL do pedido no seu console, com o banco e
+    /// o limite do pedido. Só leitura: se o núcleo pedir confirmação de
+    /// escrita, a Colmeia não roda (o agente nunca altera dados).
+    fn rodar_pedido(&mut self, ctx: &egui::Context, a: &api::Aprovacao, agora: f64) {
+        if self.console(a.conexao_id).executando.is_some() {
+            self.acoes.push(Acao::Avisar(TipoAviso::Neutro, format!("Já há uma consulta rodando em {}", a.conexao)));
+            return;
+        }
+        let limite = if a.limite > 0 { a.limite as u32 } else { 200 };
+        let ficha = self.executar_com(ctx, a.conexao_id, a.sql.clone(), a.banco.clone(), String::new(), limite, agora);
+        self.rodada = Some(Rodada { pedido: a.clone(), ficha, hora: String::new(), erro: None });
     }
 
     fn receber(&mut self, ctx: &egui::Context, agora: f64) {
@@ -280,13 +352,52 @@ impl Bancos {
                         Err(e) => Err(e.texto()),
                         Ok(r) => Ok(r),
                     };
+                    let colunas = matches!(pedido, arvore::Pedido::Colunas(..));
                     let mut acoes = Vec::new();
                     self.arvore.receber(pedido, resultado, &tipo, &mut acoes);
                     self.tratar_arvore(ctx, acoes, agora);
+                    // Chegaram as colunas que a sugestão pediu: sugere de novo.
+                    // Só se o cursor não saiu de onde a sugestão foi pedida.
+                    if colunas
+                        && let Some((c, cursor)) = self.recalcular
+                        && c == con
+                        && self.consoles.get(&c).is_some_and(|x| x.cursor_em_bytes(ctx) == Some(cursor))
+                    {
+                        self.sugerir(ctx, c, cursor);
+                    }
                 }
                 Resposta::Executou { conexao, ficha, banco, resultado } => {
                     let nome = self.conexao(conexao).map(|c| c.nome.clone()).unwrap_or_default();
                     let tipo = self.conexao(conexao).map(|c| c.tipo.clone()).unwrap_or_default();
+                    // A execução de "Rodar para mim antes" tem desfecho próprio.
+                    if let Some(rodada) = self.rodada.as_mut().filter(|r| r.ficha == ficha) {
+                        match &resultado {
+                            Ok(_) => {
+                                rodada.hora = crate::sistema::hora_local();
+                                rodada.erro = None;
+                            }
+                            Err(api::ErroBanco::Confirmar(_)) => {
+                                rodada.erro = Some("Essa instrução altera dados: a Colmeia não roda por você o que o agente pediu.".into())
+                            }
+                            Err(api::ErroBanco::Senha) => {}
+                            Err(e) => rodada.erro = Some(e.texto()),
+                        }
+                        let a = rodada.pedido.clone();
+                        let c = self.console(conexao);
+                        if c.executando.as_ref().is_some_and(|e| e.ficha == ficha) {
+                            c.executando = None;
+                        }
+                        match resultado {
+                            Ok(r) => {
+                                c.historico = None;
+                                c.previa_falhou = None;
+                                c.resultado_novo(r, ficha, banco, None);
+                            }
+                            Err(api::ErroBanco::Senha) => self.pedir_senha(ctx, conexao, Pendente::RodarPedido(a)),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     let c = self.console(conexao);
                     if c.executando.as_ref().is_some_and(|e| e.ficha == ficha) {
                         c.executando = None;
@@ -345,6 +456,9 @@ impl Bancos {
                     }
                 }
                 Resposta::Historico(conexao, h) => {
+                    if self.historico_pedido == Some(conexao) {
+                        self.historico_pedido = None;
+                    }
                     if let Some(c) = self.consoles.get_mut(&conexao) {
                         c.historico = Some(h);
                     }
@@ -422,6 +536,7 @@ impl Bancos {
                                 self.executar(ctx, conexao, sql, banco, confirmar, agora);
                             }
                             Some(Pendente::Previa(c, b, e, t)) => self.previa(ctx, c, b, e, t),
+                            Some(Pendente::RodarPedido(a)) => self.rodar_pedido(ctx, &a, agora),
                             Some(Pendente::Testar(c)) => self.testar(ctx, c),
                             _ => {}
                         }
@@ -509,45 +624,117 @@ impl Bancos {
         }
     }
 
-    /// A tela inteira. `aprovacoes`: os pedidos dos agentes esperando você.
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, aprovacoes: &[api::Aprovacao], nomes: &dyn Fn(i64) -> String, agora: f64) -> Vec<Acao> {
+    /// A tela inteira: o console da conexão escolhida no cartão e, com a
+    /// barra lateral recolhida, o painel à esquerda dele.
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, mut cx: Contexto, agora: f64) -> Vec<Acao> {
         let ctx = ui.ctx().clone();
         self.receber(&ctx, agora);
         if !self.carregou || std::mem::take(&mut self.reler_ao_mostrar) {
             self.recarregar(&ctx);
         }
-        let p = cores();
-        // A faixa dos pedidos de consulta.
-        if let Some(primeiro) = aprovacoes.first() {
-            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), tema::fundo_tingido(p, p.alerta, tema::claro()));
-            ui.painter().circle_filled(pos2(rect.left() + 14.0, rect.center().y), 3.5, p.alerta);
-            let n = aprovacoes.len();
-            let quem = if primeiro.agente.is_empty() { "O agente" } else { primeiro.agente.as_str() };
-            let texto = if n == 1 {
-                format!("1 pedido de consulta: {quem} quer consultar {}", primeiro.conexao)
-            } else {
-                format!("{n} pedidos de consulta: {quem} quer consultar {} e mais", primeiro.conexao)
-            };
-            ui.painter().text(pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, texto, egui::FontId::proportional(13.0), p.texto);
-            let botao = Rect::from_min_max(pos2(rect.right() - 70.0, rect.top() + 2.0), pos2(rect.right() - 6.0, rect.bottom() - 2.0));
-            if ui.put(botao, |ui: &mut egui::Ui| tema::botao_secundario(ui, "Ver")).clicked() {
-                self.acoes.push(Acao::AbrirTarefa { tarefa: primeiro.tarefa_id, agente: primeiro.agente_id });
-            }
-            ui.add_space(8.0);
+        // O pedido aberto que foi respondido, expirou ou foi cancelado sai da tela.
+        if self.pedido_aberto.as_ref().is_some_and(|id| !cx.aprovacoes.iter().any(|a| a.id == *id)) {
+            self.pedido_aberto = None;
         }
+        let p = cores();
+        let cartao = ui.available_rect_before_wrap();
         if self.carregou && self.conexoes.is_empty() {
             self.vazio(ui);
         } else if let Some(e) = &self.erro_lista {
             ui.label(RichText::new(format!("Não consegui ler as conexões: {e}")).color(p.erro));
         } else {
-            self.corpo(ui, nomes, agora);
+            self.corpo(ui, &cx, agora);
         }
+        self.gaveta(&ctx, cartao, &mut cx, agora);
         self.dialogos(&ctx, agora);
         if self.consoles.values().any(|c| c.executando.is_some()) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         std::mem::take(&mut self.acoes)
+    }
+
+    /// O painel: os pedidos esperando você no topo e as conexões em árvore,
+    /// com o filtro. Vai na barra lateral (ou à esquerda do cartão).
+    pub fn painel(&mut self, ui: &mut egui::Ui, aprovacoes: &[api::Aprovacao]) {
+        let ctx = ui.ctx().clone();
+        let p = cores();
+        if !aprovacoes.is_empty() {
+            rotulo(ui, "ESPERANDO VOCÊ", Some(aprovacoes.len()));
+            ui.add_space(4.0);
+            for a in aprovacoes.iter().take(4) {
+                let ativo = self.pedido_aberto.as_deref() == Some(a.id.as_str());
+                if cartao_esperando(ui, a, ativo).clicked() {
+                    self.abrir_pedido(&ctx, a);
+                }
+                ui.add_space(5.0);
+            }
+            if aprovacoes.len() > 4 {
+                ui.label(RichText::new(format!("e mais {} na barra das tarefas", aprovacoes.len() - 4)).color(p.suave).size(12.0));
+            }
+            ui.add_space(6.0);
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().hline(r.x_range().shrink(6.0), r.center().y, Stroke::new(1.0, p.borda));
+            ui.add_space(8.0);
+        }
+        let largura = ui.available_width();
+        let (linha, _) = ui.allocate_exact_size(vec2(largura, 24.0), Sense::hover());
+        ui.painter().text(linha.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "CONEXÕES", tema::forte(10.5), p.suave);
+        let mais = Rect::from_center_size(pos2(linha.right() - 18.0, linha.center().y), vec2(22.0, 22.0));
+        if tema::botao_icone_em(ui, mais, egui::Id::new("nova-conexao-painel"), tema::Icone::MaisZoom).on_hover_text("Nova conexão").clicked() {
+            self.nova_conexao("postgres");
+        }
+        ui.add_space(4.0);
+        self.arvore.pedidos = aprovacoes.iter().map(|a| a.conexao_id).collect();
+        let acoes = self.arvore.mostrar(ui, &self.conexoes);
+        self.tratar_arvore(&ctx, acoes, 0.0);
+    }
+
+    fn abrir_pedido(&mut self, ctx: &egui::Context, a: &api::Aprovacao) {
+        self.pedido_aberto = Some(a.id.clone());
+        self.escolhida = Some(a.conexao_id);
+        self.arvore.escolhido = Some(arvore::No::Conexao(a.conexao_id));
+        self.console(a.conexao_id).sugestoes = None;
+        // O teclado sai do editor: o que se digita vai para a gaveta.
+        ctx.memory_mut(|m| m.surrender_focus(console::id_editor()));
+    }
+
+    /// A gaveta do pedido aberto, por cima do cartão.
+    fn gaveta(&mut self, ctx: &egui::Context, cartao: Rect, cx: &mut Contexto, agora: f64) {
+        let Some(id) = self.pedido_aberto.clone() else { return };
+        let Some(a) = cx.aprovacoes.iter().find(|a| a.id == id) else { return };
+        let con = a.conexao_id;
+        // "Antes, nesta conexão" sai do histórico da conexão (pedido uma vez).
+        if self.console(con).historico.is_none() && self.historico_pedido != Some(con) {
+            self.historico_pedido = Some(con);
+            self.ler_historico(ctx, con);
+        }
+        let c = &self.consoles[&con];
+        let rodada = self.rodada.as_ref().filter(|r| r.pedido.id == id);
+        let rodando = rodada.is_some_and(|r| c.executando.as_ref().is_some_and(|e| e.ficha == r.ficha));
+        let vista_rodada = rodada.and_then(|r| match (&r.erro, &c.painel) {
+            (Some(e), _) => Some(pedido::Rodada::Erro(e.as_str())),
+            (None, console::Painel::Resultado { r: res, ficha, .. }) if *ficha == r.ficha => Some(pedido::Rodada::Resultado { r: res, hora: &r.hora }),
+            _ => None,
+        });
+        let antes = match &c.historico {
+            Some(Ok(h)) => Some(h.iter().filter(|x| x.origem == "agente" && x.agente_id == a.agente_id).take(5).collect()),
+            Some(Err(_)) => Some(Vec::new()),
+            None => None,
+        };
+        let branch = (cx.branch)(a.tarefa_id);
+        let vista = pedido::Vista { a, branch: &branch, chaveiro: self.chaveiro, rodada: vista_rodada, rodando, antes };
+        let estado = cx.estados.entry(id.clone()).or_insert_with(aprovacao::Estado::novo);
+        let resposta = pedido::gaveta(ctx, cartao, &vista, estado);
+        match resposta {
+            None => {}
+            Some(pedido::Pedido::Fechar) => self.pedido_aberto = None,
+            Some(pedido::Pedido::AbrirTarefa) => self.acoes.push(Acao::AbrirTarefa { tarefa: a.tarefa_id, agente: a.agente_id }),
+            Some(pedido::Pedido::Rodar) => {
+                let a = a.clone();
+                self.rodar_pedido(ctx, &a, agora);
+            }
+            Some(pedido::Pedido::Responder(resposta)) => self.acoes.push(Acao::Responder { id, resposta }),
+        }
     }
 
     /// Estado vazio: os quatro tipos em ladrilhos.
@@ -577,29 +764,32 @@ impl Bancos {
         });
     }
 
-    fn corpo(&mut self, ui: &mut egui::Ui, nomes: &dyn Fn(i64) -> String, agora: f64) {
+    fn corpo(&mut self, ui: &mut egui::Ui, cx: &Contexto, agora: f64) {
         let p = cores();
         let ctx = ui.ctx().clone();
         let area = ui.available_rect_before_wrap();
-        let maxima = (area.width() * 0.45).max(220.0);
-        self.largura_arvore = self.largura_arvore.clamp(220.0, maxima);
-        let r_arvore = Rect::from_min_size(area.min, vec2(self.largura_arvore, area.height()));
-        let r_divisa = Rect::from_min_size(pos2(r_arvore.right(), area.top()), vec2(8.0, area.height()));
-        let r_console = Rect::from_min_max(pos2(r_divisa.right(), area.top()), area.max);
+        let r_console = if cx.arvore_na_lateral {
+            area
+        } else {
+            // A barra lateral recolhida: o painel fica à esquerda do console.
+            let maxima = (area.width() * 0.45).max(220.0);
+            self.largura_arvore = self.largura_arvore.clamp(220.0, maxima);
+            let r_arvore = Rect::from_min_size(area.min, vec2(self.largura_arvore, area.height()));
+            let r_divisa = Rect::from_min_size(pos2(r_arvore.right(), area.top()), vec2(8.0, area.height()));
+            ui.painter().rect_filled(r_arvore, CornerRadius::same(tema::RAIO_SUPERFICIE), p.superficie);
+            let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(r_arvore.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+            self.painel(&mut filho, cx.aprovacoes);
+            self.largura_arvore += tema::divisoria(ui, r_divisa, egui::Id::new("divisa-arvore"), true);
+            Rect::from_min_max(pos2(r_divisa.right() + 6.0, area.top()), area.max)
+        };
         // Ctrl+F: o filtro da árvore (fora do editor).
         let editor_com_foco = ctx.memory(|m| m.has_focus(console::id_editor()));
         if !editor_com_foco && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.arvore.focar_filtro = true;
         }
-        // A árvore.
-        ui.painter().rect_filled(r_arvore, CornerRadius::same(tema::RAIO_SUPERFICIE), p.superficie);
-        let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(r_arvore.shrink(8.0)));
-        let acoes = self.arvore.mostrar(&mut filho, &self.conexoes);
-        self.tratar_arvore(&ctx, acoes, agora);
-        self.largura_arvore += tema::divisoria(ui, r_divisa, egui::Id::new("divisa-arvore"), true);
         // O console da conexão escolhida.
         let Some(id) = self.escolhida.filter(|e| self.conexoes.iter().any(|c| c.id == *e)) else {
-            ui.painter().text(r_console.center(), egui::Align2::CENTER_CENTER, "Escolha uma conexão na árvore.", egui::FontId::proportional(13.0), p.suave);
+            ui.painter().text(r_console.center(), egui::Align2::CENTER_CENTER, "Escolha uma conexão no painel.", egui::FontId::proportional(13.0), p.suave);
             return;
         };
         let conexao = self.conexao(id).cloned().unwrap_or_default();
@@ -608,24 +798,38 @@ impl Bancos {
             _ => Vec::new(),
         };
         let mut acoes = Vec::new();
-        let barra = Rect::from_min_size(r_console.min, vec2(r_console.width(), 34.0));
-        let resto = Rect::from_min_max(pos2(r_console.left(), barra.bottom() + 8.0), r_console.max);
+        let cab = Rect::from_min_size(r_console.min, vec2(r_console.width(), 40.0));
+        self.cabecalho_conexao(ui, cab, &conexao, &ctx);
+        let mut y = cab.bottom() + 12.0;
+        // O pedido de um agente nesta conexão: a faixa abre a gaveta.
+        let desta: Vec<&api::Aprovacao> = cx.aprovacoes.iter().filter(|a| a.conexao_id == id).collect();
+        if let Some(a) = desta.first() {
+            let faixa = Rect::from_min_size(pos2(r_console.left(), y), vec2(r_console.width(), 40.0));
+            if faixa_do_pedido(ui, faixa, a, desta.len()) {
+                let a = (*a).clone();
+                self.abrir_pedido(&ctx, &a);
+            }
+            y = faixa.bottom() + 10.0;
+        }
+        let barra = Rect::from_min_size(pos2(r_console.left(), y), vec2(r_console.width(), 34.0));
+        let resto = Rect::from_min_max(pos2(r_console.left(), barra.bottom() + 10.0), r_console.max);
         let altura_editor = ((resto.height() - 8.0) * self.fracao_editor).clamp(120.0, (resto.height() - 8.0 - 160.0).max(120.0));
         let r_editor = Rect::from_min_size(resto.min, vec2(resto.width(), altura_editor));
         let r_divisa2 = Rect::from_min_size(pos2(resto.left(), r_editor.bottom()), vec2(resto.width(), 8.0));
         let r_painel = Rect::from_min_max(pos2(resto.left(), r_divisa2.bottom()), resto.max);
+        let autocompletar = self.autocompletar;
         {
             let c = self.console(id);
             let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(barra));
-            c.barra(&mut filho, &conexao, &bancos, agora, &mut acoes);
-            c.editor(ui, r_editor, &conexao.tipo, agora, &mut acoes);
+            c.barra(&mut filho, &conexao, &bancos, autocompletar, agora, &mut acoes);
+            c.editor(ui, r_editor, &conexao.tipo, autocompletar, agora, &mut acoes);
         }
         let d = tema::divisoria(ui, r_divisa2, egui::Id::new("divisa-editor"), false);
         if d != 0.0 && resto.height() > 0.0 {
             self.fracao_editor = ((altura_editor + d) / (resto.height() - 8.0)).clamp(0.15, 0.85);
         }
         let padrao = conexao.banco.clone();
-        self.console(id).painel(ui, r_painel, &conexao.tipo, &padrao, nomes, &mut acoes);
+        self.console(id).painel(ui, r_painel, &conexao.tipo, &padrao, cx.agentes, &mut acoes);
         for a in acoes {
             match a {
                 console::Acao::Executar => {
@@ -633,6 +837,7 @@ impl Bancos {
                     if c.executando.is_some() {
                         continue;
                     }
+                    c.sugestoes = None;
                     match c.trecho(&ctx, &conexao.tipo) {
                         Ok((faixa, sql)) => {
                             c.marcado = Some((faixa, agora + 0.6));
@@ -684,8 +889,145 @@ impl Bancos {
                 console::Acao::LerHistorico => self.ler_historico(&ctx, id),
                 console::Acao::LimparHistorico => self.limpar = Some((id, conexao.nome.clone(), None)),
                 console::Acao::Avisar(t) => self.acoes.push(Acao::Avisar(TipoAviso::Neutro, t)),
+                console::Acao::Sugerir(cursor) => self.sugerir(&ctx, id, cursor),
+                console::Acao::Autocompletar(ligado) => {
+                    self.autocompletar = ligado;
+                    self.acoes.push(Acao::Autocompletar(ligado));
+                }
             }
         }
+        if self.autocompletar {
+            self.console(id).popup(&ctx);
+        }
+    }
+
+    /// O nome da conexão em destaque, o tipo e onde ela aponta; à direita,
+    /// Testar e Editar.
+    fn cabecalho_conexao(&mut self, ui: &mut egui::Ui, rect: Rect, c: &api::ConexaoBanco, ctx: &egui::Context) {
+        let p = cores();
+        let selo = Rect::from_min_size(pos2(rect.left(), rect.center().y - 17.0), vec2(34.0, 34.0));
+        ui.painter().rect_filled(selo, CornerRadius::same(10), tema::fundo_tingido(p, p.destaque, tema::claro()));
+        tema::desenhar_icone(ui.painter(), selo.center(), tema::Icone::Banco, p.destaque);
+        let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        filho.spacing_mut().item_spacing.x = 8.0;
+        if tema::botao_secundario(&mut filho, "Editar conexão").clicked() {
+            self.dialogo = Some(conexao::Dialogo::editar(c));
+        }
+        if tema::botao_secundario(&mut filho, "Testar").on_hover_text("Conecta e diz quanto demorou e se usou TLS").clicked() {
+            self.testar(ctx, c.id);
+        }
+        let direita = filho.min_rect().left() - 12.0;
+        let x = selo.right() + 12.0;
+        let nome = tema::cortar(ui.painter(), &c.nome, egui::TextFormat::simple(tema::forte(19.0), p.texto), (direita - x - 80.0).max(60.0), 1, true);
+        let y = rect.center().y - (nome.size().y + 16.0) / 2.0;
+        ui.painter().galley(pos2(x, y), nome.clone(), p.texto);
+        let sigla = tema::etiqueta(
+            ui.painter(),
+            pos2(x + nome.size().x + 8.0, y + nome.size().y / 2.0 - 9.5),
+            console::sigla_do_tipo(&c.tipo),
+            tema::fonte_etiqueta(),
+            p.suave,
+        );
+        ui.interact(sigla, egui::Id::new(("sigla-conexao", c.id)), Sense::hover()).on_hover_text(console::nome_do_tipo(&c.tipo));
+        let mut partes = Vec::new();
+        if let Some(e) = self.arvore.erros.get(&c.id) {
+            partes.push(e.clone());
+        } else if c.tipo == "sqlite" {
+            partes.push(c.arquivo.clone());
+        } else {
+            partes.push(format!("{}:{}", c.host, c.porta));
+            if !c.banco.is_empty() {
+                partes.push(format!("banco {}", c.banco));
+            }
+        }
+        if c.agentes {
+            partes.push("agentes podem pedir consultas".into());
+        }
+        let erro = self.arvore.erros.contains_key(&c.id);
+        let mut x_sub = x;
+        if erro {
+            ui.painter().circle_filled(pos2(x + 3.0, y + nome.size().y + 9.0), 3.0, p.erro);
+            x_sub += 12.0;
+        }
+        let sub = tema::cortar(
+            ui.painter(),
+            &partes.join(" · "),
+            egui::TextFormat::simple(egui::FontId::proportional(12.0), p.suave),
+            (direita - x_sub).max(60.0),
+            1,
+            true,
+        );
+        ui.painter().galley(pos2(x_sub, y + nome.size().y + 2.0), sub, p.suave);
+    }
+
+    /// Sugere para o cursor (em bytes) com o que a árvore já carregou; pede
+    /// as colunas que faltam pela rota da árvore (e sugere de novo ao chegarem).
+    fn sugerir(&mut self, ctx: &egui::Context, id: i64, cursor: usize) {
+        self.recalcular = None;
+        let Some(conexao) = self.conexao(id).cloned() else { return };
+        let Some(c) = self.consoles.get(&id) else { return };
+        let banco = if c.banco.is_empty() { conexao.banco.clone() } else { c.banco.clone() };
+        let catalogo = self.catalogo(id, &conexao.tipo, &banco);
+        let Some(analise) = sugestao::analisar(&conexao.tipo, &c.texto, cursor) else {
+            self.console(id).sugestoes = None;
+            return;
+        };
+        let mut pediu = false;
+        for (esquema, tabela) in sugestao::colunas_que_faltam(&analise, &catalogo) {
+            let achada = self.arvore.objetos.iter().find_map(|((c, b, e), carga)| match carga {
+                arvore::Carga::Pronta(o) if *c == id && *e == esquema && o.tabelas.iter().chain(&o.views).any(|t| *t == tabela) => Some(b.clone()),
+                _ => None,
+            });
+            if let Some(b) = achada {
+                let chave = (id, b.clone(), esquema.clone(), tabela.clone());
+                if let std::collections::hash_map::Entry::Vacant(v) = self.arvore.colunas.entry(chave) {
+                    v.insert(arvore::Carga::Carregando);
+                    self.pedir_arvore(ctx, arvore::Pedido::Colunas(id, b, esquema, tabela));
+                    pediu = true;
+                }
+            }
+        }
+        let itens = sugestao::sugerir(&conexao.tipo, &analise, &catalogo);
+        let c = self.console(id);
+        let ancora = c.ancora_cursor.unwrap_or_default();
+        c.sugestoes = (!itens.is_empty()).then_some(console::Popup { itens, escolhido: 0, inicio: analise.inicio, cursor, ancora, rect: Rect::NOTHING });
+        if pediu {
+            self.recalcular = Some((id, cursor));
+        }
+        ctx.request_repaint();
+    }
+
+    /// Os nomes que a árvore já carregou da conexão, no banco do console.
+    fn catalogo(&self, id: i64, tipo: &str, banco: &str) -> sugestao::Catalogo {
+        let mut cat = sugestao::Catalogo::default();
+        let do_banco = |b: &str| tipo == "sqlite" || banco.is_empty() || b == banco;
+        for ((c, b), carga) in &self.arvore.esquemas {
+            if *c == id
+                && do_banco(b)
+                && let arvore::Carga::Pronta(nomes) = carga
+            {
+                cat.esquemas.extend(nomes.iter().cloned());
+            }
+        }
+        for ((c, b, e), carga) in &self.arvore.objetos {
+            if *c == id
+                && do_banco(b)
+                && let arvore::Carga::Pronta(o) = carga
+            {
+                cat.tabelas.extend(o.tabelas.iter().chain(&o.views).map(|t| (e.clone(), t.clone())));
+            }
+        }
+        for ((c, b, _, t), carga) in &self.arvore.colunas {
+            if *c == id
+                && do_banco(b)
+                && let arvore::Carga::Pronta(cs) = carga
+            {
+                cat.colunas.insert(t.to_lowercase(), cs.iter().map(|x| (x.nome.clone(), arvore::tipo_curto(&x.tipo))).collect());
+            }
+        }
+        cat.esquemas.sort();
+        cat.esquemas.dedup();
+        cat
     }
 
     fn dialogos(&mut self, ctx: &egui::Context, agora: f64) {
@@ -796,19 +1138,82 @@ fn mudou_o_destino(velha: &api::ConexaoBanco, nova: &api::ConexaoBanco) -> bool 
     velha.banco != nova.banco || velha.host != nova.host || velha.porta != nova.porta || velha.usuario != nova.usuario || velha.arquivo != nova.arquivo
 }
 
+/// O rótulo de uma seção do painel ("ESPERANDO VOCÊ"), com a contagem.
+fn rotulo(ui: &mut egui::Ui, texto: &str, n: Option<usize>) {
+    let p = cores();
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    ui.painter().text(r.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, texto, tema::forte(10.5), p.suave);
+    if let Some(n) = n {
+        let g = ui.painter().layout_no_wrap(n.to_string(), tema::forte(11.0), tema::sobre_destaque());
+        let selo =
+            Rect::from_center_size(pos2(r.right() - 10.0 - (g.size().x + 10.0).max(18.0) / 2.0, r.center().y), vec2((g.size().x + 10.0).max(18.0), 18.0));
+        ui.painter().rect_filled(selo, CornerRadius::same(9), p.alerta);
+        ui.painter().galley(selo.center() - g.size() / 2.0, g, tema::sobre_destaque());
+    }
+}
+
+/// Um pedido esperando você no painel: quem, o que e em que tarefa.
+fn cartao_esperando(ui: &mut egui::Ui, a: &api::Aprovacao, ativo: bool) -> egui::Response {
+    let p = cores();
+    let largura = ui.available_width() - 4.0;
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 64.0), Sense::click());
+    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let forte_ = tema::transicao(ui, resposta.id.with("mouse"), ativo || resposta.hovered());
+    let base = tema::fundo_tingido(p, p.alerta, tema::claro());
+    let fundo = tema::misturar(p.superficie, base, 0.55 + 0.45 * forte_);
+    ui.painter().rect(rect, CornerRadius::same(12), fundo, Stroke::new(1.0, p.alerta.gamma_multiply(0.3 + 0.4 * forte_)), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(Rect::from_min_size(rect.min + vec2(6.0, 10.0), vec2(3.0, rect.height() - 20.0)), CornerRadius::same(2), p.alerta);
+    let x = rect.left() + 16.0;
+    let largura_texto = rect.right() - 10.0 - x;
+    let quem = if a.agente.is_empty() { "Um agente" } else { a.agente.as_str() };
+    let prazo = if a.expira_hora.is_empty() { String::new() } else { format!("até {}", a.expira_hora) };
+    let g_prazo = ui.painter().layout_no_wrap(prazo, tema::forte(11.5), p.alerta);
+    ui.painter().galley(pos2(rect.right() - 10.0 - g_prazo.size().x, rect.top() + 9.0), g_prazo.clone(), p.alerta);
+    let g = tema::cortar(ui.painter(), quem, egui::TextFormat::simple(tema::forte(13.0), p.texto), largura_texto - g_prazo.size().x - 8.0, 1, true);
+    ui.painter().galley(pos2(x, rect.top() + 8.0), g, p.texto);
+    let senha = if a.precisa_senha { " · pede a senha" } else { "" };
+    let o_que = format!("quer consultar {}{senha}", a.conexao);
+    let g = tema::cortar(ui.painter(), &o_que, egui::TextFormat::simple(egui::FontId::proportional(12.5), p.suave), largura_texto, 1, true);
+    ui.painter().galley(pos2(x, rect.top() + 27.0), g, p.suave);
+    let g = tema::cortar(ui.painter(), &a.tarefa, egui::TextFormat::simple(egui::FontId::proportional(11.5), p.suave), largura_texto, 1, true);
+    ui.painter().galley(pos2(x, rect.top() + 44.0), g, p.suave);
+    resposta.on_hover_text("Abrir o pedido")
+}
+
+/// A faixa do pedido no topo do console: clicar abre a gaveta.
+fn faixa_do_pedido(ui: &mut egui::Ui, rect: Rect, a: &api::Aprovacao, n: usize) -> bool {
+    let p = cores();
+    let resposta = ui.interact(rect, egui::Id::new(("faixa-pedido", &a.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let t = tema::transicao(ui, resposta.id.with("mouse"), resposta.hovered());
+    let fundo = tema::misturar(tema::fundo_tingido(p, p.alerta, tema::claro()), p.alerta, 0.05 + 0.05 * t);
+    ui.painter().rect(rect, CornerRadius::same(14), fundo, Stroke::new(1.0, p.alerta.gamma_multiply(0.45)), egui::StrokeKind::Inside);
+    ui.painter().circle_filled(pos2(rect.left() + 18.0, rect.center().y), 4.0, p.alerta);
+    let botao = Rect::from_min_size(pos2(rect.right() - 6.0 - 104.0, rect.top() + 6.0), vec2(104.0, rect.height() - 12.0));
+    let clicou_botao = ui.put(botao, |ui: &mut egui::Ui| tema::botao_secundario(ui, "Ver pedido")).clicked();
+    let prazo = if a.expira_hora.is_empty() { String::new() } else { format!("expira às {}", a.expira_hora) };
+    let g_prazo = ui.painter().layout_no_wrap(prazo, tema::forte(12.5), p.alerta);
+    let x_prazo = botao.left() - 12.0 - g_prazo.size().x;
+    ui.painter().galley(pos2(x_prazo, rect.center().y - g_prazo.size().y / 2.0), g_prazo, p.alerta);
+    let quem = if a.agente.is_empty() { "Um agente" } else { a.agente.as_str() };
+    let mais = if n > 1 { format!(" (e mais {})", n - 1) } else { String::new() };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(quem, 0.0, egui::TextFormat::simple(tema::forte(13.0), p.texto));
+    job.append(&format!(" quer consultar esta conexão{mais}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(13.0), p.texto));
+    if !a.tarefa.is_empty() {
+        job.append(&format!(" · {}", a.tarefa), 0.0, egui::TextFormat::simple(egui::FontId::proportional(13.0), p.suave));
+    }
+    job.wrap =
+        egui::text::TextWrapping { max_width: (x_prazo - rect.left() - 44.0).max(40.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, p.texto);
+    resposta.clicked() || clicou_botao
+}
+
 /// "Gerar SELECT": o nome qualificado só quando precisa.
 fn sql_gerado(tipo: &str, esquema: &str, objeto: &str, limite: u32) -> String {
-    let simples =
-        |n: &str| !n.is_empty() && !n.starts_with(|c: char| c.is_ascii_digit()) && n.chars().all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
-    let citar = |n: &str| match tipo {
-        "mysql" => format!("`{}`", n.replace('`', "``")),
-        "sqlserver" => format!("[{}]", n.replace(']', "]]")),
-        _ => format!("\"{}\"", n.replace('"', "\"\"")),
-    };
-    let nome = |n: &str| if simples(n) { n.to_string() } else { citar(n) };
-    let mut alvo = nome(objeto);
+    let mut alvo = sugestao::nome_sql(tipo, objeto);
     if !esquema.is_empty() && tipo != "mysql" && tipo != "sqlite" {
-        alvo = format!("{}.{alvo}", nome(esquema));
+        alvo = format!("{}.{alvo}", sugestao::nome_sql(tipo, esquema));
     }
     if tipo == "sqlserver" { format!("SELECT TOP {limite} * FROM {alvo};") } else { format!("SELECT * FROM {alvo} LIMIT {limite};") }
 }

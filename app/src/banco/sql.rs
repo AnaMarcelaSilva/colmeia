@@ -227,7 +227,7 @@ pub fn caractere_do_byte(texto: &str, byte: usize) -> usize {
     texto[..byte.min(texto.len())].chars().count()
 }
 
-const PALAVRAS_CHAVE: &[&str] = &[
+pub const PALAVRAS_CHAVE: &[&str] = &[
     "ADD",
     "ALL",
     "ALTER",
@@ -324,7 +324,7 @@ const PALAVRAS_CHAVE: &[&str] = &[
     "WITH",
 ];
 
-fn palavra_chave(palavra: &str) -> bool {
+pub fn palavra_chave(palavra: &str) -> bool {
     palavra.len() <= 17 && PALAVRAS_CHAVE.binary_search(&palavra.to_ascii_uppercase().as_str()).is_ok()
 }
 

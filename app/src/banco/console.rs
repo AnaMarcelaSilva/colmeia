@@ -9,14 +9,16 @@ use std::sync::Arc;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Key, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 
 use super::sql;
+use super::sugestao::{self, Especie, Sugestao};
 use crate::api;
 use crate::registro;
 use crate::tema::{self, Icone, Pilula, cores, forte};
 
 pub const LIMITES: [u32; 4] = [100, 500, 1000, 5000];
 pub const TEMPOS: [u32; 5] = [10, 30, 60, 300, 600];
-const ALTURA_LINHA_GRADE: f32 = 24.0;
-const CABECALHO_GRADE: f32 = 30.0;
+const ALTURA_LINHA_GRADE: f32 = 28.0;
+const CABECALHO_GRADE: f32 = 40.0;
+const LINHA_SUGESTAO: f32 = 26.0;
 const LINHA_EDITOR: f32 = 18.0;
 
 pub fn texto_tempo(s: u32) -> String {
@@ -37,6 +39,22 @@ pub enum Acao {
     LimparHistorico,
     /// "A seleção tem 3 instruções" e afins: um aviso só no painel.
     Avisar(String),
+    /// O texto mudou com o autocompletar ligado: sugerir para o cursor (em bytes).
+    Sugerir(usize),
+    /// Ligar ou desligar o autocompletar (fica no perfil).
+    Autocompletar(bool),
+}
+
+/// O popup de sugestões aberto no editor.
+pub struct Popup {
+    pub itens: Vec<Sugestao>,
+    pub escolhido: usize,
+    /// A palavra trocada vai de `inicio` ao `cursor` (em bytes).
+    pub inicio: usize,
+    pub cursor: usize,
+    pub ancora: egui::Pos2,
+    /// Onde o popup ficou no último quadro (clicar nele não o fecha).
+    pub rect: Rect,
 }
 
 /// O que está no painel de baixo.
@@ -99,6 +117,11 @@ pub struct Console {
     contador: u64,
     /// O erro no painel veio da prévia desta tabela (banco, esquema, tabela).
     pub previa_falhou: Option<(String, String, String)>,
+    /// A hora do resultado ("14:41").
+    hora: String,
+    pub sugestoes: Option<Popup>,
+    /// Onde o cursor estava na última mudança do texto (o popup abre embaixo).
+    pub ancora_cursor: Option<egui::Pos2>,
 }
 
 impl Console {
@@ -123,6 +146,9 @@ impl Console {
             cache: None,
             contador: 0,
             previa_falhou: None,
+            hora: String::new(),
+            sugestoes: None,
+            ancora_cursor: None,
         }
     }
 
@@ -152,6 +178,7 @@ impl Console {
         self.selecao = Selecao::Nenhuma;
         self.celula_aberta = None;
         self.aba_historico = false;
+        self.hora = crate::sistema::hora_local();
         self.painel = Painel::Resultado { r, ficha, banco, previa, fechada: false };
     }
 
@@ -164,54 +191,14 @@ impl Console {
         }
     }
 
-    /// A barra do console. Devolve as ações.
-    #[allow(clippy::too_many_arguments)]
-    pub fn barra(&mut self, ui: &mut egui::Ui, conexao: &api::ConexaoBanco, bancos: &[String], agora: f64, acoes: &mut Vec<Acao>) {
+    /// A barra do console: o banco, o limite e o tempo, o modo da conexão e
+    /// o autocompletar à esquerda; Executar (ou Cancelar) à direita.
+    pub fn barra(&mut self, ui: &mut egui::Ui, conexao: &api::ConexaoBanco, bancos: &[String], autocompletar: bool, agora: f64, acoes: &mut Vec<Acao>) {
         let p = cores();
-        let estreita = ui.available_width() < 820.0;
+        let estreita = ui.available_width() < 760.0;
         ui.horizontal(|ui| {
             ui.set_height(34.0);
             ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(r) = &self.executando {
-                if tema::botao_alerta(ui, "Cancelar").clicked() {
-                    acoes.push(Acao::Cancelar);
-                }
-                if !estreita {
-                    tema::tecla(ui, "Esc");
-                }
-                let s = (agora - r.desde).max(0.0) as u64;
-                ui.label(RichText::new(format!("Executando · {s} s")).color(p.suave).size(13.0));
-            } else {
-                let pode = !self.texto.trim().is_empty();
-                if tema::botao_principal(ui, "Executar", pode).clicked() {
-                    acoes.push(Acao::Executar);
-                }
-                if !estreita {
-                    tema::tecla(ui, "Ctrl+Enter");
-                }
-            }
-            ui.add_space(4.0);
-            // A conexão (onde o Ctrl+Enter vai rodar): o tipo, o nome e o selo
-            // Só leitura/Escrita ao lado. Dois "loja" em servidores diferentes
-            // não se confundem.
-            tema::etiqueta_ui(ui, sigla_do_tipo(&conexao.tipo), tema::fonte_etiqueta(), p.suave).on_hover_text(nome_do_tipo(&conexao.tipo));
-            let g = tema::cortar(ui.painter(), &conexao.nome, egui::TextFormat::simple(forte(13.0), p.texto), if estreita { 120.0 } else { 220.0 }, 1, true);
-            let (r, resposta) = ui.allocate_exact_size(g.size(), Sense::hover());
-            ui.painter().galley(r.min, g, p.texto);
-            resposta.on_hover_text(format!("Conexão {}", conexao.nome));
-            let pilula = if conexao.escrita {
-                Pilula { texto: "Escrita", cor: p.alerta, cheio: true, ponto: true, grande: false }
-            } else {
-                Pilula::neutra("Só leitura")
-            };
-            let largura = pilula.largura(ui.painter());
-            let (r, resposta) = ui.allocate_exact_size(vec2(largura, 22.0), Sense::hover());
-            pilula.pintar(ui.painter(), r.min);
-            resposta.on_hover_text(if conexao.escrita {
-                "Alterações permitidas: cada uma pede confirmação"
-            } else {
-                "Só leitura: alterações são recusadas pelo núcleo"
-            });
             if conexao.tipo != "sqlite" {
                 let valor = if self.banco.is_empty() { if conexao.banco.is_empty() { "padrão" } else { conexao.banco.as_str() } } else { self.banco.as_str() };
                 let resposta = tema::chip(ui, "Banco", valor, false);
@@ -231,28 +218,70 @@ impl Console {
                     });
                 });
             }
+            if estreita {
+                let valor = format!("{} · {}", self.limite, texto_tempo(self.tempo_s));
+                let resposta = tema::chip(ui, "Opções", &valor, self.limite != 500 || self.tempo_s != 30);
+                egui::Popup::menu(&resposta).show(|ui| {
+                    ui.set_min_width(200.0);
+                    self.opcoes_limite(ui);
+                    ui.separator();
+                    self.opcoes_tempo(ui);
+                });
+            } else {
+                let resposta = tema::chip(ui, "Limite", &format!("{} linhas", self.limite), self.limite != 500);
+                egui::Popup::menu(&resposta).show(|ui| {
+                    ui.set_min_width(180.0);
+                    self.opcoes_limite(ui);
+                });
+                let resposta = tema::chip(ui, "Tempo", &texto_tempo(self.tempo_s), self.tempo_s != 30);
+                egui::Popup::menu(&resposta).show(|ui| {
+                    ui.set_min_width(180.0);
+                    self.opcoes_tempo(ui);
+                });
+            }
+            let (r, _) = ui.allocate_exact_size(vec2(9.0, 20.0), Sense::hover());
+            ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, p.borda));
+            // O modo vem da conexão (muda só em Editar conexão, com as confirmações de lá).
+            let pilula = if conexao.escrita {
+                Pilula { texto: "Escrita", cor: p.alerta, cheio: true, ponto: true, grande: false }
+            } else {
+                Pilula::neutra("Só leitura")
+            };
+            let largura = pilula.largura(ui.painter());
+            let (r, resposta) = ui.allocate_exact_size(vec2(largura, 22.0), Sense::hover());
+            pilula.pintar(ui.painter(), r.min);
+            resposta.on_hover_text(if conexao.escrita {
+                "Alterações permitidas: cada uma pede confirmação. Muda em Editar conexão."
+            } else {
+                "Só leitura: alterações são recusadas pelo núcleo. Muda em Editar conexão."
+            });
+            let dica = if autocompletar {
+                "Sugere palavras do SQL e os nomes já abertos na árvore (Tab ou Enter aceita, Esc fecha, Ctrl+Espaço chama). Fica no perfil."
+            } else {
+                "Desligado: nenhuma sugestão é calculada. Ligar sugere palavras do SQL e os nomes já abertos na árvore, sem IA. Fica no perfil."
+            };
+            if tema::chip_alternar(ui, "Autocompletar", autocompletar).on_hover_text(dica).clicked() {
+                acoes.push(Acao::Autocompletar(!autocompletar));
+                self.sugestoes = None;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let padrao = self.limite == 500 && self.tempo_s == 30;
-                if estreita {
-                    let valor = format!("{} · {}", self.limite, texto_tempo(self.tempo_s));
-                    let resposta = tema::chip(ui, "Opções", &valor, !padrao);
-                    egui::Popup::menu(&resposta).show(|ui| {
-                        ui.set_min_width(200.0);
-                        self.opcoes_limite(ui);
-                        ui.separator();
-                        self.opcoes_tempo(ui);
-                    });
+                if let Some(r) = &self.executando {
+                    if !estreita {
+                        tema::tecla(ui, "Esc");
+                    }
+                    if tema::botao_alerta(ui, "Cancelar").clicked() {
+                        acoes.push(Acao::Cancelar);
+                    }
+                    let s = (agora - r.desde).max(0.0) as u64;
+                    ui.label(RichText::new(format!("Executando · {s} s")).color(p.suave).size(13.0));
                 } else {
-                    let resposta = tema::chip(ui, "Tempo", &texto_tempo(self.tempo_s), self.tempo_s != 30);
-                    egui::Popup::menu(&resposta).show(|ui| {
-                        ui.set_min_width(180.0);
-                        self.opcoes_tempo(ui);
-                    });
-                    let resposta = tema::chip(ui, "Limite", &self.limite.to_string(), self.limite != 500);
-                    egui::Popup::menu(&resposta).show(|ui| {
-                        ui.set_min_width(180.0);
-                        self.opcoes_limite(ui);
-                    });
+                    if !estreita {
+                        tema::tecla(ui, "Ctrl+Enter");
+                    }
+                    let pode = !self.texto.trim().is_empty();
+                    if tema::botao_principal(ui, "Executar", pode).on_hover_text("Executa a instrução sob o cursor ou a seleção").clicked() {
+                        acoes.push(Acao::Executar);
+                    }
                 }
             });
         });
@@ -278,7 +307,7 @@ impl Console {
 
     /// O editor: Ctrl+Enter executa a seleção ou a instrução sob o cursor;
     /// Esc cancela a execução. O realce só refaz o layout quando o texto muda.
-    pub fn editor(&mut self, ui: &mut egui::Ui, area: Rect, dialeto: &str, agora: f64, acoes: &mut Vec<Acao>) {
+    pub fn editor(&mut self, ui: &mut egui::Ui, area: Rect, dialeto: &str, autocompletar: bool, agora: f64, acoes: &mut Vec<Acao>) {
         let p = cores();
         let id = id_editor();
         let ctx = ui.ctx().clone();
@@ -294,6 +323,13 @@ impl Console {
             estado.store(&ctx, id);
         }
         let com_foco = ctx.memory(|m| m.has_focus(id));
+        if !autocompletar {
+            self.sugestoes = None;
+        }
+        // As teclas do popup vêm antes do campo (senão o Tab e o Enter entram no texto).
+        if self.sugestoes.is_some() && (com_foco || self.tinha_foco) {
+            self.teclas_do_popup(&ctx);
+        }
         if com_foco && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
             if self.executando.is_some() {
                 acoes.push(Acao::Avisar("Já há uma consulta rodando".into()));
@@ -379,6 +415,27 @@ impl Console {
                             .layouter(&mut layouter)
                             .show(ui);
                         self.tinha_foco = saida.response.has_focus();
+                        if autocompletar && let Some(r) = saida.cursor_range {
+                            let cursor = sql::byte_do_caractere(&self.texto, r.primary.index.0);
+                            let chamou = com_foco && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Space));
+                            if saida.response.changed() || chamou {
+                                self.ancora_cursor = Some(saida.galley_pos + saida.galley.pos_from_cursor(r.primary).left_bottom().to_vec2());
+                                acoes.push(Acao::Sugerir(cursor));
+                            } else if self.sugestoes.as_ref().is_some_and(|s| s.cursor != cursor) {
+                                // O cursor andou (clique, setas): o popup fecha.
+                                self.sugestoes = None;
+                            }
+                        }
+                        // Clicou fora do editor e do popup: fecha.
+                        if !self.tinha_foco
+                            && !self.focar
+                            && let Some(s) = &self.sugestoes
+                        {
+                            let no_popup = ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| s.rect.contains(pos));
+                            if !no_popup {
+                                self.sugestoes = None;
+                            }
+                        }
                         // Números das linhas: o da linha do cursor em `texto`.
                         let linha_cursor = saida.cursor_range.map(|r| {
                             let b = sql::byte_do_caractere(&self.texto, r.primary.index.0);
@@ -404,6 +461,115 @@ impl Console {
                     });
                 });
             });
+    }
+
+    /// Setas escolhem, Tab ou Enter aceitam, Esc fecha (e o foco volta ao
+    /// editor: o egui tira o foco no Esc antes de o console ver a tecla).
+    fn teclas_do_popup(&mut self, ctx: &egui::Context) {
+        let Some(pop) = &mut self.sugestoes else { return };
+        let (baixo, cima, aceita, fecha) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::Tab) || i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        let n = pop.itens.len().max(1);
+        if baixo {
+            pop.escolhido = (pop.escolhido + 1) % n;
+        }
+        if cima {
+            pop.escolhido = (pop.escolhido + n - 1) % n;
+        }
+        if fecha {
+            self.sugestoes = None;
+            self.focar = true;
+            ctx.request_repaint();
+        } else if aceita {
+            self.aceitar_sugestao(None);
+        }
+    }
+
+    /// Troca a palavra do cursor pela sugestão (a escolhida, sem índice).
+    fn aceitar_sugestao(&mut self, indice: Option<usize>) {
+        let Some(pop) = self.sugestoes.take() else { return };
+        let Some(item) = pop.itens.get(indice.unwrap_or(pop.escolhido)) else { return };
+        if pop.cursor > self.texto.len() || pop.inicio > pop.cursor || !self.texto.is_char_boundary(pop.inicio) || !self.texto.is_char_boundary(pop.cursor) {
+            return;
+        }
+        let (novo, depois) = sugestao::aceitar(&self.texto, pop.inicio, pop.cursor, &item.texto);
+        self.cursor_para = Some(sql::caractere_do_byte(&novo, depois));
+        self.texto = novo;
+        self.focar = true;
+    }
+
+    /// O popup de sugestões, embaixo do cursor. Clique aceita.
+    pub fn popup(&mut self, ctx: &egui::Context) {
+        let Some(pop) = &mut self.sugestoes else { return };
+        let p = cores();
+        let mut clicado = None;
+        let area = egui::Area::new(Id::new("sugestoes-sql")).order(egui::Order::Foreground).fixed_pos(pop.ancora + vec2(-8.0, 4.0)).show(ctx, |ui| {
+            tema::moldura_flutuante().inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                ui.set_width(300.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, s) in pop.itens.iter().enumerate() {
+                    let (rect, resposta) = ui.allocate_exact_size(vec2(300.0, LINHA_SUGESTAO), Sense::click());
+                    if resposta.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                        pop.escolhido = i;
+                    }
+                    if i == pop.escolhido {
+                        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), tema::fundo_escolhido());
+                    }
+                    let (letra, cor) = match s.especie {
+                        Especie::Coluna => ("c", p.ok),
+                        Especie::Tabela => ("t", p.destaque),
+                        Especie::Esquema => ("e", p.suave),
+                        Especie::Palavra => ("k", p.alerta),
+                    };
+                    let caixa = Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(16.0, 16.0));
+                    ui.painter().rect_filled(caixa, CornerRadius::same(4), tema::fundo_tingido(p, cor, tema::claro()));
+                    ui.painter().text(caixa.center(), Align2::CENTER_CENTER, letra, FontId::monospace(10.5), cor);
+                    let detalhe = ui.painter().layout_no_wrap(s.detalhe.clone(), FontId::proportional(11.5), p.suave);
+                    let largura_detalhe = detalhe.size().x.min(110.0);
+                    let g = tema::cortar(
+                        ui.painter(),
+                        &s.texto,
+                        egui::TextFormat::simple(FontId::monospace(12.5), p.texto),
+                        rect.width() - 40.0 - largura_detalhe - 8.0,
+                        1,
+                        true,
+                    );
+                    ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - g.size().y / 2.0), g, p.texto);
+                    if !s.detalhe.is_empty() {
+                        let d = tema::cortar(ui.painter(), &s.detalhe, egui::TextFormat::simple(FontId::proportional(11.5), p.suave), 110.0, 1, true);
+                        ui.painter().galley(pos2(rect.right() - 8.0 - d.size().x, rect.center().y - d.size().y / 2.0), d, p.suave);
+                    }
+                    if resposta.clicked() {
+                        clicado = Some(i);
+                    }
+                }
+                ui.add_space(2.0);
+                let (r, _) = ui.allocate_exact_size(vec2(300.0, 20.0), Sense::hover());
+                ui.painter().text(
+                    r.left_center() + vec2(8.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    "Tab ou Enter aceita · Esc fecha",
+                    FontId::proportional(11.0),
+                    p.suave,
+                );
+            });
+        });
+        pop.rect = area.response.rect;
+        if let Some(i) = clicado {
+            self.aceitar_sugestao(Some(i));
+        }
+    }
+
+    /// Onde está o cursor do editor (em bytes), se ele tem um.
+    pub fn cursor_em_bytes(&self, ctx: &egui::Context) -> Option<usize> {
+        let faixa = egui::TextEdit::load_state(ctx, id_editor()).and_then(|s| s.cursor.char_range())?;
+        Some(sql::byte_do_caractere(&self.texto, faixa.primary.index.0))
     }
 
     /// O trecho a executar: a seleção ou a instrução sob o cursor. Erro com
@@ -459,11 +625,29 @@ impl Console {
             }
         }
         if !self.aba_historico
-            && let Painel::Resultado { previa: Some(nome), .. } = &self.painel
+            && let Painel::Resultado { r, previa, .. } = &self.painel
+            && r.afetadas.is_none()
         {
             topo.add_space(8.0);
-            topo.label(tema::texto_forte(format!("Prévia · {nome}"), 13.0).color(p.texto));
-            topo.label(RichText::new(" · 100 primeiras linhas").color(p.suave).size(13.0));
+            if let Some(nome) = previa {
+                topo.label(tema::texto_forte(format!("Prévia · {nome}"), 13.0).color(p.texto));
+            }
+            let n = r.linhas.len();
+            let linhas = format!("{}{} {}", super::arvore::milhar(n), if r.mais { "+" } else { "" }, if n == 1 { "linha" } else { "linhas" });
+            let pilula = Pilula { texto: &linhas, cor: p.ok, cheio: false, ponto: false, grande: false };
+            let largura = pilula.largura(topo.painter());
+            let (rr, _) = topo.allocate_exact_size(vec2(largura, 22.0), Sense::hover());
+            pilula.pintar(topo.painter(), rr.min);
+            let quando = if self.hora.is_empty() { format!("{} ms", r.ms) } else { format!("{} ms · às {}", r.ms, self.hora) };
+            topo.label(RichText::new(quando).color(p.suave).size(12.5));
+            let mut copiar = false;
+            topo.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                copiar = tema::botao_secundario(ui, "Copiar tudo").on_hover_text("Copia as colunas e as linhas carregadas, separadas por tabulação").clicked();
+            });
+            if copiar && let Some(t) = self.texto_da_selecao(Selecao::Tudo) {
+                ui.ctx().copy_text(t);
+                acoes.push(Acao::Avisar(format!("{} copiadas", if n == 1 { "1 linha".to_string() } else { format!("{n} linhas") })));
+            }
         }
         if self.aba_historico {
             topo.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -610,6 +794,9 @@ impl Console {
                     pintor.rect_filled(faixa, CornerRadius::ZERO, tema::fundo_escolhido());
                 } else if resposta_linha.hovered() {
                     pintor.rect_filled(faixa, CornerRadius::ZERO, p.realce);
+                } else if l % 2 == 1 {
+                    // Listras leves: a linha comprida se lê sem perder a altura.
+                    pintor.rect_filled(faixa, CornerRadius::ZERO, tema::misturar(p.superficie_alta, p.realce, 0.35));
                 }
                 pintor.line_segment(
                     [pos2(faixa.left(), y + ALTURA_LINHA_GRADE - 0.5), pos2(faixa.right(), y + ALTURA_LINHA_GRADE - 0.5)],
@@ -690,14 +877,16 @@ impl Console {
         for (c, x_col, largura_col) in colunas_visiveis(&self.larguras, x0, cab.left() + calha, cab.right()) {
             let celula = Rect::from_min_size(pos2(x_col, cab.top()), vec2(largura_col, CABECALHO_GRADE));
             let col = &r.colunas[c];
-            let g_nome = pintor.layout_no_wrap(col.nome.clone(), forte(12.5), p.texto);
-            let g_tipo = pintor.layout_no_wrap(col.tipo.clone(), FontId::proportional(11.0), p.suave);
-            let cabe_tipo = g_nome.size().x + 6.0 + g_tipo.size().x <= celula.width() - 16.0;
+            // O nome em cima e o tipo embaixo, alinhados como os valores (números à direita).
             let g_nome = tema::cortar(&pintor, &col.nome, egui::TextFormat::simple(forte(12.5), p.texto), celula.width() - 16.0, 1, true);
-            let x_nome = celula.left() + 8.0;
-            pintor.galley(pos2(x_nome, celula.center().y - g_nome.size().y / 2.0), g_nome.clone(), p.texto);
-            if cabe_tipo && !col.tipo.is_empty() {
-                pintor.galley(pos2(x_nome + g_nome.size().x + 6.0, celula.center().y - g_tipo.size().y / 2.0), g_tipo, p.suave);
+            let tipo = super::arvore::tipo_curto(&col.tipo);
+            let g_tipo = tema::cortar(&pintor, &tipo, egui::TextFormat::simple(FontId::monospace(10.5), p.suave), celula.width() - 16.0, 1, true);
+            let alto = if tipo.is_empty() { g_nome.size().y } else { g_nome.size().y + g_tipo.size().y };
+            let y = celula.center().y - alto / 2.0;
+            let x = |largura: f32| if col.numero { celula.right() - 8.0 - largura } else { celula.left() + 8.0 };
+            pintor.galley(pos2(x(g_nome.size().x), y), g_nome.clone(), p.texto);
+            if !tipo.is_empty() {
+                pintor.galley(pos2(x(g_tipo.size().x), y + g_nome.size().y), g_tipo, p.suave);
             }
             // Divisória da coluna: arrastar ajusta a largura.
             let divisa = Rect::from_center_size(pos2(celula.right(), celula.center().y), vec2(8.0, CABECALHO_GRADE)).intersect(cab);
@@ -943,7 +1132,7 @@ pub fn sigla_do_tipo(tipo: &str) -> &'static str {
     }
 }
 
-fn nome_do_tipo(tipo: &str) -> &'static str {
+pub fn nome_do_tipo(tipo: &str) -> &'static str {
     match tipo {
         "postgres" => "PostgreSQL",
         "mysql" => "MySQL/MariaDB",
@@ -1031,8 +1220,9 @@ fn medir_larguras(r: &api::Resultado) -> Vec<f32> {
         .iter()
         .enumerate()
         .map(|(c, col)| {
-            let mut maior =
-                col.nome.chars().count() as f32 * por_caractere + if col.tipo.is_empty() { 0.0 } else { 6.0 + col.tipo.chars().count() as f32 * 6.2 };
+            // O tipo fica embaixo do nome: a coluna cabe o mais largo dos dois.
+            let tipo = super::arvore::tipo_curto(&col.tipo).chars().count() as f32 * 6.4;
+            let mut maior = (col.nome.chars().count() as f32 * por_caractere).max(tipo);
             for l in r.linhas.iter().take(200) {
                 let n = l.get(c).and_then(|v| v.as_ref()).map_or(4, |v| v.chars().count().min(60));
                 maior = maior.max(n as f32 * por_caractere);

@@ -186,32 +186,38 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
 /// O dia de hoje no fuso do computador, "2026-10-16": o mesmo formato do
 /// `data` que o núcleo manda no fim do agente (o Concluído mostra só o de hoje).
 pub fn hoje() -> String {
-    let (ano, mes, dia) = data_local();
+    let (ano, mes, dia, ..) = agora_local();
     format!("{ano:04}-{mes:02}-{dia:02}")
 }
 
+/// A hora de agora no fuso do computador, "14:41".
+pub fn hora_local() -> String {
+    let (.., hora, minuto) = agora_local();
+    format!("{hora:02}:{minuto:02}")
+}
+
 #[cfg(unix)]
-fn data_local() -> (i32, u32, u32) {
+fn agora_local() -> (i32, u32, u32, u32, u32) {
     // SAFETY: localtime_r só escreve no `tm` que recebe; time(NULL) não lê nada.
     unsafe {
         let agora = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&agora, &mut tm).is_null() {
-            return (1970, 1, 1);
+            return (1970, 1, 1, 0, 0);
         }
-        (tm.tm_year + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)
+        (tm.tm_year + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
     }
 }
 
 #[cfg(windows)]
-fn data_local() -> (i32, u32, u32) {
+fn agora_local() -> (i32, u32, u32, u32, u32) {
     // SAFETY: GetLocalTime só preenche o SYSTEMTIME que recebe.
     let st = unsafe {
         let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
         windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st);
         st
     };
-    (st.wYear as i32, st.wMonth as u32, st.wDay as u32)
+    (st.wYear as i32, st.wMonth as u32, st.wDay as u32, st.wHour as u32, st.wMinute as u32)
 }
 
 pub const SEM_REPRODUTOR: &str = "Não achei um reprodutor de vídeo. Instale um, por exemplo mpv ou VLC.";

@@ -119,9 +119,10 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 	}
 	// Só os campos enviados mudam.
 	var pedido struct {
-		Tema         *string `json:"tema"`
-		AvisoCaptura *bool   `json:"aviso_captura"`
-		TempoAgentes *bool   `json:"tempo_agentes"`
+		Tema          *string `json:"tema"`
+		AvisoCaptura  *bool   `json:"aviso_captura"`
+		TempoAgentes  *bool   `json:"tempo_agentes"`
+		Autocompletar *bool   `json:"autocompletar_sql"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -141,6 +142,12 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 	}
 	if pedido.TempoAgentes != nil {
 		if err := s.Banco.DefinirTempoAgentes(r.Context(), id, *pedido.TempoAgentes); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if pedido.Autocompletar != nil {
+		if err := s.Banco.DefinirAutocompletarSQL(r.Context(), id, *pedido.Autocompletar); err != nil {
 			responderErro(w, err)
 			return
 		}

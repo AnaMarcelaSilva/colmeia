@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS comandos (
 
 // colunasPerfis é a definição da tabela perfis desde a versão 9 do banco
 // (com o tema fosco). A migração para ela está em migrarPerfis. As colunas
-// aviso_captura e tempo_agentes nasceram em migrar e ficam lá.
+// aviso_captura, tempo_agentes e autocompletar_sql nasceram em migrar e
+// ficam lá.
 const colunasPerfis = `
 	id INTEGER PRIMARY KEY,
 	nome TEXT NOT NULL UNIQUE,
@@ -290,6 +291,8 @@ func migrar(db *sql.DB) error {
 		{"perfis", "aviso_captura", "INTEGER NOT NULL DEFAULT 1"},
 		// Mostrar o tempo dos agentes no registro (desligado por padrão).
 		{"perfis", "tempo_agentes", "INTEGER NOT NULL DEFAULT 0"},
+		// Autocompletar no console de bancos (desligado por padrão).
+		{"perfis", "autocompletar_sql", "INTEGER NOT NULL DEFAULT 0"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
@@ -418,9 +421,10 @@ func migrarPerfis(db *sql.DB) error {
 	for _, comando := range []string{
 		`CREATE TABLE perfis_nova (` + colunasPerfis + `,
 			aviso_captura INTEGER NOT NULL DEFAULT 1,
-			tempo_agentes INTEGER NOT NULL DEFAULT 0)`,
-		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes)
-			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis`,
+			tempo_agentes INTEGER NOT NULL DEFAULT 0,
+			autocompletar_sql INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql)
+			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis`,
 		`DROP TABLE perfis`,
 		`ALTER TABLE perfis_nova RENAME TO perfis`,
 	} {

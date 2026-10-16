@@ -109,11 +109,11 @@ Clique duplo no vazio cria uma nota, e N, T, C, I e K criam outros itens onde es
 
 ![A tela de bancos: a árvore com a conexão loja-web-dev aberta até as colunas da tabela pedidos e o console com um SELECT e a grade de resultado](docs/imagens/banco.png)
 
-Cada perfil guarda as suas conexões de PostgreSQL, MySQL/MariaDB, SQLite e SQL Server (este ainda experimental), em Ctrl+Shift+K. A árvore vai da conexão até as colunas, carregada sob demanda, e o console executa a instrução sob o cursor com Ctrl+Enter.
+Cada perfil guarda as suas conexões de PostgreSQL, MySQL/MariaDB, SQLite e SQL Server (este ainda experimental), em Ctrl+Shift+K. O painel da barra lateral mostra os pedidos dos agentes esperando você e as conexões por pasta, com filtro. A árvore vai da conexão até as colunas, carregada sob demanda, e o console executa a instrução sob o cursor com Ctrl+Enter. O Autocompletar do console vem desligado; ligado, sugere palavras do SQL e os nomes que a árvore já abriu, sem IA (Tab ou Enter aceita, Esc fecha, Ctrl+Espaço chama).
 
 As senhas ficam no chaveiro do sistema e nunca são gravadas no banco da Colmeia nem nos logs. Sem chaveiro disponível, a senha é solicitada ao conectar e mantida apenas em memória.
 
-Toda conexão começa em modo somente leitura. Para alterar dados é preciso ligar "Permitir alterações", e, ainda assim, cada alteração exige confirmação com a instrução completa na tela. O agente pode pedir consultas de leitura numa conexão em que você liberou isso, que só são executadas após a sua aprovação na tela. A linha do tempo registra que houve consulta, nunca o SQL nem o resultado ([decisão 0009](docs/decisoes/0009-bancos-chaveiro-e-somente-leitura.md)).
+Toda conexão começa em modo somente leitura. Para alterar dados é preciso ligar "Permitir alterações", e, ainda assim, cada alteração exige confirmação com a instrução completa na tela. O agente pode pedir consultas de leitura numa conexão em que você liberou isso, que só são executadas após a sua aprovação na tela. O pedido abre por inteiro, com a instrução travada, e "Rodar para mim antes" mostra no seu console o que o agente vai receber. A linha do tempo registra que houve consulta, nunca o SQL nem o resultado ([decisão 0009](docs/decisoes/0009-bancos-chaveiro-e-somente-leitura.md)).
 
 ## Atalhos
 

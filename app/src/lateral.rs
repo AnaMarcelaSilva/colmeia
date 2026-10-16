@@ -50,6 +50,8 @@ pub struct Vista<'a> {
     pub lugar: Lugar,
     /// Pedidos de consulta ao banco esperando você.
     pub pedidos_banco: usize,
+    /// Quantas conexões de banco o perfil tem (o subtítulo do painel dos bancos).
+    pub conexoes_banco: usize,
     pub demo: bool,
     /// Ligada ao núcleo (ou na demonstração): dá para mudar as coisas.
     pub pode: bool,
@@ -99,6 +101,16 @@ pub struct Saida {
     pub acoes: Vec<Acao>,
     /// Onde a abelha está (o resumo abre ao lado).
     pub abelha: Option<Rect>,
+    /// Na tela de bancos, o miolo do painel fica para o painel dos bancos.
+    pub banco: Option<PainelBanco>,
+}
+
+/// Onde a tela principal desenha o painel dos bancos (com o recorte e a
+/// opacidade da animação de abrir e recolher).
+pub struct PainelBanco {
+    pub miolo: Rect,
+    pub recorte: Rect,
+    pub opacidade: f32,
 }
 
 /// O uso do agente em foco e da conta, como o `/context` e o `/usage`: o
@@ -197,6 +209,11 @@ impl Lateral {
         TRILHO + self.abertura(ctx) * (PAINEL + VAO)
     }
 
+    /// O painel aparece, ainda que só em parte (abrindo ou recolhendo).
+    pub fn painel_visivel(&self, ctx: &egui::Context) -> bool {
+        self.abertura(ctx) > 0.0
+    }
+
     fn abertura(&self, ctx: &egui::Context) -> f32 {
         ctx.animate_bool_with_time(Id::new("lateral-painel"), self.aberto, ANIMACAO_PAINEL)
     }
@@ -209,9 +226,9 @@ impl Lateral {
         let area = ui.max_rect();
         let t = self.abertura(ui.ctx());
         self.trilho(ui, Rect::from_min_size(area.min, vec2(TRILHO, area.height())), &grupos, abelha, v, &mut saida);
-        if t > 0.0
-            && let Some(grupo) = grupos.iter().find(|g| Some(g.id) == self.workspace)
-        {
+        let grupo = grupos.iter().find(|g| Some(g.id) == self.workspace);
+        // Nos bancos o painel mostra as conexões, mesmo sem workspace.
+        if t > 0.0 && (v.lugar == Lugar::Banco || grupo.is_some()) {
             self.painel(ui, area, grupo, abelha, v, &mut saida);
         }
         saida
@@ -438,7 +455,7 @@ impl Lateral {
 
     // O painel
 
-    fn painel(&mut self, ui: &mut Ui, area: Rect, grupo: &Grupo, abelha: &mut Abelha, v: &Vista, saida: &mut Saida) {
+    fn painel(&mut self, ui: &mut Ui, area: Rect, grupo: Option<&Grupo>, abelha: &mut Abelha, v: &Vista, saida: &mut Saida) {
         let p = cores();
         let t = self.abertura(ui.ctx());
         // Recolhendo, o painel escorrega 12 px para baixo do trilho e some.
@@ -452,19 +469,55 @@ impl Lateral {
         }
         tema::cartao_solto(ui.painter(), rect, p.superficie);
 
-        self.cabeca_do_painel(&mut ui, rect, grupo, v, saida);
-
         let uso = Rect::from_min_size(pos2(rect.left() + 12.0, rect.bottom() - 12.0 - ALTURA_USO), vec2(rect.width() - 24.0, ALTURA_USO));
         let miolo = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top() + 62.0), pos2(rect.right() - 10.0, uso.top() - 8.0));
-        let mut miolo_ui = ui.new_child(UiBuilder::new().id_salt("painel-miolo").max_rect(miolo).layout(Layout::top_down(Align::Min)));
-        miolo_ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
-        self.miolo(&mut miolo_ui, grupo, v, saida);
+        match grupo.filter(|_| v.lugar != Lugar::Banco) {
+            Some(grupo) => {
+                self.cabeca_do_painel(&mut ui, rect, grupo, v, saida);
+                let mut miolo_ui = ui.new_child(UiBuilder::new().id_salt("painel-miolo").max_rect(miolo).layout(Layout::top_down(Align::Min)));
+                miolo_ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                self.miolo(&mut miolo_ui, grupo, v, saida);
+            }
+            None => {
+                self.cabeca_dos_bancos(&mut ui, rect, v);
+                saida.banco = Some(PainelBanco { miolo, recorte: ui.clip_rect(), opacidade: t });
+            }
+        }
 
         if v.com_abelha {
             bloco_do_uso(&mut ui, uso, abelha, &self.uso, v, saida);
         } else {
             barras_de_uso(&ui, Rect::from_min_max(pos2(uso.left() + 10.0, uso.bottom() - 30.0), uso.max - vec2(10.0, 8.0)), &self.uso);
         }
+    }
+
+    /// O topo do painel na tela de bancos: o selo, o título e quantas
+    /// conexões e pedidos há.
+    fn cabeca_dos_bancos(&mut self, ui: &mut Ui, rect: Rect, v: &Vista) {
+        let p = cores();
+        let fechar = Rect::from_min_size(pos2(rect.right() - 12.0 - 28.0, rect.top() + 16.0), vec2(28.0, 28.0));
+        if tema::botao_icone_em(ui, fechar, ui.id().with("recolher"), Icone::Anterior)
+            .on_hover_text("Recolher o painel (as conexões vão para o lado do console)")
+            .clicked()
+        {
+            self.aberto = false;
+        }
+        let selo = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + 18.0), vec2(24.0, 24.0));
+        ui.painter().rect_filled(selo, CornerRadius::same(7), p.destaque);
+        tema::desenhar_icone(ui.painter(), selo.center(), Icone::Banco, tema::sobre_destaque());
+        let x = selo.right() + 10.0;
+        let largura = fechar.left() - 6.0 - x;
+        let nome = tema::cortar(ui.painter(), "Bancos de dados", egui::TextFormat::simple(tema::forte(15.0), p.texto), largura, 1, false);
+        let conexoes = if v.conexoes_banco == 1 { "1 conexão".to_string() } else { format!("{} conexões", v.conexoes_banco) };
+        let sub = match v.pedidos_banco {
+            0 => conexoes,
+            1 => format!("{conexoes} · 1 pedido dos agentes"),
+            n => format!("{conexoes} · {n} pedidos dos agentes"),
+        };
+        let sub = tema::cortar(ui.painter(), &sub, egui::TextFormat::simple(FontId::proportional(11.5), p.suave), largura, 1, false);
+        let y = selo.center().y - (nome.size().y + sub.size().y) / 2.0;
+        ui.painter().galley(pos2(x, y), nome.clone(), p.texto);
+        ui.painter().galley(pos2(x, y + nome.size().y), sub, p.suave);
     }
 
     fn cabeca_do_painel(&mut self, ui: &mut Ui, rect: Rect, grupo: &Grupo, v: &Vista, saida: &mut Saida) {

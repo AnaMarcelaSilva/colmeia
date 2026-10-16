@@ -18,6 +18,9 @@ type Perfil struct {
 	// mostram quanto os agentes trabalharam e esperaram. Desligado por padrão
 	// (é informação sensível); os tempos continuam gravados nos eventos.
 	TempoAgentes bool `json:"tempo_agentes"`
+	// AutocompletarSQL: sugestões locais no console de bancos (palavras do
+	// SQL e nomes já carregados na árvore). Desligado por padrão.
+	AutocompletarSQL bool `json:"autocompletar_sql"`
 }
 
 type Conta struct {
@@ -90,7 +93,7 @@ func donoDoProjeto(ctx context.Context, tx *transacao, projeto int64) (int64, st
 // Perfis
 
 func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis ORDER BY nome`)
+	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis ORDER BY nome`)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +101,7 @@ func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
 	perfis := []Perfil{}
 	for linhas.Next() {
 		var p Perfil
-		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes); err != nil {
+		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL); err != nil {
 			return nil, err
 		}
 		perfis = append(perfis, p)
@@ -148,8 +151,8 @@ func (b *Banco) DefinirTema(ctx context.Context, perfil int64, tema string) erro
 // Perfil devolve um perfil pelo id.
 func (b *Banco) Perfil(ctx context.Context, id int64) (Perfil, error) {
 	var p Perfil
-	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes FROM perfis WHERE id = ?`, id).
-		Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes)
+	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis WHERE id = ?`, id).
+		Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNaoEncontrado
 	}
@@ -182,6 +185,21 @@ func (b *Banco) DefinirTempoAgentes(ctx context.Context, perfil int64, mostrar b
 			return ErrNaoEncontrado
 		}
 		return registrar(ctx, tx, "perfil.tempo_agentes", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "mostrar": mostrar})
+	})
+}
+
+// DefinirAutocompletarSQL liga ou desliga as sugestões do console de bancos
+// deste perfil.
+func (b *Banco) DefinirAutocompletarSQL(ctx context.Context, perfil int64, ligado bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET autocompletar_sql = ? WHERE id = ?`, ligado, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.autocompletar_sql", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
 	})
 }
 
