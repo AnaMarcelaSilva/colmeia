@@ -402,12 +402,6 @@ pub struct MensagemGuardada {
 // Apresentação da daily e da sprint (um slide por tarefa).
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct TempoFerramenta {
-    pub nome: String,
-    pub segundos: i64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
 pub struct NumerosCapa {
     #[serde(default)]
     pub concluidas: usize,
@@ -425,8 +419,6 @@ pub struct NumerosCapa {
     pub novas: usize,
     #[serde(default)]
     pub tempo_s: i64,
-    #[serde(default, deserialize_with = "lista_ou_nulo")]
-    pub por_ferramenta: Vec<TempoFerramenta>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -504,8 +496,6 @@ pub struct Slide {
     /// O título da tarefa, quando ela ganhou outro na sprint.
     #[serde(default)]
     pub titulo_original: String,
-    #[serde(default)]
-    pub projeto_id: i64,
     #[serde(default)]
     pub projeto: String,
     #[serde(default)]
@@ -929,8 +919,13 @@ fn inesperada(caminho: &str, e: impl std::fmt::Display) -> String {
 }
 
 fn chamar<T: DeserializeOwned>(metodo: &str, caminho: &str, corpo: Option<serde_json::Value>) -> Result<T, String> {
+    chamar_ate(metodo, caminho, corpo, std::time::Duration::from_secs(10))
+}
+
+/// O mesmo, esperando a resposta até `espera` (o Claude Code gerando a sprint).
+fn chamar_ate<T: DeserializeOwned>(metodo: &str, caminho: &str, corpo: Option<serde_json::Value>, espera: std::time::Duration) -> Result<T, String> {
     let corpo = corpo.map(|c| c.to_string());
-    let (status, resposta) = canal::pedir_com_corpo(metodo, caminho, corpo.as_deref())?;
+    let (status, resposta) = canal::pedir_com_corpo_ate(metodo, caminho, corpo.as_deref(), espera)?;
     if !(200..300).contains(&status) {
         // O núcleo explica o problema em português; é essa mensagem que a tela mostra.
         return Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
@@ -1070,6 +1065,55 @@ pub struct Repetidos {
 /// Traz os assuntos da sprint anterior; diz quantos vieram.
 pub fn repetir_assuntos(sprint: i64) -> Result<Repetidos, String> {
     chamar("POST", &format!("/v1/sprints/{sprint}/assuntos/repetir"), None)
+}
+
+/// "Gerar sprint com IA": o que o Claude Code propõe para cada tarefa, ao
+/// lado de como está, e o número para aceitar ou descartar.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Proposta {
+    pub id: i64,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub itens: Vec<ItemProposta>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ItemProposta {
+    pub tarefa_id: i64,
+    pub titulo: String,
+    pub descricao: String,
+    /// Vazio: sem assunto.
+    #[serde(default)]
+    pub assunto: String,
+    #[serde(default)]
+    pub projeto: String,
+    #[serde(default)]
+    pub antes: AntesProposta,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct AntesProposta {
+    #[serde(default)]
+    pub titulo: String,
+    #[serde(default)]
+    pub descricao: String,
+    #[serde(default)]
+    pub assunto: String,
+}
+
+/// Pede a proposta da sprint ao Claude Code (pelo núcleo). Espera mais que
+/// o prazo do núcleo para o agente responder (3 minutos).
+pub fn gerar_sprint(perfil: i64, recorte: Recorte, sprint: i64, pedido: &str) -> Result<Proposta, String> {
+    let caminho = format!("/v1/perfis/{perfil}/sprints/gerar?sprint={sprint}{}", recorte.consulta());
+    chamar_ate("POST", &caminho, Some(json!({ "pedido": pedido })), std::time::Duration::from_secs(200))
+}
+
+/// Grava a proposta: títulos, descrições e assuntos da sprint.
+pub fn aceitar_proposta(id: i64) -> Result<(), String> {
+    sem_conteudo("POST", &format!("/v1/propostas/{id}/aceitar"), None)
+}
+
+pub fn descartar_proposta(id: i64) -> Result<(), String> {
+    sem_conteudo("DELETE", &format!("/v1/propostas/{id}"), None)
 }
 
 /// O título da tarefa só nesta sprint; vazio volta ao da tarefa.
@@ -2077,7 +2121,7 @@ mod testes {
         let deck: Deck = serde_json::from_value(json!({"tipo": "daily", "titulo": "Daily", "capa": {"numeros": {"concluidas": 1}},
             "slides": [{"tarefa_id": 1, "titulo": "A", "numeros": {"sessoes": 2}, "secao": "estudos · loja-web", "secao_id": 3, "workspace": "estudos"}]}))
         .unwrap();
-        assert!(!deck.tempo_agentes && deck.capa.numeros.tempo_s == 0 && deck.capa.numeros.por_ferramenta.is_empty());
+        assert!(!deck.tempo_agentes && deck.capa.numeros.tempo_s == 0);
         assert_eq!((deck.slides[0].numeros.tempo_s, deck.slides[0].numeros.sessoes, deck.slides[0].secao_id), (0, 2, 3));
         let perfil: Perfil = serde_json::from_value(json!({"id": 1, "nome": "P", "tema": "escuro"})).unwrap();
         assert!(!perfil.tempo_agentes && perfil.aviso_captura);
@@ -2097,7 +2141,7 @@ mod testes {
                 "slides":[{"tarefa_id":3,"titulo":"T","partes":null,"feito":[{"parte":"Hoje","itens":null}],"anexos":null}],"mais":0}"#,
         )
         .unwrap();
-        assert!(d.capa.destaques.is_empty() && d.capa.partes.is_empty() && d.capa.numeros.por_ferramenta.is_empty());
+        assert!(d.capa.destaques.is_empty() && d.capa.partes.is_empty());
         assert_eq!(d.slides[0].tarefa_id, 3);
         assert!(d.slides[0].anexos.is_empty() && d.slides[0].feito[0].itens.is_empty());
         assert!(d.fora.is_empty());

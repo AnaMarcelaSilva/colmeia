@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, vec2};
 
 use crate::api;
 use crate::dados::{AgenteTela, EstadoAgente, Modelo, PEDE_APROVACAO};
@@ -124,7 +124,7 @@ pub fn pilula(e: &Estado) -> Pilula<'_> {
 /// O que a caixa pede a quem a mostra.
 pub enum Saida {
     Fechar,
-    Enviado(Box<api::Pedido>),
+    Enviado,
     AbrirTarefa,
 }
 
@@ -185,9 +185,9 @@ impl Caixa {
         while let Ok(r) = self.canal.1.try_recv() {
             match r {
                 Resposta::Destino(d) => self.destino = Some(d),
-                Resposta::Enviado(Ok(p)) => {
+                Resposta::Enviado(Ok(_)) => {
                     self.enviando = false;
-                    saida = Some(Saida::Enviado(Box::new(p)));
+                    saida = Some(Saida::Enviado);
                 }
                 Resposta::Enviado(Err(e)) => {
                     self.enviando = false;
@@ -435,34 +435,6 @@ fn milhar(n: usize) -> String {
     saida
 }
 
-/// O botão "Pedir ao agente" num retângulo fixo (no canto do cartão):
-/// secundário, ou no estado ativo do `chip_alternar` com a caixa aberta.
-pub fn botao_no_cartao(ui: &mut egui::Ui, rect: Rect, id: Id, texto: &str, aberta: bool, ativo: bool) -> egui::Response {
-    let p = cores();
-    let resposta = ui.interact(rect, id, if ativo { Sense::click() } else { Sense::hover() });
-    let (fundo, borda, cor) = match (ativo, aberta, resposta.hovered()) {
-        (false, _, _) => (Color32::TRANSPARENT, p.borda.gamma_multiply(0.5), p.suave),
-        (true, true, _) => (p.destaque.gamma_multiply(if tema::claro() { 0.12 } else { 0.18 }), p.destaque.gamma_multiply(0.6), p.texto),
-        (true, false, true) => (p.realce, p.borda, p.texto),
-        (true, false, false) => (p.superficie_alta, p.borda, p.texto),
-    };
-    let pintor = ui.painter();
-    pintor.rect(rect, CornerRadius::same(16), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
-    let fonte = if aberta { forte(13.0) } else { FontId::proportional(13.0) };
-    pintor.text(rect.center(), Align2::CENTER_CENTER, texto, fonte, cor);
-    if ativo { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta }
-}
-
-/// Largura do botão do cartão para o texto.
-pub fn largura_botao(pintor: &egui::Painter, texto: &str) -> f32 {
-    pintor.layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), Color32::WHITE).size().x + 28.0
-}
-
-/// Texto do botão no cartão: "Pedir" em cartões estreitos.
-pub fn texto_botao(largura_cartao: f32) -> &'static str {
-    if largura_cartao < 340.0 { "Pedir" } else { "Pedir ao agente" }
-}
-
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -520,11 +492,9 @@ mod testes {
     }
 
     #[test]
-    fn numeros_com_ponto_de_milhar_e_botao_curto() {
+    fn numeros_com_ponto_de_milhar() {
         assert_eq!(milhar(1850), "1.850");
         assert_eq!(milhar(2000), "2.000");
         assert_eq!(milhar(950), "950");
-        assert_eq!(texto_botao(320.0), "Pedir");
-        assert_eq!(texto_botao(520.0), "Pedir ao agente");
     }
 }

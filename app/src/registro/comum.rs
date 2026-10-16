@@ -1,6 +1,6 @@
 //! Peças comuns da linha do tempo, da daily, da sprint e da apresentação:
-//! pedidos em segundo plano, o cache de imagens, a miniatura e o cartão de
-//! tarefa da Daily e da Sprint.
+//! pedidos em segundo plano, o cache de imagens, a miniatura, os números da
+//! capa e as seções do deck.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -8,7 +8,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, ColorImage, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2};
 
 use crate::api;
-use crate::pedido;
 use crate::tema::{self, EstadoVisual, Marca, Pilula, cores, forte};
 
 /// Faz o pedido numa thread e acorda a tela quando a resposta chega.
@@ -145,20 +144,6 @@ pub fn estado_do_slide(s: &api::Slide) -> (Color32, &'static str, Marca) {
     tema::estado_da_tarefa(&s.coluna, s.grupo == "erros", s.removida)
 }
 
-/// Grupos da Daily, na ordem do deck: chave, título, cor e marca (as mesmas
-/// das pílulas e dos números).
-pub fn grupos() -> [(&'static str, &'static str, Color32, Marca); 6] {
-    let p = cores();
-    [
-        ("concluidas", "Concluídas", p.destaque, Marca::Cheia),
-        ("revisao", "Em revisão", p.texto, Marca::Cheia),
-        ("aguardando", "Aguardando você", p.alerta, Marca::Anel),
-        ("trabalhando", "Trabalhando", p.ok, Marca::Cheia),
-        ("erros", "Com erro", p.erro, Marca::AnelGrosso),
-        ("outras", "Outras", p.suave, Marca::Anel),
-    ]
-}
-
 /// Um número da fileira: valor, rótulo e a marca do estado (o tempo não tem).
 type Numero = (String, &'static str, Option<(Color32, Marca)>);
 
@@ -226,9 +211,8 @@ pub struct SecaoDeck<'a> {
     pub id: i64,
     /// O nome da seção como o núcleo manda ("estudos · loja-web").
     pub rotulo: &'a str,
-    /// O nome do projeto e o workspace (vazio com um workspace só no recorte).
+    /// O nome do projeto.
     pub projeto: &'a str,
-    pub workspace: &'a str,
     pub slides: Vec<&'a api::Slide>,
 }
 
@@ -243,7 +227,7 @@ pub fn secoes_do_deck(deck: &api::Deck) -> Vec<SecaoDeck<'_>> {
             _ => {
                 // Um assunto da sprint (id negativo) mostra o nome dele.
                 let projeto = if s.projeto.is_empty() || s.secao_id < 0 { s.secao.as_str() } else { s.projeto.as_str() };
-                secoes.push(SecaoDeck { id: s.secao_id, rotulo: &s.secao, projeto, workspace: &s.workspace, slides: vec![s] });
+                secoes.push(SecaoDeck { id: s.secao_id, rotulo: &s.secao, projeto, slides: vec![s] });
             }
         }
     }
@@ -437,233 +421,6 @@ pub fn numeros(ui: &mut egui::Ui, n: &api::NumerosCapa, tamanho: f32, com_novas:
     });
 }
 
-/// Os tópicos de "o que foi feito" de um slide, juntando as partes.
-pub(super) fn topicos(s: &api::Slide) -> Vec<&str> {
-    s.feito.iter().flat_map(|f| f.itens.iter().map(String::as_str)).collect()
-}
-
-const ALTURA_TOPICO: f32 = 20.0;
-pub(super) const LADO_MINIATURA: f32 = 64.0;
-
-/// Largura do título do cartão: o botão "Pedir ao agente" fica no canto de cima.
-fn largura_titulo(pintor: &egui::Painter, largura_cartao: f32) -> f32 {
-    let interno = largura_cartao - 32.0;
-    interno - pedido::largura_botao(pintor, pedido::texto_botao(largura_cartao)) - 8.0
-}
-
-/// Altura do cartão de tarefa da Daily e da Sprint numa largura.
-pub fn altura_cartao(ui: &egui::Ui, s: &api::Slide, largura: f32) -> f32 {
-    let p = cores();
-    let interno = largura - 32.0;
-    let titulo = texto_em_linhas(ui.painter(), &s.titulo, forte(15.0), p.texto, largura_titulo(ui.painter(), largura), 2).size().y.max(32.0 - 16.0 + 4.0);
-    let total = topicos(s).len();
-    let mut altura = 16.0 + titulo + 8.0 + 22.0;
-    if total > 0 {
-        altura += 8.0 + total.min(3) as f32 * ALTURA_TOPICO + if total > 3 { 18.0 } else { 0.0 };
-    }
-    let nota = if s.nota.is_empty() { None } else { Some(sem_linhas_vazias(&s.nota)) };
-    if let Some(nota) = nota {
-        let g = texto_em_linhas(ui.painter(), &nota, FontId::proportional(13.5), p.texto, interno - 12.0, 2);
-        altura += 10.0 + g.size().y;
-    }
-    if !s.anexos.is_empty() {
-        altura += 12.0 + LADO_MINIATURA;
-    }
-    altura + 16.0
-}
-
-/// O que o clique num cartão pede.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum CliqueCartao {
-    /// Abrir a apresentação no slide da tarefa.
-    Abrir(i64),
-    /// Abrir a caixa "Pedir ao agente", presa ao botão.
-    Pedir(i64, Rect),
-    AbrirTarefa(i64),
-    /// Tirar a tarefa da daily de hoje (já apresentada); a sprint continua com ela.
-    TirarDaDaily(i64),
-}
-
-/// O pedido da tarefa e se a caixa dela está aberta (para o cartão).
-pub struct PedidoNoCartao<'a> {
-    pub estado: Option<&'a pedido::Estado>,
-    pub caixa_aberta: bool,
-    /// O último pedido foi respondido: a resposta entrou no fim da nota, e
-    /// o cartão mostra o fim (o começo sai com "…").
-    pub respondido: bool,
-}
-
-/// Cartão de uma tarefa (Daily e Sprint): título, etiquetas, até 3 tópicos,
-/// a nota e as miniaturas. O clique abre a apresentação no slide dela; o
-/// botão do canto e a pílula do pedido abrem a caixa "Pedir ao agente".
-/// Na daily (`na_daily`), o menu do cartão também tira a tarefa dela.
-#[allow(clippy::too_many_arguments)]
-pub fn cartao(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    s: &api::Slide,
-    com_projeto: bool,
-    cache: &mut CacheImagens,
-    rolar_ate: &mut Option<i64>,
-    pedido_info: &PedidoNoCartao,
-    na_daily: bool,
-) -> Option<CliqueCartao> {
-    let p = cores();
-    let mut clique = None;
-    let resposta = ui.interact(rect, Id::new(("cartao-registro", s.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    if resposta.clicked() {
-        clique = Some(CliqueCartao::Abrir(s.tarefa_id));
-    }
-    if *rolar_ate == Some(s.tarefa_id) {
-        ui.scroll_to_rect(rect, Some(egui::Align::Center));
-        *rolar_ate = None;
-    }
-    let borda = if resposta.hovered() { p.destaque.gamma_multiply(0.55) } else { p.borda };
-    let pintor = ui.painter().clone();
-    pintor.rect(rect, CornerRadius::same(tema::RAIO_CARTAO), p.superficie_alta, Stroke::new(1.0, borda), StrokeKind::Inside);
-    // Registrados depois do cartão (o clique no botão e na pílula é deles) e
-    // desenhados depois do fundo dele.
-    let texto_botao = pedido::texto_botao(rect.width());
-    let largura_botao = pedido::largura_botao(ui.painter(), texto_botao);
-    let botao = Rect::from_min_size(pos2(rect.right() - 12.0 - largura_botao, rect.top() + 12.0), vec2(largura_botao, 32.0));
-    let r_botao = pedido::botao_no_cartao(ui, botao, Id::new(("pedir-cartao", s.tarefa_id)), texto_botao, pedido_info.caixa_aberta, !s.removida);
-    let r_botao = if s.removida { r_botao.on_hover_text("Tarefa removida") } else { r_botao.on_hover_text("Pedir algo a mais ao agente desta tarefa") };
-    if r_botao.clicked() {
-        clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
-    }
-    if !s.removida {
-        resposta.context_menu(|ui| {
-            ui.set_min_width(220.0);
-            if tema::opcao_menu(ui, "Pedir ao agente…", false) {
-                clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
-                ui.close();
-            }
-            if tema::opcao_menu(ui, "Abrir tarefa", false) {
-                clique = Some(CliqueCartao::AbrirTarefa(s.tarefa_id));
-                ui.close();
-            }
-            if tema::opcao_menu(ui, "Apresentar a partir daqui", false) {
-                clique = Some(CliqueCartao::Abrir(s.tarefa_id));
-                ui.close();
-            }
-            if na_daily && tema::opcao_menu(ui, "Tirar desta daily", false) {
-                clique = Some(CliqueCartao::TirarDaDaily(s.tarefa_id));
-                ui.close();
-            }
-        });
-    }
-    let interno = rect.shrink(16.0);
-    let mut y = interno.top();
-    let titulo = texto_em_linhas(&pintor, &s.titulo, forte(15.0), p.texto, largura_titulo(&pintor, rect.width()), 2);
-    let altura_titulo = titulo.size().y.max(32.0 - 16.0 + 4.0);
-    pintor.galley(pos2(interno.left(), y), titulo, p.texto);
-    y += altura_titulo + 8.0;
-
-    // Etiquetas: projeto, estado e as marcas Ontem / Hoje.
-    let mut x = interno.left();
-    if com_projeto && !s.projeto.is_empty() {
-        x = tema::etiqueta(&pintor, pos2(x, y + 1.5), &s.projeto, tema::fonte_etiqueta(), p.suave).right() + 8.0;
-    }
-    x = pilula_do_slide(s, false).pintar(&pintor, pos2(x, y)).right() + 8.0;
-    for parte in &s.partes {
-        if parte == "No período" {
-            continue;
-        }
-        let cor = if parte == "Hoje" { p.destaque } else { p.suave };
-        x = tema::etiqueta(&pintor, pos2(x, y + 1.5), parte, tema::fonte_etiqueta(), cor).right() + 6.0;
-    }
-    // A pílula do pedido: o texto longo na dica; o clique abre a caixa.
-    if let Some(e) = pedido_info.estado {
-        let pilula = pedido::pilula(e);
-        let area = Rect::from_min_size(pos2(x + 2.0, y), vec2(pilula.largura(&pintor), 22.0));
-        if area.right() <= interno.right() {
-            pilula.pintar(&pintor, area.min);
-            let r = ui.interact(area, Id::new(("pilula-pedido", s.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            if r.hovered() {
-                pintor.rect_stroke(area, CornerRadius::same(11), Stroke::new(1.0, e.cor.gamma_multiply(0.6)), StrokeKind::Inside);
-            }
-            if r.on_hover_text(&e.longo).clicked() {
-                clique = Some(CliqueCartao::Pedir(s.tarefa_id, botao));
-            }
-        }
-    }
-    y += 22.0;
-
-    let todos = topicos(s);
-    if !todos.is_empty() {
-        y += 8.0;
-        for t in todos.iter().take(3) {
-            let meio = y + ALTURA_TOPICO / 2.0;
-            pintor.circle_filled(pos2(interno.left() + 3.0, meio), 2.0, p.suave);
-            texto_cortado(&pintor, pos2(interno.left() + 12.0, meio), t, FontId::proportional(13.5), p.texto, interno.width() - 12.0);
-            y += ALTURA_TOPICO;
-        }
-        if todos.len() > 3 {
-            let n = todos.len() - 3;
-            let texto = if n == 1 { "+1 item".to_string() } else { format!("+{n} itens") };
-            pintor.text(pos2(interno.left() + 12.0, y + 8.0), egui::Align2::LEFT_CENTER, texto, FontId::proportional(12.5), p.suave);
-            y += 18.0;
-        }
-    }
-    if !s.nota.is_empty() {
-        y += 10.0;
-        let nota = sem_linhas_vazias(&s.nota);
-        let g = texto_em_linhas(&pintor, &nota, FontId::proportional(13.5).clone(), p.texto, interno.width() - 12.0, 2);
-        let altura = g.size().y;
-        pintor.rect_filled(Rect::from_min_size(pos2(interno.left(), y), vec2(2.0, altura)), CornerRadius::same(1), p.destaque);
-        let formato = egui::TextFormat { font_id: FontId::proportional(13.5), color: p.texto, italics: true, ..Default::default() };
-        let galeria = if pedido_info.respondido {
-            tema::cortar_pelo_fim(&pintor, &nota, formato, interno.width() - 12.0, 2)
-        } else {
-            tema::cortar(&pintor, &nota, formato, interno.width() - 12.0, 2, false)
-        };
-        pintor.galley(pos2(interno.left() + 12.0, y), galeria, p.texto);
-        y += altura;
-    }
-    if !s.anexos.is_empty() {
-        miniaturas(ui, &pintor, cache, s, pos2(interno.left(), y + 12.0));
-    }
-    // Sem dica: o cursor de mão e a borda realçada já dizem que abre o slide.
-    clique
-}
-
-/// As miniaturas dos anexos numa fileira (até três e "+n"), a partir de `canto`.
-/// Só desenham: o clique é de quem as mostra.
-pub(super) fn miniaturas(ui: &egui::Ui, pintor: &egui::Painter, cache: &mut CacheImagens, s: &api::Slide, canto: Pos2) {
-    let p = cores();
-    let y = canto.y;
-    let mut x = canto.x;
-    for (n, a) in s.anexos.iter().enumerate() {
-        let caixa = Rect::from_min_size(pos2(x, y), vec2(LADO_MINIATURA, LADO_MINIATURA));
-        if n == 3 {
-            caixa_mais(pintor, caixa, s.anexos.len() - 3);
-            break;
-        }
-        if a.video() {
-            pintor.rect(caixa, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie, Stroke::new(1.0, p.borda), StrokeKind::Inside);
-            pintor.circle_filled(caixa.center(), 12.0, p.destaque);
-            tema::play(pintor, caixa.center(), 5.0, tema::sobre_destaque());
-        } else {
-            // A miniatura só desenha: o clique é do cartão inteiro.
-            let ctx = ui.ctx().clone();
-            let raio = CornerRadius::same(tema::RAIO_CONTROLE);
-            match cache.pedir(&ctx, a.id) {
-                Miniatura::Pronta(t) => {
-                    let tamanho = t.size_vec2();
-                    let escala = (caixa.width() / tamanho.x).max(caixa.height() / tamanho.y);
-                    let visivel = vec2(caixa.width() / (tamanho.x * escala), caixa.height() / (tamanho.y * escala));
-                    egui::Image::new(t).uv(Rect::from_center_size(pos2(0.5, 0.5), visivel)).corner_radius(raio).paint_at(ui, caixa);
-                }
-                _ => {
-                    pintor.rect_filled(caixa, raio, p.realce);
-                }
-            }
-            pintor.rect_stroke(caixa, raio, Stroke::new(1.0, p.borda), StrokeKind::Inside);
-        }
-        x += LADO_MINIATURA + 8.0;
-    }
-}
-
 /// A pílula de estado de um slide: a palavra e a marca de `estado_do_slide`.
 /// "Removida" é a pílula neutra (fundo de cartão e borda), como a do projeto.
 pub fn pilula_do_slide(s: &api::Slide, grande: bool) -> Pilula<'static> {
@@ -688,74 +445,17 @@ pub fn sombra_rolagem(pintor: &egui::Painter, area: Rect, deslocamento: f32) {
     }
 }
 
-/// Grade de cartões (2 colunas a partir de 1100 px, 1 abaixo), com a altura
-/// do maior em cada linha. Devolve o clique.
-/// Colunas da grade de cartões numa largura (2 a partir de 1100 px).
-pub fn colunas_da_grade(largura: f32) -> usize {
-    if largura >= 1100.0 { 2 } else { 1 }
-}
-
-/// A largura de um cartão (de uma coluna) da grade.
-pub fn largura_coluna(largura: f32) -> f32 {
-    let colunas = colunas_da_grade(largura);
-    (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn grade(
-    ui: &mut egui::Ui,
-    slides: &[&api::Slide],
-    com_projeto: bool,
-    cache: &mut CacheImagens,
-    rolar_ate: &mut Option<i64>,
-    pedidos: &pedido::Pedidos,
-    caixa_aberta: Option<i64>,
-    na_daily: bool,
-) -> Option<CliqueCartao> {
-    let largura = ui.available_width();
-    let colunas = colunas_da_grade(largura);
-    let largura_cartao = largura_coluna(largura);
-    let mut clicada = None;
-    for linha in slides.chunks(colunas) {
-        let altura = linha.iter().map(|s| altura_cartao(ui, s, largura_cartao)).fold(0.0, f32::max);
-        let (faixa, _) = ui.allocate_exact_size(vec2(largura, altura), Sense::hover());
-        for (i, s) in linha.iter().enumerate() {
-            let rect = Rect::from_min_size(faixa.min + vec2(i as f32 * (largura_cartao + 12.0), 0.0), vec2(largura_cartao, altura));
-            if ui.is_rect_visible(rect) || *rolar_ate == Some(s.tarefa_id) {
-                let resumo = pedidos.get(&s.tarefa_id);
-                let info = PedidoNoCartao {
-                    estado: resumo.map(|r| &r.estado),
-                    caixa_aberta: caixa_aberta == Some(s.tarefa_id),
-                    respondido: resumo.is_some_and(|r| r.pedido.estado == "respondido"),
-                };
-                if let Some(c) = cartao(ui, rect, s, com_projeto, cache, rolar_ate, &info, na_daily) {
-                    clicada = Some(c);
-                }
-            }
-        }
-        ui.add_space(12.0 - ui.spacing().item_spacing.y);
-    }
-    clicada
-}
-
-/// Esqueleto do estado "carregando": os números e 4 cartões, parados.
+/// Esqueleto do estado "carregando": um título de grupo e linhas, parados.
 pub fn esqueleto_pagina(ui: &mut egui::Ui) {
     let largura = ui.available_width();
-    let (area, _) = ui.allocate_exact_size(vec2(largura, 72.0 + 28.0 + 2.0 * 152.0), Sense::hover());
+    let (area, _) = ui.allocate_exact_size(vec2(largura, 8.0 * 40.0), Sense::hover());
     let pintor = ui.painter();
-    for i in 0..5 {
-        let x = area.left() + i as f32 * 112.0;
-        tema::esqueleto(pintor, Rect::from_min_size(pos2(x, area.top()), vec2(72.0, 32.0)), tema::RAIO_ETIQUETA);
-        tema::esqueleto(pintor, Rect::from_min_size(pos2(x, area.top() + 40.0), vec2(56.0, 12.0)), tema::RAIO_ETIQUETA);
-    }
-    let colunas = if largura >= 1100.0 { 2 } else { 1 };
-    let lc = (largura - 12.0 * (colunas as f32 - 1.0)) / colunas as f32;
-    for i in 0..4 {
-        let (l, c) = (i / colunas, i % colunas);
-        let min = pos2(area.left() + c as f32 * (lc + 12.0), area.top() + 100.0 + l as f32 * 152.0);
-        if min.y + 140.0 <= area.bottom() + 1.0 {
-            tema::esqueleto(pintor, Rect::from_min_size(min, vec2(lc, 140.0)), tema::RAIO_CARTAO);
-        }
+    tema::esqueleto(pintor, Rect::from_min_size(area.min, vec2(120.0, 16.0)), tema::RAIO_ETIQUETA);
+    for i in 0..6 {
+        let y = area.top() + 36.0 + i as f32 * 40.0;
+        tema::esqueleto(pintor, Rect::from_min_size(pos2(area.left() + 12.0, y), vec2(12.0, 12.0)), 6);
+        let w = (largura - 60.0) * [0.9, 0.7, 0.8, 0.6, 0.85, 0.5][i];
+        tema::esqueleto(pintor, Rect::from_min_size(pos2(area.left() + 38.0, y), vec2(w, 14.0)), tema::RAIO_ETIQUETA);
     }
 }
 

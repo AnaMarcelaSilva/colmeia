@@ -250,10 +250,6 @@ struct Colmeia {
     pode_fechar: bool,
     /// Onde o aviso do rodapé aparece neste quadro.
     ancora_aviso: Option<egui::Pos2>,
-    /// A caixa "Pedir ao agente" aberta na Daily ou na Sprint, presa ao botão
-    /// do cartão, e os rascunhos por tarefa (ficam quando a caixa fecha).
-    caixa_pedido: Option<(pedido::Caixa, egui::Rect)>,
-    rascunhos: HashMap<i64, String>,
     /// Quando cada agente respondeu um pedido pela última vez.
     respondeu_em: HashMap<i64, f64>,
     /// Navegador da tarefa: se há Chrome (lido uma vez), a caixa de endereço
@@ -368,8 +364,6 @@ impl Colmeia {
             pediu_atencao: false,
             pode_fechar: false,
             ancora_aviso: None,
-            caixa_pedido: None,
-            rascunhos: HashMap::new(),
             respondeu_em: HashMap::new(),
             navegador: None,
             popover_navegador: None,
@@ -2513,48 +2507,6 @@ impl Colmeia {
         }
     }
 
-    /// Fecha a caixa "Pedir ao agente", guardando o rascunho da tarefa.
-    fn fechar_caixa_pedido(&mut self) {
-        if let Some((caixa, _)) = self.caixa_pedido.take()
-            && !caixa.texto.trim().is_empty()
-        {
-            self.rascunhos.insert(caixa.tarefa, caixa.texto);
-        }
-    }
-
-    /// A caixa da Daily e da Sprint, presa ao botão do cartão: abre embaixo,
-    /// ou em cima se não couber.
-    fn mostrar_caixa_pedido(&mut self, ctx: &egui::Context, agora: f64) {
-        let Some((caixa, botao)) = &mut self.caixa_pedido else { return };
-        let tela = ctx.content_rect();
-        let (ancora, pivo) = if botao.bottom() + 6.0 + 380.0 < tela.bottom() {
-            (botao.right_bottom() + egui::vec2(0.0, 6.0), egui::Align2::RIGHT_TOP)
-        } else {
-            (botao.right_top() - egui::vec2(0.0, 6.0), egui::Align2::RIGHT_BOTTOM)
-        };
-        let resumos = pedido::resumir(&self.modelo);
-        let tarefa = caixa.tarefa;
-        let saida = caixa.mostrar(ctx, ancora, pivo, resumos.get(&tarefa));
-        match saida {
-            None => {}
-            Some(pedido::Saida::Fechar) => self.fechar_caixa_pedido(),
-            Some(pedido::Saida::Enviado(p)) => {
-                self.caixa_pedido = None;
-                self.rascunhos.remove(&tarefa);
-                let titulo = self.modelo.tarefas.iter().find(|t| t.id == tarefa).map(|t| t.titulo.clone()).unwrap_or_default();
-                if !self.modelo.pedidos.iter().any(|x| x.id == p.id) {
-                    self.modelo.pedidos.push(*p);
-                }
-                self.avisar(TipoAviso::Neutro, format!("Pedido enviado ao agente de «{titulo}»"), agora);
-            }
-            Some(pedido::Saida::AbrirTarefa) => {
-                self.fechar_caixa_pedido();
-                let agente = resumos.get(&tarefa).map(|r| r.pedido.agente_id);
-                self.abrir_tarefa(tarefa, agente);
-            }
-        }
-    }
-
     /// Fechar a janela não para os agentes: com algum rodando, a Colmeia pergunta.
     fn ao_fechar(&mut self, ctx: &egui::Context) {
         // Fechar a janela grava a lousa na hora (esperando a resposta).
@@ -2956,11 +2908,10 @@ impl eframe::App for Colmeia {
                     let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
                     self.registro.conectado = self.pode_mudar();
                     self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
-                    self.registro.pedidos = pedido::resumir(&self.modelo);
-                    self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
                     // O conteúdo das páginas tem as próprias margens (24 nas laterais).
                     ui.add_space(4.0);
-                    acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos, &self.modelo.tarefas);
+                    acoes_linha =
+                        self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos, &self.modelo.tarefas, &self.modelo.frases);
                 }
                 Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
                 Tela::Lousa(ws) => {
@@ -3017,33 +2968,14 @@ impl eframe::App for Colmeia {
                 registro::Acao::IrParaQuadro => self.tela = Tela::Quadro,
                 registro::Acao::Reabrir(id) => self.reabrir(id, &ctx, agora),
                 registro::Acao::Recorte(r) => self.mudar_escopo(Escopo::do_recorte(r)),
-                registro::Acao::AbrirQuadro(projeto) => {
-                    self.mudar_escopo(Escopo::Projeto(projeto));
-                    self.tela = Tela::Quadro;
-                }
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
                 registro::Acao::Apresentar { deck, periodo, tarefa } => {
-                    self.fechar_caixa_pedido();
                     self.abrir_apresentacao(&ctx, Some(*deck), periodo, tarefa.map_or(Inicio::Capa, Inicio::Tarefa), false)
-                }
-                registro::Acao::PedirAoAgente { tarefa, tipo, periodo, botao } => {
-                    // O mesmo botão de novo fecha (o rascunho fica).
-                    let mesma = self.caixa_pedido.as_ref().is_some_and(|(c, _)| c.tarefa == tarefa);
-                    self.fechar_caixa_pedido();
-                    if !mesma && self.pode_mudar() {
-                        let rascunho = self.rascunhos.remove(&tarefa).unwrap_or_default();
-                        self.caixa_pedido = Some((pedido::Caixa::nova(&ctx, tarefa, &tipo, &periodo, rascunho), botao));
-                    }
                 }
             }
         }
         if let Some((dono, acoes)) = acoes_lousa {
             self.tratar_lousa(dono, acoes, &ctx, agora);
-        }
-        if matches!(self.tela, Tela::Registro(_)) {
-            self.mostrar_caixa_pedido(&ctx, agora);
-        } else {
-            self.fechar_caixa_pedido();
         }
         if let Tela::Tarefa { .. } = self.tela {
             self.mostrar_popover_navegador(&ctx);

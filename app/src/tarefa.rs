@@ -359,12 +359,8 @@ impl Colmeia {
         let caixa_mensagem =
             Rect::from_min_max(pos2(coluna.left() + MARGEM_CARTAO, terminal_rect.bottom() + MARGEM_CARTAO), coluna.max - vec2(MARGEM_CARTAO, 2.0));
         // Com um diálogo ou caixa por cima, o Enter é de quem está por cima.
-        let teclado_livre = self.dialogo.is_none()
-            && !self.banco.modal_aberto()
-            && self.caixa_pedido.is_none()
-            && self.apresentacao.is_none()
-            && self.palco.is_none()
-            && self.popover_navegador.is_none();
+        let teclado_livre =
+            self.dialogo.is_none() && !self.banco.modal_aberto() && self.apresentacao.is_none() && self.palco.is_none() && self.popover_navegador.is_none();
         if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, agentes, foco, id, teclado_livre) {
             for agente in envio.destinos {
                 if let Some(t) = self.terminais.get(&agente) {

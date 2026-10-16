@@ -2195,7 +2195,7 @@ impl Apresentacao {
             match caixa.mostrar(&ctx, ancora, egui::Align2::RIGHT_BOTTOM, self.pedidos.get(&tarefa)) {
                 None => {}
                 Some(pedido::Saida::Fechar) => self.fechar_caixa(),
-                Some(pedido::Saida::Enviado(_)) => {
+                Some(pedido::Saida::Enviado) => {
                     self.caixa = None;
                     self.rascunhos.remove(&tarefa);
                     self.aviso = Some(("Pedido enviado ao agente".into(), 0.0, Tom::Neutro));

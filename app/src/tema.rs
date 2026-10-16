@@ -1780,30 +1780,6 @@ pub fn cortar(pintor: &egui::Painter, texto: &str, formato: egui::TextFormat, la
     galeria
 }
 
-/// Texto em até `linhas` linhas mostrando o FIM: quando não cabe, o começo
-/// sai e entra um "…" na frente. Para a nota que o agente complementa (a
-/// resposta vem no fim). Se o fim ainda não couber, corta como `cortar`.
-pub fn cortar_pelo_fim(pintor: &egui::Painter, texto: &str, formato: egui::TextFormat, largura: f32, linhas: usize) -> Arc<egui::Galley> {
-    let linhas = linhas.max(1);
-    let mut trabalho = egui::text::LayoutJob::single_section(texto.to_owned(), formato.clone());
-    trabalho.wrap = egui::text::TextWrapping { max_width: largura.max(10.0), ..Default::default() };
-    let inteiro = pintor.layout_job(trabalho);
-    let total = inteiro.rows.len();
-    if total <= linhas {
-        return cortar(pintor, texto, formato, largura, linhas, false);
-    }
-    // Pula as primeiras linhas; o "…" pode empurrar uma linha a mais: pula mais uma.
-    for pular in (total - linhas)..total {
-        let caracteres: usize = inteiro.rows[..pular].iter().map(|r| r.char_count_including_newline().0).sum();
-        let resto: String = texto.chars().skip(caracteres).collect();
-        let galeria = cortar(pintor, &format!("…{}", resto.trim_start()), formato.clone(), largura, linhas, false);
-        if !galeria.elided {
-            return galeria;
-        }
-    }
-    cortar(pintor, texto, formato, largura, linhas, false)
-}
-
 /// Uma linha em duas partes: o começo pode ser cortado com "…", o fim fica
 /// inteiro (a hora, o projeto). `pos` é o canto de cima à esquerda. Diz se cortou.
 #[allow(clippy::too_many_arguments)]
@@ -2396,27 +2372,6 @@ mod testes {
         for fim in textos {
             assert!(fim.ends_with('…') && !fim.ends_with(".…") && !fim.ends_with("……"), "{fim:?}");
         }
-    }
-
-    #[test]
-    fn corte_pelo_fim_mostra_o_que_o_agente_acrescentou() {
-        let ctx = egui::Context::default();
-        let (mut curto, mut longo) = (String::new(), String::new());
-        let mut linhas = 0;
-        let mut saida = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let pintor = ui.painter().clone();
-            let formato = egui::TextFormat::simple(FontId::proportional(13.0), Color32::WHITE);
-            let texto = |g: &egui::Galley| g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect::<String>();
-            curto = texto(&cortar_pelo_fim(&pintor, "Só uma linha", formato.clone(), 400.0, 2));
-            let nota = "Primeiro parágrafo.\nSegundo parágrafo.\nTerceiro parágrafo.\nQuarto.\nCobertura de testes: 87%";
-            let g = cortar_pelo_fim(&pintor, nota, formato, 400.0, 2);
-            linhas = g.rows.len();
-            longo = texto(&g);
-        });
-        saida.textures_delta.clear();
-        assert_eq!(curto, "Só uma linha");
-        assert_eq!(linhas, 2);
-        assert!(longo.starts_with('…') && longo.ends_with("Cobertura de testes: 87%"), "{longo:?}");
     }
 
     #[test]

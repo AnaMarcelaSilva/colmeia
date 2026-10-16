@@ -1,8 +1,8 @@
 //! Registro do trabalho: o histórico, a página da daily e a da sprint,
-//! do escopo da barra lateral (o perfil inteiro, um workspace ou um projeto;
-//! com mais de um projeto, a daily e a sprint separam por projeto). Os textos vêm prontos do núcleo; aqui só
-//! se mostra, copia e salva. A daily e a sprint são uma prévia do deck da
-//! apresentação: os mesmos cartões, na mesma ordem dos slides.
+//! do escopo da barra lateral (o perfil inteiro, um workspace ou um projeto).
+//! Os textos vêm prontos do núcleo; aqui só se mostra, copia e salva. A daily
+//! e a sprint são o roteiro da fala: uma linha por tarefa, com a frase que o
+//! agente deixou, na ordem dos slides da apresentação.
 //!
 //! Desempenho: a lista do histórico é virtualizada (só o que aparece é
 //! desenhado), os pedidos e as imagens são buscados fora da thread da tela, e
@@ -15,6 +15,8 @@
 
 mod comum;
 mod daily;
+mod frase;
+mod gerar;
 mod historico;
 mod linha;
 mod lista;
@@ -76,11 +78,6 @@ impl<'a> Escopo<'a> {
     pub fn varios(&self) -> bool {
         self.projetos.len() > 1
     }
-
-    /// Os projetos do recorte sem nenhuma seção (sem atividade no período).
-    pub fn sem_atividade(&self, secoes: &[i64]) -> Vec<&'a Projeto> {
-        self.projetos.iter().filter(|p| !secoes.contains(&p.id)).copied().collect()
-    }
 }
 
 /// As páginas do registro.
@@ -113,8 +110,6 @@ pub enum Acao {
     /// Mudar o escopo (o perfil, um workspace ou um projeto): "Só este
     /// projeto", "Ver o workspace inteiro", o chip "Ver".
     Recorte(api::Recorte),
-    /// Abrir o quadro deste projeto.
-    AbrirQuadro(i64),
     /// "Reabrir" no Histórico: a tarefa volta para o Backlog.
     Reabrir(i64),
     Avisar(TipoAviso, String),
@@ -124,25 +119,6 @@ pub enum Acao {
         periodo: Option<api::PeriodoSprint>,
         tarefa: Option<i64>,
     },
-    /// Abrir (ou fechar) a caixa "Pedir ao agente" da tarefa, presa ao botão
-    /// do cartão. A resposta vai para a nota do deck (tipo e período).
-    PedirAoAgente {
-        tarefa: i64,
-        tipo: String,
-        periodo: String,
-        botao: egui::Rect,
-    },
-}
-
-/// O clique num cartão vira o pedido à tela principal; tirar da daily o
-/// registro resolve sozinho (veja `tirar_da_daily`).
-fn acao_do_clique(clique: comum::CliqueCartao, deck: &api::Deck, periodo: Option<api::PeriodoSprint>) -> Option<Acao> {
-    Some(match clique {
-        comum::CliqueCartao::Abrir(tarefa) => Acao::Apresentar { deck: Box::new(deck.clone()), periodo, tarefa: Some(tarefa) },
-        comum::CliqueCartao::Pedir(tarefa, botao) => Acao::PedirAoAgente { tarefa, tipo: deck.tipo.clone(), periodo: deck.chave_nota.clone(), botao },
-        comum::CliqueCartao::AbrirTarefa(tarefa) => Acao::AbrirTarefa { tarefa, agente: None, lousa: false },
-        comum::CliqueCartao::TirarDaDaily(_) => return None,
-    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -213,11 +189,24 @@ enum Resposta {
     /// Um assunto criado, renomeado, apagado ou tarefas que mudaram de
     /// assunto; `Ok` traz o aviso (vazio, sem aviso).
     Assuntos(Result<String, String>),
+    /// "Gerar com IA": o Claude Code está instalado (`None` sem resposta),
+    /// a proposta para a sprint e o resultado de aceitar.
+    Ferramentas(Option<bool>),
+    Proposta {
+        sprint: i64,
+        resultado: Result<api::Proposta, String>,
+    },
+    PropostaAceita(Result<(), String>),
 }
 
-/// Um item da lista da sprint em edição: o título e a descrição só da sprint.
+/// Uma linha em edição: na sprint, o título e a descrição só dela; na daily,
+/// só a frase (a nota de hoje).
 pub(super) struct EdicaoItem {
     pub tarefa: i64,
+    pub daily: bool,
+    /// O estado da tarefa, para o ícone da linha em edição.
+    pub coluna: String,
+    pub erro: bool,
     pub titulo: String,
     pub descricao: String,
     /// O título da tarefa: igual a ele, o título da sprint é apagado.
@@ -241,6 +230,8 @@ struct Visor {
 }
 
 const MAX_MINIATURAS: usize = 64;
+/// Largura máxima da daily e da sprint.
+const COLUNA_LEITURA: f32 = 860.0;
 /// Altura das miniaturas guardadas (o dobro do que aparece, para telas de alta densidade).
 const ALTURA_MINIATURA: u32 = 128;
 
@@ -303,20 +294,22 @@ pub struct Registro {
     /// Editando as datas da sprint (DD/MM/AAAA) e o erro do núcleo.
     datas_sprint: Option<(String, String)>,
     erro_datas: Option<String>,
-    /// A sprint em lista (o resumo para a reunião) ou nos cartões.
-    pub(super) em_lista: bool,
-    /// Itens da lista abertos, com o cartão completo embaixo.
-    pub(super) abertos: HashSet<i64>,
     pub(super) edicao: Option<EdicaoItem>,
+    /// O Enter da linha em edição (a regra das caixas de mensagem).
+    pub(super) composicao: crate::teclas::Composicao,
+    /// As frases que você editou nesta sessão ((daily, tarefa)): "editada por você".
+    pub(super) editadas: HashSet<(bool, i64)>,
+    /// As seções recolhidas da sprint; só na memória, valem até fechar a Colmeia.
+    pub(super) recolhidas: HashSet<i64>,
+    /// "Gerar com IA": o painel aberto e se o Claude Code está instalado.
+    gerar: Option<gerar::GerarIa>,
+    claude: Option<bool>,
+    pedindo_ferramentas: bool,
     /// O nome de assunto sendo escrito: (0, nome) cria um, (id, nome) renomeia.
     pub(super) nome_assunto: Option<(i64, String)>,
 
-    /// Ao voltar da apresentação, a página rola até o cartão do último slide visto.
+    /// Ao voltar da apresentação, a página rola até a linha do último slide visto.
     pub rolar_ate: Option<i64>,
-    /// O pedido ao agente de cada tarefa (a tela principal põe a cada quadro)
-    /// e a tarefa com a caixa "Pedir ao agente" aberta.
-    pub pedidos: crate::pedido::Pedidos,
-    pub caixa_aberta: Option<i64>,
 
     /// A opção "Mostrar tempo dos agentes" do perfil (a tela principal põe a
     /// cada quadro) e a última vista aqui, para notar a troca.
@@ -327,8 +320,6 @@ pub struct Registro {
     atualizando: bool,
     /// O texto editado da daily ou da sprint com tempo é trocado pelo novo.
     refazer_sem_tempo: bool,
-    /// Ir para a seção deste projeto (a fileira de saltos).
-    pub(super) rolar_secao: Option<i64>,
     /// O escopo mudou: a daily e a sprint abrem no topo (com os números e os
     /// saltos), não no deslocamento da visão anterior. A mesma visão
     /// atualizada por evento mantém a rolagem.
@@ -380,18 +371,19 @@ impl Default for Registro {
             pedindo_sprints: false,
             datas_sprint: None,
             erro_datas: None,
-            em_lista: true,
-            abertos: HashSet::new(),
             edicao: None,
+            composicao: Default::default(),
+            editadas: HashSet::new(),
+            recolhidas: HashSet::new(),
+            gerar: None,
+            claude: None,
+            pedindo_ferramentas: false,
             nome_assunto: None,
             rolar_ate: None,
-            pedidos: Default::default(),
-            caixa_aberta: None,
             mostrar_tempo: false,
             tempo_visto: None,
             atualizando: false,
             refazer_sem_tempo: false,
-            rolar_secao: None,
             ao_topo: [false; 2],
         }
     }
@@ -543,7 +535,7 @@ impl Registro {
         self.datas_sprint = None;
         self.erro_datas = None;
         self.edicao = None;
-        self.abertos.clear();
+        self.fechar_gerar(true);
         self.pedir_sprint(ctx);
     }
 
@@ -563,17 +555,46 @@ impl Registro {
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::Assuntos(f()));
     }
 
-    /// Grava o item da lista em edição: o título só da sprint (igual ao da
-    /// tarefa, ele é apagado) e a descrição, que é a nota da sprint.
+    /// Abre a linha em edição, com a frase que aparece nela (na daily, a de
+    /// ontem, se ainda não há a de hoje).
+    fn abrir_edicao(&mut self, s: &api::Slide, daily: bool, frase: &frase::Frase) {
+        let descricao = match frase {
+            frase::Frase::Pronta(t) => t.to_string(),
+            _ => String::new(),
+        };
+        let titulo_tarefa = if s.titulo_original.is_empty() { s.titulo.clone() } else { s.titulo_original.clone() };
+        self.composicao = Default::default();
+        self.edicao = Some(EdicaoItem {
+            tarefa: s.tarefa_id,
+            daily,
+            coluna: s.coluna.clone(),
+            erro: s.grupo == "erros",
+            titulo: s.titulo.clone(),
+            descricao: descricao.clone(),
+            titulo_tarefa,
+            titulo_antes: s.titulo.clone(),
+            // A frase de ontem não é a nota de hoje: salvar sem mudar grava.
+            descricao_antes: if s.nota.trim().is_empty() { String::new() } else { descricao },
+            versao: s.nota_versao.clone(),
+            salvando: false,
+            focar: true,
+            aviso: None,
+        });
+    }
+
+    /// Grava a linha em edição: na sprint, o título só dela (igual ao da
+    /// tarefa, ele é apagado) e a descrição, que é a nota da sprint; na
+    /// daily, a frase, que é a nota de hoje.
     pub(super) fn salvar_item(&mut self, ctx: &egui::Context) {
-        let Some(deck) = self.deck_sprint.as_ref() else { return };
-        let (sprint, chave_nota) = (deck.sprint_id, deck.chave_nota.clone());
         let Some(e) = self.edicao.as_mut().filter(|e| !e.salvando) else { return };
-        if sprint == 0 {
+        let deck = if e.daily { self.deck_daily.as_ref() } else { self.deck_sprint.as_ref() };
+        let Some(deck) = deck else { return };
+        let (sprint, chave_nota, tipo) = (deck.sprint_id, deck.chave_nota.clone(), deck.tipo.clone());
+        if !e.daily && sprint == 0 {
             return;
         }
         let titulo = e.titulo.trim().to_string();
-        let mudou_titulo = titulo != e.titulo_antes.trim();
+        let mudou_titulo = !e.daily && titulo != e.titulo_antes.trim();
         let mudou_descricao = e.descricao.trim() != e.descricao_antes.trim();
         if !mudou_titulo && !mudou_descricao {
             self.edicao = None;
@@ -593,7 +614,7 @@ impl Registro {
                     api::titulo_sprint(sprint, tarefa, &titulo)?;
                 }
                 if mudou_descricao {
-                    return Ok(match api::gravar_nota(tarefa, "sprint", &chave_nota, &descricao, &versao)? {
+                    return Ok(match api::gravar_nota(tarefa, &tipo, &chave_nota, &descricao, &versao)? {
                         api::NotaGravada::Ok(_) => None,
                         api::NotaGravada::Mudou { texto, versao } => Some((texto, versao)),
                     });
@@ -648,11 +669,6 @@ impl Registro {
     /// Desligou o tempo e a página ainda não tem a resposta sem ele.
     pub fn atualizando(&self) -> bool {
         self.atualizando
-    }
-
-    /// A página pode mostrar o tempo dos agentes (a opção e a resposta).
-    pub(super) fn com_tempo(&self, deck: &api::Deck) -> bool {
-        self.mostrar_tempo && deck.tempo_agentes
     }
 
     /// O deck pronto da página, se houver trabalho para apresentar.
@@ -850,16 +866,22 @@ impl Registro {
                     e.salvando = false;
                     match resultado {
                         Ok(None) => {
+                            let daily = e.daily;
                             self.edicao = None;
-                            acoes.push(Acao::Avisar(TipoAviso::Neutro, "Salvo só nesta sprint".into()));
-                            self.pedir_so_sprint(ctx);
+                            self.editadas.insert((daily, tarefa));
+                            if daily {
+                                self.pedir_so_daily(ctx);
+                            } else {
+                                acoes.push(Acao::Avisar(TipoAviso::Neutro, "Salvo só nesta sprint".into()));
+                                self.pedir_so_sprint(ctx);
+                            }
                         }
                         Ok(Some((texto, versao))) => {
                             // O título (se mudou) já foi; falta a descrição. A próxima
                             // gravação vale sobre a versão de agora, que aparece no aviso.
                             e.titulo_antes = e.titulo.trim().to_string();
                             e.versao = versao;
-                            e.aviso = Some(format!("A descrição mudou enquanto você editava. Agora ela é:\n{texto}\nSalve de novo para ficar com a sua."));
+                            e.aviso = Some(format!("A frase mudou enquanto você editava. Agora ela é:\n{texto}\nSalve de novo para ficar com a sua."));
                         }
                         Err(erro) => e.aviso = Some(format!("Não consegui salvar: {erro}")),
                     }
@@ -874,6 +896,7 @@ impl Registro {
                     Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar os assuntos: {e}"))),
                 },
                 Resposta::PaginaTarefa { tarefa, primeira, resultado } => self.receber_da_tarefa(tarefa, primeira, resultado),
+                r @ (Resposta::Ferramentas(_) | Resposta::Proposta { .. } | Resposta::PropostaAceita(_)) => self.receber_gerar(ctx, r, acoes),
                 // Resposta de um escopo (ou período) que já não está na tela.
                 _ => {}
             }
@@ -895,9 +918,20 @@ impl Registro {
     }
 
     /// Desenha a página do `recorte`. `projetos` são todos os do perfil, na
-    /// ordem da barra lateral (para os nomes, os links e o "sem atividade").
-    /// `tarefas` dão a branch e os agentes da tarefa aberta no histórico.
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, aba: Aba, perfil: i64, recorte: api::Recorte, projetos: &[Projeto], tarefas: &[Tarefa]) -> Vec<Acao> {
+    /// ordem da barra lateral (para os nomes e os links). `tarefas` dão a
+    /// branch e os agentes da tarefa aberta no histórico; `escrevendo`, as
+    /// tarefas cuja frase da reunião o agente está escrevendo agora.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mostrar(
+        &mut self,
+        ui: &mut egui::Ui,
+        aba: Aba,
+        perfil: i64,
+        recorte: api::Recorte,
+        projetos: &[Projeto],
+        tarefas: &[Tarefa],
+        escrevendo: &HashSet<i64>,
+    ) -> Vec<Acao> {
         let ctx = ui.ctx().clone();
         let mut acoes = Vec::new();
         let chave = (perfil, recorte);
@@ -906,10 +940,11 @@ impl Registro {
                 (self.periodo, self.texto_daily_aberto, self.focar_daily, self.galeria_aberta, self.de.clone(), self.ate.clone(), self.mostrar_tempo);
             // As sprints são do perfil: trocar só o recorte mantém a escolhida.
             let sprints = if self.chave.is_some_and(|c| c.0 == perfil) { (self.sprints.take(), self.sprint_escolhida) } else { (None, None) };
-            let em_lista = self.em_lista;
+            let recolhidas = std::mem::take(&mut self.recolhidas);
+            let claude = self.claude;
             *self = Registro { canal: std::mem::replace(&mut self.canal, mpsc::channel()), ..Registro::default() };
             (self.sprints, self.sprint_escolhida) = sprints;
-            self.em_lista = em_lista;
+            (self.recolhidas, self.claude) = (recolhidas, claude);
             let tempo;
             (self.periodo, self.texto_daily_aberto, self.focar_daily, self.galeria_aberta, self.de, self.ate, tempo) = guardado;
             self.mostrar_tempo = tempo;
@@ -943,19 +978,18 @@ impl Registro {
         }
         self.receber(&ctx, &mut acoes);
 
-        // A daily e a sprint na mesma moldura de 1120, com o título na mesma
-        // coluna esquerda; o histórico (lista e tarefa lado a lado) usa a
-        // largura toda, como o quadro.
+        // A daily e a sprint numa coluna de leitura (linhas longas cansam);
+        // o histórico (lista e tarefa lado a lado) usa a largura toda, como o quadro.
         let area = ui.available_rect_before_wrap();
-        let largura = if aba == Aba::Historico { area.width() } else { area.width().min(1120.0) };
+        let largura = if aba == Aba::Historico { area.width() } else { area.width().min(COLUNA_LEITURA) };
         let esquerda = area.center().x - largura / 2.0;
         let caixa = egui::Rect::from_min_size(egui::pos2(esquerda, area.top()), vec2(largura, area.height()));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::top_down(egui::Align::Min)));
         let escopo = Escopo::novo(recorte, projetos);
         match aba {
             Aba::Historico => self.pagina_historico(&mut filho, tarefas, matches!(recorte, api::Recorte::Projeto(_)), &mut acoes),
-            Aba::Daily => self.pagina_daily(&mut filho, &escopo, &mut acoes),
-            Aba::Sprint => self.pagina_sprint(&mut filho, &escopo, &mut acoes),
+            Aba::Daily => self.pagina_daily(&mut filho, &escopo, escrevendo, &mut acoes),
+            Aba::Sprint => self.pagina_sprint(&mut filho, &escopo, escrevendo, &mut acoes),
         }
         ui.allocate_rect(area, Sense::hover());
         self.mostrar_visor(&ctx, &mut acoes);
