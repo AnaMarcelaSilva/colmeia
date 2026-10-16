@@ -27,6 +27,7 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | Armazenamento | SQLite em modo WAL | Estado e eventos só acrescentados, encadeados por hash |
 | Eventos | WebSocket por perfil | Leva à tela, na hora, cada mudança e o estado dos agentes |
 | MCP dos agentes | `colmeia-nucleo mcp` (stdio) | O próprio núcleo como servidor MCP para os agentes do Claude Code que a Colmeia abre, restrito à tarefa de cada um |
+| Uso dos agentes | `colmeia-nucleo uso` (statusLine) | Os settings da sessão (`--settings`) põem uma statusLine que manda ao núcleo o contexto e os limites da conta; o `~/.claude` não é tocado |
 | Navegador | Chrome ou Chromium por `--remote-debugging-pipe` | Uma janela por tarefa, ao lado da Colmeia, para abrir e capturar o que o agente criou |
 | Bancos de dados | `database/sql` com pgx, go-sql-driver/mysql, go-mssqldb e o SQLite do modernc | Conexões do perfil só como cliente: árvore, console e consultas dos agentes com aprovação |
 | Chaveiro | Secret Service pelo D-Bus (go-keyring) | Onde ficam as senhas das conexões; sem ele, só na memória do núcleo |
@@ -42,7 +43,7 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
 | `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`), o aviso antes de capturar (`aviso_captura`) ou a exibição do tempo dos agentes no registro (`tempo_agentes`, desligada por padrão; gera o evento `perfil.tempo_agentes`, levado às telas só com o booleano) |
-| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
+| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes, uso}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=` ou `workspace=` (nunca os dois: 400; de outro perfil: 404), `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
 | `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto, tempo_agentes}`; aceita `projeto=` ou `workspace=`. Com mais de um projeto no recorte, os blocos citam o projeto e o texto sai separado por projeto |
@@ -124,6 +125,7 @@ Rotas dos agentes (`/v1/agente/*`): só aceitam o token de um agente, e o token 
 | `GET /v1/agente/lousa` | A lousa da tarefa do token: cada item com id, tipo, posição, tamanho, cor, título, texto, pontas e autor |
 | `GET /v1/agente/bancos` | As conexões do perfil com "Agentes podem pedir consultas": `{conexoes: [{id, nome, tipo, banco}]}`, sem host nem usuário |
 | `POST /v1/agente/bancos/{id}/consultas` | `{sql, banco?, limite? (até 200)}`: só leitura (uma alteração é recusada, mesmo com escrita ligada na conexão) e sem as funções que leem arquivos do servidor ou derrubam sessões. Cria o pedido, segura o agente em `aguardando · aprovar consulta` e espera a sua resposta por até 5 min (sem resposta, conta como recusa). Aprovada: `{texto, linhas, mais}`, com até 64 KB em colunas separadas por `\|`; recusada, expirada ou cancelada: 409 `{erro, resultado}` |
+| `POST /v1/agente/uso` | `{contexto?: {usado, tamanho, porcentagem}, cinco_horas?: {porcentagem, volta}, semana?: {porcentagem, volta}}` (`volta` em segundos Unix): o que a statusLine leu; até 4 KB, guardado só em memória, 204. Vale só para um agente rodando |
 | `POST /v1/agente/lousa/elementos` | `{elementos: [...]}`: até 50 itens (nota, texto, código, ligação e imagem de um anexo da própria tarefa), com `ref` local para as ligações; sem `x`/`y`, o núcleo põe numa grade à direita do que existe, e sem tamanho estima pelo texto. Só acrescenta; grava `lousa.agente` |
 
 Erros voltam como `{"erro": "mensagem"}` em português, com 400 (pedido inválido), 404 ou 409 (nome repetido); a tela mostra a mensagem como veio.
@@ -142,6 +144,7 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `agente.criado` / `agente.removido` | `agente` / `agente_id`, `tarefa_id` |
 | `agente.iniciou` | `agente_id`, `tarefa_id`, `desde`, `desde_hora` |
 | `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação`, `esperando resposta` ou `aprovar consulta`), `desde`, `desde_hora` |
+| `agente.uso` | `agente_id`, `tarefa_id`, `contexto?` (`usado`, `tamanho`, `porcentagem`), `cinco_horas?` e `semana?` (`porcentagem`, `volta`, `volta_texto`, "volta às 14:30"); só quando muda. Os limites são da conta do perfil; sem `contexto`, o agente ainda não tem |
 | `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `hora`, `texto`) |
 | `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` (e `agente_id`, se veio de um agente) |
 | `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |

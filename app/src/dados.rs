@@ -324,6 +324,18 @@ pub struct Modelo {
     /// Como terminou o último pedido de cada agente (a linha que fica no
     /// lugar do cartão de pedido, até o próximo).
     pub resolvidas: std::collections::HashMap<i64, Resolvida>,
+    pub uso: Uso,
+}
+
+/// O uso que os agentes do Claude Code mandam pela statusLine: o contexto de
+/// cada um e os limites da conta. `versao` muda a cada mudança, para a barra
+/// lateral só remontar o texto quando precisa.
+#[derive(Default)]
+pub struct Uso {
+    pub contextos: std::collections::HashMap<i64, api::ContextoUso>,
+    pub cinco_horas: Option<api::LimiteUso>,
+    pub semana: Option<api::LimiteUso>,
+    pub versao: u64,
 }
 
 /// O desfecho de um pedido de consulta do agente.
@@ -397,6 +409,18 @@ pub enum Evento {
     },
     #[serde(rename = "agente.terminou")]
     AgenteTerminou { seq: u64, agente_id: i64, tarefa_id: i64, fim: api::Fim },
+    /// O uso que a statusLine do agente mandou (sem `contexto`: ainda não há).
+    #[serde(rename = "agente.uso")]
+    AgenteUso {
+        seq: u64,
+        agente_id: i64,
+        #[serde(default)]
+        contexto: Option<api::ContextoUso>,
+        #[serde(default)]
+        cinco_horas: Option<api::LimiteUso>,
+        #[serde(default)]
+        semana: Option<api::LimiteUso>,
+    },
     #[serde(rename = "agente.estado")]
     AgenteEstado {
         seq: u64,
@@ -552,6 +576,7 @@ impl Evento {
             | Evento::AgenteIniciou { seq, .. }
             | Evento::AgenteTerminou { seq, .. }
             | Evento::AgenteEstado { seq, .. }
+            | Evento::AgenteUso { seq, .. }
             | Evento::AnexoAdicionado { seq, .. }
             | Evento::AnexoRemovido { seq, .. }
             | Evento::NotaAtualizada { seq, .. }
@@ -582,7 +607,7 @@ impl Evento {
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
-            _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::Desconhecido),
+            _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::AgenteUso { .. } | Evento::Desconhecido),
         }
     }
 }
@@ -609,6 +634,12 @@ impl Modelo {
         self.pedidos = q.pedidos;
         self.navegadores = q.navegadores.into_iter().collect();
         self.aprovacoes = q.aprovacoes;
+        self.uso = Uso {
+            contextos: q.uso.agentes.into_iter().map(|a| (a.agente_id, a.contexto)).collect(),
+            cinco_horas: q.uso.cinco_horas,
+            semana: q.uso.semana,
+            versao: self.uso.versao + 1,
+        };
     }
 
     /// Os pedidos de consulta esperando você (todos do perfil).
@@ -774,7 +805,19 @@ impl Modelo {
                     efeitos.push(Efeito::Conectar(agente_id));
                 }
             }
+            Evento::AgenteUso { agente_id, contexto, cinco_horas, semana, .. } => {
+                match contexto {
+                    Some(c) => self.uso.contextos.insert(agente_id, c),
+                    None => self.uso.contextos.remove(&agente_id),
+                };
+                self.uso.cinco_horas = cinco_horas;
+                self.uso.semana = semana;
+                self.uso.versao += 1;
+            }
             Evento::AgenteTerminou { agente_id, tarefa_id, fim, .. } => {
+                if self.uso.contextos.remove(&agente_id).is_some() {
+                    self.uso.versao += 1;
+                }
                 if let Some((t, i)) = self.agente(tarefa_id, agente_id) {
                     let a = &mut t.agentes[i];
                     let ja_sabia = !a.ativo && a.fim.as_ref() == Some(&fim);
@@ -928,6 +971,32 @@ mod testes {
             "agentes":[{"id":7,"tarefa_id":10,"ferramenta":"claude","papel":"dev","ativo":true,"estado":"trabalhando"}]}"#;
         m.carregar(serde_json::from_str(quadro).unwrap());
         m
+    }
+
+    #[test]
+    fn uso_chega_pelo_quadro_e_pelos_eventos() {
+        let mut m = modelo();
+        let quadro = r#"{"seq":5,"projetos":[],"tarefas":[],"agentes":[],
+            "uso":{"agentes":[{"agente_id":7,"tarefa_id":10,"contexto":{"usado":84000,"tamanho":200000,"porcentagem":42}}],
+                   "cinco_horas":{"porcentagem":12.5,"volta":1792850400,"volta_texto":"volta às 14:30"}}}"#;
+        m.carregar(serde_json::from_str(quadro).unwrap());
+        assert_eq!(m.uso.contextos[&7].porcentagem, 42.0);
+        assert_eq!(m.uso.cinco_horas.as_ref().map(|l| l.volta_texto.as_str()), Some("volta às 14:30"));
+        let versao = m.uso.versao;
+        let mut m = modelo();
+        m.aplicar(evento(
+            r#"{"tipo":"agente.uso","seq":6,"agente_id":7,"tarefa_id":10,"contexto":{"usado":1000,"tamanho":200000,"porcentagem":0.5},
+            "semana":{"porcentagem":30,"volta":1793200000,"volta_texto":"volta às 09:00 de 18/10"}}"#,
+        ));
+        assert_eq!(m.uso.contextos[&7].usado, 1000);
+        assert!(m.uso.cinco_horas.is_none() && m.uso.semana.is_some());
+        assert!(!evento(r#"{"tipo":"agente.uso","seq":6,"agente_id":7}"#).entra_na_linha());
+        // O agente que termina perde o contexto; os limites da conta ficam.
+        m.aplicar(evento(
+            r#"{"tipo":"agente.terminou","seq":7,"agente_id":7,"tarefa_id":10,"fim":{"codigo":0,"erro":false,"motivo":"terminou","hora":"10:00","texto":"x"}}"#,
+        ));
+        assert!(m.uso.contextos.is_empty() && m.uso.semana.is_some());
+        assert!(versao > 0 && m.uso.versao > 1);
     }
 
     #[test]

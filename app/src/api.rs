@@ -132,6 +132,45 @@ pub struct Quadro {
     /// Pedidos de consulta dos agentes esperando você.
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub aprovacoes: Vec<Aprovacao>,
+    /// O uso que a statusLine dos agentes do Claude Code mandou.
+    #[serde(default)]
+    pub uso: UsoPerfil,
+}
+
+/// O contexto da conversa de um agente: tokens na janela, o tamanho dela e
+/// a porcentagem (0 a 100).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ContextoUso {
+    pub usado: i64,
+    pub tamanho: i64,
+    pub porcentagem: f32,
+}
+
+/// Um limite da conta (5 horas ou semana): quanto já foi (0 a 100) e quando
+/// volta (segundos Unix e o texto da dica, "volta às 14:30").
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct LimiteUso {
+    pub porcentagem: f32,
+    pub volta: i64,
+    #[serde(default)]
+    pub volta_texto: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ContextoDoAgente {
+    pub agente_id: i64,
+    pub contexto: ContextoUso,
+}
+
+/// O uso do perfil no retrato do quadro.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct UsoPerfil {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub agentes: Vec<ContextoDoAgente>,
+    #[serde(default)]
+    pub cinco_horas: Option<LimiteUso>,
+    #[serde(default)]
+    pub semana: Option<LimiteUso>,
 }
 
 /// Algo a mais pedido ao agente da tarefa pela daily, pela sprint ou pela

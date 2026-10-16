@@ -1742,6 +1742,7 @@ impl Colmeia {
             // COLMEIA_SEM_ABELHA=1 desliga a abelha, como a opção por perfil.
             com_abelha: !self.sem_abelha,
             agora,
+            uso: &self.modelo.uso,
         };
         self.lateral.mostrar(ui, &mut self.abelha, &vista)
     }

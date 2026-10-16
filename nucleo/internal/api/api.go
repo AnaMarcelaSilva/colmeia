@@ -88,6 +88,9 @@ type Servidor struct {
 	// respondendo: pedidos entregues que o agente já começou a responder pela
 	// nota. Se ele terminar a vez sem concluir_pedido, o pedido fecha sozinho.
 	respondendo map[int64]bool
+
+	// O uso que a statusLine dos agentes manda (veja uso.go).
+	uso memoriaUso
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -112,6 +115,7 @@ func (s *Servidor) Rotas() http.Handler {
 	}
 	s.adiadas = map[int64]*time.Timer{}
 	s.respondendo = map[int64]bool{}
+	s.uso.iniciar()
 	mux.HandleFunc("POST /v1/encerrar", s.encerrar)
 	if s.Banco != nil {
 		if s.Navegadores == nil {

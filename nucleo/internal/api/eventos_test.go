@@ -31,9 +31,19 @@ type ouvinte struct {
 
 func ouvir(t *testing.T, url string, perfil string) *ouvinte {
 	t.Helper()
+	return ouvirComo(t, "", url, perfil)
+}
+
+// ouvirComo abre os eventos com o token (num servidor com o canal na frente).
+func ouvirComo(t *testing.T, token, url string, perfil string) *ouvinte {
+	t.Helper()
 	ctx, cancelar := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancelar)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+"/v1/perfis/"+perfil+"/eventos", nil)
+	var opcoes *websocket.DialOptions
+	if token != "" {
+		opcoes = &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + token}}}
+	}
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+"/v1/perfis/"+perfil+"/eventos", opcoes)
 	if err != nil {
 		t.Fatal(err)
 	}

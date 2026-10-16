@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/mcp"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/terminal"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/uso"
 )
 
 const versao = "0.4.0"
@@ -33,6 +35,11 @@ func main() {
 	// "colmeia-nucleo mcp": o servidor MCP que o Claude Code de cada agente roda.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		servirMCP(os.Args[2:])
+		return
+	}
+	// "colmeia-nucleo uso": a statusLine do Claude Code de cada agente.
+	if len(os.Args) > 1 && os.Args[1] == "uso" {
+		mandarUso(os.Args[2:])
 		return
 	}
 	quantidade := flag.Int("terminais", 10, "quantidade de terminais de teste no modo demonstração")
@@ -169,6 +176,34 @@ func servirMCP(args []string) {
 	if err := s.Servir(context.Background(), os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// mandarUso lê o JSON da statusLine no stdin, manda ao núcleo só o contexto
+// e os limites (com o token do agente, lido do arquivo 0600) e imprime uma
+// linha curta. Roda a cada atualização da statusLine: nada de log, prazo
+// curto, e a linha sai mesmo se o núcleo não responder.
+func mandarUso(args []string) {
+	opcoes := flag.NewFlagSet("uso", flag.ContinueOnError)
+	opcoes.SetOutput(io.Discard)
+	socket := opcoes.String("socket", "", "socket do núcleo")
+	arquivoToken := opcoes.String("token-arquivo", "", "arquivo com o token do agente")
+	if opcoes.Parse(args) != nil || *socket == "" || *arquivoToken == "" {
+		fmt.Println("Colmeia")
+		return
+	}
+	u, err := uso.Ler(os.Stdin)
+	if err != nil {
+		fmt.Println("Colmeia")
+		return
+	}
+	fmt.Println(u.Linha())
+	token, err := os.ReadFile(*arquivoToken)
+	if err != nil {
+		return
+	}
+	ctx, cancelar := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelar()
+	mcp.NovoClienteSocket(*socket, strings.TrimSpace(string(token))).Pedir(ctx, "POST", "/v1/agente/uso", u)
 }
 
 // pedirEncerramento fala com o núcleo que está rodando pelo canal local (o

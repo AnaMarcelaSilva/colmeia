@@ -508,7 +508,7 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores,
-		"aprovacoes": s.aprovacoesPendentes(id)})
+		"aprovacoes": s.aprovacoesPendentes(id), "uso": s.uso.doPerfil(id)})
 }
 
 // comEstado junta ao agente o que o núcleo sabe dele agora: se roda, em que

@@ -41,6 +41,7 @@ func (s *Servidor) rotasAgente(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agente/pedidos/{id}/concluir", s.doAgente(s.agenteConcluirPedido))
 	mux.HandleFunc("GET /v1/agente/lousa", s.doAgente(s.agenteLerLousa))
 	mux.HandleFunc("POST /v1/agente/lousa/elementos", s.doAgente(s.agenteAcrescentarALousa))
+	mux.HandleFunc("POST /v1/agente/uso", s.agenteUso)
 }
 
 // quemAgente é o agente que pediu, com a tarefa dele.
@@ -436,7 +437,8 @@ func gravarPrivado(dir, nome string, conteudo []byte) (string, error) {
 }
 
 // prepararMCP gera o token do agente e grava a configuração MCP que o Claude
-// Code recebe por --mcp-config. Devolve os argumentos a acrescentar. O token
+// Code recebe por --mcp-config e os settings da sessão (--settings, com a
+// statusLine que manda o uso). Devolve os argumentos a acrescentar. O token
 // fica só num arquivo 0600: não vai em argumento nem em variável de ambiente.
 func (s *Servidor) prepararMCP(agente int64) ([]string, error) {
 	if s.DirCanal == "" || s.Executavel == "" {
@@ -468,17 +470,23 @@ func (s *Servidor) prepararMCP(agente int64) ([]string, error) {
 		s.limparMCP(agente)
 		return nil, err
 	}
-	return []string{"--mcp-config", arquivoConfig, "--allowedTools", "mcp__colmeia"}, nil
+	arquivoSettings, err := gravarPrivado(dir, id+".settings.json", s.configuracaoUso(arquivoToken))
+	if err != nil {
+		s.limparMCP(agente)
+		return nil, err
+	}
+	return []string{"--mcp-config", arquivoConfig, "--settings", arquivoSettings, "--allowedTools", "mcp__colmeia"}, nil
 }
 
-// limparMCP revoga o token do agente e apaga os arquivos dele.
+// limparMCP revoga o token do agente, apaga os arquivos dele e esquece o uso.
 func (s *Servidor) limparMCP(agente int64) {
 	s.Fichas.Revogar(agente)
+	s.uso.esquecer(agente)
 	if s.DirCanal == "" {
 		return
 	}
 	id := strconv.FormatInt(agente, 10)
-	for _, nome := range []string{id + ".token", id + ".mcp.json"} {
+	for _, nome := range []string{id + ".token", id + ".mcp.json", id + ".settings.json"} {
 		os.Remove(filepath.Join(s.DirCanal, "agentes", nome))
 	}
 }

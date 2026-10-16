@@ -59,6 +59,8 @@ pub struct Vista<'a> {
     pub linha: &'a str,
     pub com_abelha: bool,
     pub agora: f64,
+    /// O uso dos agentes e da conta (pela statusLine do Claude Code).
+    pub uso: &'a crate::dados::Uso,
 }
 
 /// O que foi pedido na barra.
@@ -108,9 +110,36 @@ pub struct Uso {
     pub semana: Option<Medida>,
 }
 
+impl Uso {
+    /// Monta o uso para a tela: o contexto do agente em foco e os limites que
+    /// ainda não voltaram. `agora` em segundos Unix.
+    fn montar(uso: &crate::dados::Uso, foco: Option<&AgenteTela>, agora: i64) -> Uso {
+        let contexto = foco.and_then(|a| {
+            let c = uso.contextos.get(&a.id)?;
+            Some(Medida {
+                fracao: c.porcentagem / 100.0, detalhe: format!("{} · {} de {} tokens", a.nome_com_papel(), milhares(c.usado), milhares(c.tamanho))
+            })
+        });
+        let limite = |l: &Option<api::LimiteUso>| {
+            l.as_ref().filter(|l| l.volta > agora).map(|l| Medida { fracao: l.porcentagem / 100.0, detalhe: l.volta_texto.clone() })
+        };
+        Uso { contexto, cinco_horas: limite(&uso.cinco_horas), semana: limite(&uso.semana) }
+    }
+}
+
+/// "84 mil", "1,2 mi": o tamanho do contexto como se fala.
+fn milhares(n: i64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{} mil", n / 1_000)
+    } else {
+        format!("{:.1} mi", n as f64 / 1e6).replace('.', ",")
+    }
+}
+
 /// Uma das três medidas: quanto já foi (de 0 a 1) e o detalhe da dica
 /// (o agente, a hora em que o limite volta).
-#[allow(dead_code, reason = "o núcleo ainda não manda o uso; a tela já sabe mostrar")]
 pub struct Medida {
     pub fracao: f32,
     pub detalhe: String,
@@ -132,12 +161,15 @@ pub struct Lateral {
     foco_anterior: Option<i64>,
     /// Os nós trocados à mão; o resto fica no padrão (aberto o que anda).
     trocados: HashSet<No>,
-    pub uso: Uso,
+    uso: Uso,
+    /// De onde o `uso` foi montado: o agente em foco, a versão do uso e o
+    /// minuto (um limite que voltou some sem esperar evento).
+    uso_de: Option<(i64, u64, i64)>,
 }
 
 impl Default for Lateral {
     fn default() -> Self {
-        Lateral { aberto: true, workspace: None, foco_anterior: None, trocados: HashSet::new(), uso: Uso::default() }
+        Lateral { aberto: true, workspace: None, foco_anterior: None, trocados: HashSet::new(), uso: Uso::default(), uso_de: None }
     }
 }
 
@@ -171,6 +203,7 @@ impl Lateral {
 
     pub fn mostrar(&mut self, ui: &mut Ui, abelha: &mut Abelha, v: &Vista) -> Saida {
         let mut saida = Saida::default();
+        self.atualizar_uso(v);
         let grupos = grupos(v.projetos);
         self.seguir_foco(v, &grupos);
         let area = ui.max_rect();
@@ -182,6 +215,20 @@ impl Lateral {
             self.painel(ui, area, grupo, abelha, v, &mut saida);
         }
         saida
+    }
+
+    /// Remonta o uso só quando muda o foco, chega uso novo ou vira o minuto.
+    fn atualizar_uso(&mut self, v: &Vista) {
+        let agora = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let foco = match v.lugar {
+            Lugar::Tarefa { id, foco } => v.tarefas.iter().find(|t| t.id == id).and_then(|t| t.agentes.iter().find(|a| a.id == foco)),
+            _ => None,
+        };
+        let chave = (foco.map_or(0, |a| a.id), v.uso.versao, agora / 60);
+        if self.uso_de != Some(chave) {
+            self.uso = Uso::montar(v.uso, foco, agora);
+            self.uso_de = Some(chave);
+        }
     }
 
     fn seguir_foco(&mut self, v: &Vista, grupos: &[Grupo]) {
@@ -1043,6 +1090,27 @@ mod testes {
         let refs: Vec<&Tarefa> = tarefas.iter().take(4).collect();
         assert_eq!(resto_do_projeto(&refs).as_deref(), Some("+ 1 em revisão · 2 concluídas"));
         assert_eq!(resto_do_projeto(&refs[3..]), None);
+    }
+
+    #[test]
+    fn uso_mostra_o_agente_em_foco_e_os_limites_que_nao_voltaram() {
+        let mut dados = crate::dados::Uso::default();
+        dados.contextos.insert(7, api::ContextoUso { usado: 84_500, tamanho: 1_000_000, porcentagem: 8.45 });
+        dados.cinco_horas = Some(api::LimiteUso { porcentagem: 12.0, volta: 2_000, volta_texto: "volta às 14:30".into() });
+        dados.semana = Some(api::LimiteUso { porcentagem: 30.0, volta: 500, volta_texto: "volta às 09:00 de 18/10".into() });
+        let agente = AgenteTela::da_api(
+            &serde_json::from_str(r#"{"id":7,"tarefa_id":10,"ferramenta":"claude","papel":"dev","ativo":true,"estado":"trabalhando"}"#).unwrap(),
+        );
+        let uso = Uso::montar(&dados, Some(&agente), 1_000);
+        let contexto = uso.contexto.expect("contexto do agente em foco");
+        assert!((contexto.fracao - 0.0845).abs() < 1e-6);
+        assert_eq!(contexto.detalhe, "Claude Code (dev) · 84 mil de 1,0 mi tokens");
+        assert_eq!(uso.cinco_horas.map(|m| m.detalhe).as_deref(), Some("volta às 14:30"));
+        // A semana já voltou: sem dados até chegar uso novo.
+        assert!(uso.semana.is_none());
+        // Sem agente em foco (ou de outra ferramenta), o contexto fica sem dados.
+        assert!(Uso::montar(&dados, None, 1_000).contexto.is_none());
+        assert_eq!(milhares(950), "950");
     }
 
     #[test]
