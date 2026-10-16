@@ -224,9 +224,14 @@ impl Play {
         self.dialogo = Some(Configurar { projeto, nome_projeto: nome.to_string(), editando, sugestoes, erro: None });
     }
 
-    /// Largura do botão, para quem reserva espaço na fileira.
-    pub fn largura_botao(&mut self, pintor: &egui::Painter, projeto: i64) -> f32 {
-        tema::largura_botao_dividido(pintor, &self.rotulo(projeto))
+    /// Alguma configuração do projeto está rodando (o ponto da aba Navegador e Play).
+    pub fn rodando(&mut self, projeto: i64) -> bool {
+        self.lista(projeto).iter().any(|c| c.rodando)
+    }
+
+    /// O painel mostra uma execução deste projeto.
+    pub fn painel_do_projeto(&self, projeto: i64) -> bool {
+        self.painel.is_some() && self.projeto_do_painel == projeto
     }
 
     fn rotulo(&mut self, projeto: i64) -> String {

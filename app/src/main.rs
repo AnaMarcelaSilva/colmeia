@@ -10,10 +10,12 @@
 mod abelha;
 mod api;
 mod apresentacao;
+mod arquivos;
 mod banco;
 mod canal;
 mod compositor;
 mod dados;
+mod descricao;
 mod dialogos;
 mod entrada;
 mod eventos;
@@ -25,6 +27,7 @@ mod pedido;
 mod quadro;
 mod registro;
 mod sistema;
+mod tarefa;
 mod teclas;
 mod tema;
 mod terminal;
@@ -272,22 +275,25 @@ struct Colmeia {
     /// navegador abre ao lado dela. Mandado só quando muda (e de novo ao
     /// reconectar); a geometria só chega depois dos primeiros quadros.
     tela_avisada: Option<(i64, bool, Option<[i32; 4]>)>,
-    /// Gaveta de arquivos: a árvore de cada tarefa (em cache) e a tarefa com a gaveta aberta.
-    arvores: HashMap<i64, gaveta::Arvore>,
-    gaveta: Option<i64>,
+    /// A aba da tarefa na tela (ao abrir outra tarefa, volta ao Terminal), o
+    /// mosaico na aba Terminal e o que cada aba guarda por tarefa: a aba
+    /// Arquivos (árvore, buscas e diff) e a Descrição.
+    aba: tarefa::Aba,
+    mosaico: bool,
+    abas_arquivos: HashMap<i64, arquivos::AbaArquivos>,
+    descricoes: HashMap<i64, descricao::Descricao>,
+    /// O agente escreveu a descrição sem você ver (o ponto na aba).
+    novidade_na_descricao: HashSet<i64>,
     /// Lousas abertas nesta sessão (a câmera de cada uma fica lembrada), as
-    /// tarefas com a lousa cobrindo o terminal, as que o agente mexeu sem
-    /// você ver (o ponto no chip) e o workspace para onde o "‹ Lousa" volta.
+    /// que o agente mexeu sem você ver (o ponto na aba) e o workspace para
+    /// onde o "‹ Lousa" volta.
     lousas: HashMap<api::DonoLousa, lousa::Lousa>,
-    lousa_na_tarefa: HashSet<i64>,
-    /// A tarefa que está na tela (ao abrir outra, a lousa dela começa fechada).
+    /// A tarefa que está na tela (ao abrir outra, ela começa no Terminal).
     tarefa_na_tela: Option<i64>,
     novidade_na_lousa: HashSet<i64>,
     voltar_para_lousa: Option<i64>,
     /// A lousa que acabou de abrir pela barra lateral: ganha o teclado no primeiro quadro.
     lousa_ativa_ao_abrir: Option<api::DonoLousa>,
-    /// Onde a lousa da tarefa vai neste quadro (o corpo do terminal em foco).
-    area_lousa: Option<egui::Rect>,
     /// A lousa apresentada em tela cheia (o palco).
     palco: Option<(api::DonoLousa, Box<lousa::palco::Palco>)>,
     /// Os bancos de dados do perfil (conexões, árvore e consoles), a tela de
@@ -373,15 +379,16 @@ impl Colmeia {
             abrindo_navegador: None,
             topo_terminal: None,
             tela_avisada: None,
-            arvores: HashMap::new(),
-            gaveta: None,
+            aba: tarefa::Aba::Terminal,
+            mosaico: false,
+            abas_arquivos: HashMap::new(),
+            descricoes: HashMap::new(),
+            novidade_na_descricao: HashSet::new(),
             lousas: HashMap::new(),
-            lousa_na_tarefa: HashSet::new(),
             tarefa_na_tela: None,
             novidade_na_lousa: HashSet::new(),
             voltar_para_lousa: None,
             lousa_ativa_ao_abrir: None,
-            area_lousa: None,
             palco: None,
             banco: banco::Bancos::novo(0),
             play: execucao::Play::default(),
@@ -486,7 +493,11 @@ impl Colmeia {
             l.gravar_ja();
         }
         self.lousas.clear();
-        self.lousa_na_tarefa.clear();
+        self.aba = tarefa::Aba::Terminal;
+        self.tarefa_na_tela = None;
+        self.abas_arquivos.clear();
+        self.descricoes.clear();
+        self.novidade_na_descricao.clear();
         self.novidade_na_lousa.clear();
         self.voltar_para_lousa = None;
         self.palco = None;
@@ -563,6 +574,9 @@ impl Colmeia {
                     }
                     if let dados::Evento::LousaMudou { lousa_id, dono, elementos, removidos, agente_id, .. } = &e {
                         self.lousa_mudou(*lousa_id, *dono, elementos.clone(), removidos, *agente_id, agora);
+                    }
+                    if let dados::Evento::NotaAtualizada { tarefa_id, agente_id, .. } = &e {
+                        self.nota_mudou(*tarefa_id, *agente_id, ctx);
                     }
                     // Nota e anexos que a própria apresentação mudou não são novidade;
                     // os que vieram de fora (outra tela, a API) são.
@@ -676,6 +690,10 @@ impl Colmeia {
             self.tela = Tela::Quadro;
         }
         self.conferir_workspace(agora);
+        if linha_mudou {
+            // A aba Linha do tempo da tarefa busca de novo quando aparecer.
+            self.registro.tarefa_mudou();
+        }
         if let Some(a) = &mut self.apresentacao {
             // Na apresentação, os slides não mudam sozinhos: aparece "Novidades · R atualiza".
             a.novidades |= de_fora;
@@ -911,15 +929,17 @@ impl Colmeia {
     /// quem só aparece como última linha num cartão.
     fn ajustar_ritmos(&self) {
         let (foco, tarefa) = match self.tela {
-            // Com a lousa por cima, o terminal em foco não aparece: ritmo de fundo.
-            Tela::Tarefa { id, .. } if self.lousa_na_tarefa.contains(&id) => (None, None),
+            // Fora da aba Terminal, o terminal em foco não aparece: ritmo de fundo.
+            Tela::Tarefa { id, .. } if !self.na_aba(id, tarefa::Aba::Terminal) => (None, None),
             Tela::Tarefa { id, foco } => (Some(foco), self.modelo.tarefas.iter().find(|t| t.id == id)),
             _ => (None, None),
         };
         for (&i, t) in &self.terminais {
             let ms = if Some(i) == foco {
                 TEMPO_REAL
-            } else if tarefa.is_some_and(|t| t.agentes.iter().any(|a| a.id == i)) {
+            } else if self.mosaico && tarefa.is_some_and(|t| t.agentes.iter().any(|a| a.id == i)) {
+                // No mosaico, os outros aparecem em miniatura; sem ele, só a
+                // última linha na ficha.
                 MINIATURA
             } else {
                 SO_CARTAO
@@ -957,6 +977,8 @@ impl Colmeia {
             self.carregar_branches();
         }
         self.tela = Tela::Tarefa { id, foco };
+        self.tarefa_na_tela = Some(id);
+        self.aba = tarefa::Aba::Terminal;
         self.abelha.resumo_aberto = false;
         self.compositor.focar = true;
         self.voltar_para_lousa = None;
@@ -1159,7 +1181,7 @@ impl Colmeia {
         // Com uma lousa na tela, a faixa dela não aparece: o aviso vem aqui.
         let lousa_na_tela = match self.tela {
             Tela::Lousa(_) => true,
-            Tela::Tarefa { id, .. } => self.lousa_na_tarefa.contains(&id),
+            Tela::Tarefa { id, .. } => self.na_aba(id, tarefa::Aba::Lousa),
             _ => false,
         };
         if self.conexao == Conexao::Fora && lousa_na_tela {
@@ -1389,10 +1411,10 @@ impl Colmeia {
                 };
                 // O número do Quadro é o que espera você, em âmbar.
                 let abas = [
-                    tema::Aba { icone: tema::Icone::Grade, nome: "Quadro", numero: (resumo.espera > 0).then_some((resumo.espera, true)) },
-                    tema::Aba { icone: tema::Icone::Relogio, nome: "Histórico", numero: None },
-                    tema::Aba { icone: tema::Icone::Apresentar, nome: "Daily", numero: None },
-                    tema::Aba { icone: tema::Icone::Calendario, nome: "Sprint", numero: None },
+                    tema::Aba { icone: tema::Icone::Grade, nome: "Quadro", numero: (resumo.espera > 0).then_some((resumo.espera, true)), ponto: None },
+                    tema::Aba { icone: tema::Icone::Relogio, nome: "Histórico", numero: None, ponto: None },
+                    tema::Aba { icone: tema::Icone::Apresentar, nome: "Daily", numero: None, ponto: None },
+                    tema::Aba { icone: tema::Icone::Calendario, nome: "Sprint", numero: None, ponto: None },
                 ];
                 let direita = ui.max_rect().right();
                 let largura_antes = ui.cursor().min.x;
@@ -1852,282 +1874,6 @@ impl Colmeia {
         }
     }
 
-    fn painel_tarefa(&mut self, ui: &mut egui::Ui, id: i64, foco: i64, agora: f64) {
-        let Some(tarefa) = self.modelo.tarefas.iter().find(|t| t.id == id) else {
-            self.tela = Tela::Quadro;
-            return;
-        };
-        // Abrir a tarefa mostra o agente (ou o estado vazio): a lousa não
-        // fica ligada da última visita. Só a linha do tempo a abre junto.
-        if self.tarefa_na_tela != Some(id) {
-            self.tarefa_na_tela = Some(id);
-            self.lousa_na_tarefa.remove(&id);
-        }
-        let agentes = tarefa.agentes.clone();
-        let pasta = tarefa.pasta.clone();
-        let p = cores();
-        let pode = self.pode_mudar();
-        let (mut voltar, mut novo_agente, mut abrir_editor) = (false, false, false);
-        let (mut alternar_gaveta, mut clique_navegador, mut menu_navegador) = (false, None, None);
-        let mut alternar_lousa = false;
-        let mut aviso_play = None;
-        let gaveta_aberta = self.gaveta == Some(id);
-        let lousa_aberta = self.lousa_na_tarefa.contains(&id);
-        let novidade_na_lousa = self.novidade_na_lousa.contains(&id);
-        let navegador_aberto = self.modelo.navegadores.contains(&id);
-        let volta_para_lousa = self.voltar_para_lousa;
-        ui.horizontal(|ui| {
-            voltar = if volta_para_lousa.is_some() {
-                tema::botao_secundario(ui, "‹ Lousa").on_hover_text("Voltar à lousa (Ctrl+Esc)").clicked()
-            } else {
-                tema::botao_secundario(ui, "‹ Quadro").on_hover_text("Voltar ao quadro (Ctrl+Esc)").clicked()
-            };
-            ui.add_space(8.0);
-            // O título é o que se corta: os botões da direita, o número, a
-            // branch e a etiqueta de estado nunca. O título inteiro fica na dica.
-            // O espaço dos botões é medido com as peças de verdade (texto +
-            // margens + o vão de 6 + o espaçamento do egui de cada uma; o
-            // add_space não leva espaçamento).
-            let espaco = ui.spacing().item_spacing.x;
-            let corpo = egui::TextStyle::Body.resolve(ui.style());
-            let pintor = ui.painter().clone();
-            let medir = |t: &str, fonte: egui::FontId| pintor.layout_no_wrap(t.to_owned(), fonte, p.texto).size().x;
-            // Uma folga de 2 px contra arredondamento.
-            let mut reservado = 2.0;
-            let mut reservado_editor = 0.0;
-            if !self.demo {
-                // "+ Agente" sempre: com ou sem agente, é o caminho para abrir um.
-                reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
-                reservado += tema::largura_botao_dividido(&pintor, "Navegador") + 6.0 + espaco;
-                reservado += self.play.largura_botao(&pintor, tarefa.projeto_id) + 6.0 + espaco;
-                // Os chips medem sempre em negrito (a largura não muda ao ligar).
-                reservado += medir("Arquivos", tema::forte(13.0)) + 28.0 + espaco;
-                reservado += medir("Lousa", tema::forte(13.0)) + 28.0 + 6.0 + espaco;
-                if let Some((nome, _)) = self.editor {
-                    reservado_editor = medir(&format!("Abrir no {nome}"), egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
-                }
-            }
-            reservado += medir(&format!("#{}", tarefa.id), corpo.clone()) + espaco;
-            let branch = if tarefa.branch.is_empty() { "pasta" } else { tarefa.branch.as_str() };
-            reservado += medir(branch, egui::FontId::monospace(11.0)) + 12.0 + espaco;
-            if tarefa.em_copia && !self.demo {
-                reservado += medir("cópia isolada", corpo.clone()) + espaco;
-            }
-            reservado += medir(tema::rotulo_coluna(tarefa.coluna), tema::fonte_etiqueta()) + 12.0 + espaco;
-            if tarefa.erro.is_some() {
-                reservado += medir("Erro", tema::fonte_etiqueta()) + 12.0 + espaco;
-            }
-            // Abaixo de 160 para o título, "Abrir no IntelliJ" vira "IntelliJ".
-            let editor_curto = self.editor.is_some() && ui.available_width() - reservado - reservado_editor < TITULO_MINIMO;
-            if let Some((nome, _)) = self.editor
-                && editor_curto
-            {
-                reservado_editor = medir(nome, egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
-            }
-            reservado += reservado_editor;
-            let largura_titulo = (ui.available_width() - reservado).max(80.0);
-            ui.allocate_ui(egui::vec2(largura_titulo, 24.0), |ui| {
-                ui.add(egui::Label::new(texto_forte(&tarefa.titulo, 16.0).color(p.texto)).truncate());
-            });
-            ui.label(RichText::new(format!("#{}", tarefa.id)).color(p.suave));
-            if tarefa.branch.is_empty() {
-                tema::etiqueta_ui(ui, "pasta", egui::FontId::monospace(11.0), p.suave);
-            } else {
-                tema::etiqueta_ui(ui, &tarefa.branch, egui::FontId::monospace(11.0), p.destaque);
-            }
-            if tarefa.em_copia && !self.demo {
-                ui.label(RichText::new("cópia isolada").color(p.suave)).on_hover_text(&tarefa.pasta);
-            }
-            tema::etiqueta_ui(ui, tema::rotulo_coluna(tarefa.coluna), tema::fonte_etiqueta(), tema::cor_coluna(tarefa.coluna));
-            if let Some(erro) = &tarefa.erro {
-                tema::etiqueta_ui(ui, "Erro", tema::fonte_etiqueta(), p.erro).on_hover_text(erro);
-            }
-            if self.demo {
-                return;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                novo_agente = tema::botao_principal(ui, "+ Agente", pode).on_hover_text("Abrir um agente (Claude Code, Codex…) nesta tarefa").clicked();
-                ui.add_space(6.0);
-                let ponto = navegador_aberto.then_some(p.ok);
-                let (principal, menu) = tema::botao_dividido(ui, "Navegador", ponto);
-                let dica = if navegador_aberto { "Trazer o navegador da tarefa para frente" } else { "Abrir o navegador da tarefa ao lado da Colmeia" };
-                // Os balões presos ao botão usam o retângulo dele (não o da
-                // fileira, que vai até o "+ Agente").
-                let rect_botao = menu.rect.union(principal.rect);
-                if principal.on_hover_text(dica).clicked() {
-                    clique_navegador = Some(rect_botao);
-                }
-                egui::Popup::menu(&menu).show(|ui| {
-                    ui.set_min_width(250.0);
-                    if tema::opcao_menu_com(ui, "Ir para endereço…", None, pode) {
-                        menu_navegador = Some(("endereco", rect_botao));
-                        ui.close();
-                    }
-                    if tema::opcao_menu_com(ui, "Capturar navegador", Some("Ctrl+Shift+B"), pode && navegador_aberto) {
-                        menu_navegador = Some(("capturar", rect_botao));
-                        ui.close();
-                    }
-                    ui.add_space(6.0);
-                    if tema::opcao_menu_com(ui, "Fechar navegador", None, pode && navegador_aberto) {
-                        menu_navegador = Some(("fechar", rect_botao));
-                        ui.close();
-                    }
-                });
-                // O Play do projeto, na pasta da tarefa.
-                ui.add_space(6.0);
-                let nome_projeto = self.modelo.projetos.iter().find(|p| p.id == tarefa.projeto_id).map(|p| p.nome.clone()).unwrap_or_default();
-                let bytes = self.bytes.clone();
-                aviso_play = self.play.botao(ui, &bytes, tarefa.projeto_id, &nome_projeto, tarefa.id, pode);
-                ui.add_space(6.0);
-                alternar_gaveta = tema::chip_alternar(ui, "Arquivos", gaveta_aberta).on_hover_text("Arquivos da pasta da tarefa (Ctrl+Shift+E)").clicked();
-                ui.add_space(6.0);
-                let chip = tema::chip_alternar(ui, "Lousa", lousa_aberta);
-                if novidade_na_lousa {
-                    // O agente acrescentou itens desde a última vez que você viu a lousa.
-                    let centro = chip.rect.right_top() + egui::vec2(-7.0, 7.0);
-                    ui.painter().circle(centro, 3.5, p.destaque, Stroke::new(1.5, p.superficie_alta));
-                }
-                let dica = if novidade_na_lousa { "Lousa da tarefa (Ctrl+Shift+Q) · o agente acrescentou itens" } else { "Lousa da tarefa (Ctrl+Shift+Q)" };
-                alternar_lousa = chip.on_hover_text(dica).clicked();
-                if let Some((nome, _)) = self.editor {
-                    ui.add_space(6.0);
-                    let rotulo = if editor_curto { nome.to_string() } else { format!("Abrir no {nome}") };
-                    abrir_editor = tema::botao_secundario(ui, &rotulo).on_hover_text(format!("Abrir no {nome}: {pasta}")).clicked();
-                }
-            });
-        });
-        ui.add_space(8.0);
-        self.pedidos_de_consulta(ui, id, &agentes, agora);
-        if abrir_editor
-            && let Some((nome, comando)) = self.editor
-            && let Err(e) = sistema::abrir_com(comando, &pasta)
-        {
-            self.erro(format!("Não consegui abrir o {nome}: {e}"), agora);
-        }
-        if alternar_gaveta {
-            self.alternar_gaveta(id, ui.ctx());
-        }
-        if let Some((tipo, texto)) = aviso_play {
-            self.avisar(tipo, &texto, agora);
-        }
-        if alternar_lousa {
-            self.alternar_lousa_da_tarefa(id);
-        }
-        if let Some(botao) = clique_navegador {
-            self.clique_navegador(id, botao, ui.ctx(), agora);
-        }
-        match menu_navegador {
-            Some(("endereco", botao)) => self.pedir_endereco(id, botao),
-            Some(("capturar", _)) => self.capturar_navegador(id, ui.ctx()),
-            Some(("fechar", _)) => {
-                let envio = self.respostas_navegador.0.clone();
-                let ctx = ui.ctx().clone();
-                std::thread::spawn(move || {
-                    let _ = envio.send(RespostaNavegador::Fechado(api::fechar_navegador(id)));
-                    ctx.request_repaint();
-                });
-            }
-            _ => {}
-        }
-        if novo_agente {
-            self.adicionar_agente(id, false);
-        }
-        if voltar || ui.input(|i| i.key_pressed(Key::Escape) && i.modifiers.ctrl) {
-            self.tela = match self.voltar_para_lousa.take() {
-                Some(ws) => Tela::Lousa(ws),
-                None => Tela::Quadro,
-            };
-            return;
-        }
-        let dono = api::DonoLousa { workspace_id: 0, tarefa_id: id };
-        if agentes.is_empty() && self.lousa_na_tarefa.contains(&id) {
-            // Sem agente, a lousa fica abaixo de uma faixa que mantém à vista
-            // como abrir um (e como voltar: "Fechar lousa").
-            let tudo = ui.available_rect_before_wrap();
-            let faixa = egui::Rect::from_min_size(tudo.min, egui::vec2(tudo.width(), 48.0));
-            self.faixa_sem_agentes(ui, faixa, id);
-            let area = egui::Rect::from_min_max(egui::pos2(tudo.left(), faixa.bottom() + 8.0), tudo.max);
-            let acoes = self.mostrar_lousa(ui, area, dono, agora);
-            self.tratar_lousa(dono, acoes, ui.ctx(), agora);
-            if self.gaveta == Some(id) {
-                self.mostrar_gaveta(ui.ctx(), id, area, area.width(), &pasta, None, agora);
-            }
-            return;
-        }
-        if agentes.is_empty() {
-            // Onde o terminal do primeiro agente vai aparecer: a área toda menos
-            // a caixa de mensagem e o cabeçalho do cartão do agente.
-            let area = ui.available_rect_before_wrap();
-            let terminal = egui::Rect::from_min_max(area.min + egui::vec2(1.5, 40.0), area.max - egui::vec2(1.5, self.compositor.altura() + 10.0 + 8.0));
-            terminal::estimar_em_foco(ui, terminal, 13.0);
-            self.sem_agentes(ui, id, &pasta);
-            if self.gaveta == Some(id) {
-                self.mostrar_gaveta(ui.ctx(), id, area, area.width(), &pasta, None, agora);
-            }
-            return;
-        }
-        let foco = if agentes.iter().any(|a| a.id == foco) { foco } else { agentes[0].id };
-
-        let area = ui.available_rect_before_wrap();
-        self.topo_terminal = Some(area.top());
-        let outros: Vec<AgenteTela> = agentes.iter().filter(|a| a.id != foco).cloned().collect();
-        let em_foco = agentes.iter().find(|a| a.id == foco).cloned().expect("o foco é um dos agentes");
-        let largura_lateral = if outros.is_empty() { 0.0 } else { (area.width() * 0.3).max(280.0) };
-        let coluna = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x - largura_lateral - if outros.is_empty() { 0.0 } else { 10.0 }, area.max.y));
-        let principal = egui::Rect::from_min_max(coluna.min, egui::pos2(coluna.max.x, coluna.max.y - self.compositor.altura() - 10.0));
-        // O aviso do rodapé fica sobre o terminal, sem cobrir a caixa de mensagem.
-        self.ancora_aviso = Some(principal.center_bottom() - egui::vec2(0.0, 16.0));
-        let mut pedidos = vec![self.caixa_terminal(ui, principal, &em_foco, id, true, 13.0, agora)];
-        // A lousa cobre o corpo do terminal em foco (abaixo do cabeçalho do
-        // agente), sem mudar o tamanho dele: a caixa de mensagem continua.
-        if let Some(area) = self.area_lousa.take() {
-            let acoes = self.mostrar_lousa(ui, area, dono, agora);
-            self.tratar_lousa(dono, acoes, ui.ctx(), agora);
-        }
-        // A gaveta de arquivos fica por cima do terminal em foco, sem mudar o tamanho dele.
-        if self.gaveta == Some(id) {
-            // 2 px para dentro: a borda de foco do terminal continua inteira.
-            let area_gaveta = principal.shrink(2.0);
-            self.mostrar_gaveta(ui.ctx(), id, area_gaveta, coluna.width(), &pasta, Some(foco), agora);
-        }
-        let caixa_mensagem = egui::Rect::from_min_max(egui::pos2(coluna.min.x, principal.max.y + 10.0), coluna.max);
-        // Com um diálogo ou caixa por cima, o Enter é de quem está por cima.
-        let teclado_livre = self.dialogo.is_none()
-            && !self.banco.modal_aberto()
-            && self.caixa_pedido.is_none()
-            && self.apresentacao.is_none()
-            && self.palco.is_none()
-            && self.popover_navegador.is_none();
-        if let Some(envio) = self.compositor.mostrar(ui, caixa_mensagem, &agentes, foco, id, teclado_livre) {
-            for agente in envio.destinos {
-                if let Some(t) = self.terminais.get(&agente) {
-                    t.enviar(&envio.texto);
-                }
-            }
-        }
-
-        // As miniaturas terminam na base da caixa de mensagem (a dica fica abaixo dela).
-        let base = area.height() - compositor::ALTURA_DICA;
-        let altura = if outros.is_empty() { 0.0 } else { (base - 10.0 * (outros.len() as f32 - 1.0)) / outros.len() as f32 };
-        for (n, agente) in outros.iter().enumerate() {
-            let min = egui::pos2(area.max.x - largura_lateral, area.min.y + n as f32 * (altura + 10.0));
-            let caixa = egui::Rect::from_min_size(min, egui::vec2(largura_lateral, altura));
-            pedidos.push(self.caixa_terminal(ui, caixa, agente, id, false, 10.0, agora));
-        }
-        for pedido in pedidos.into_iter().flatten() {
-            match pedido {
-                Pedido::Focar(agente) => self.tela = Tela::Tarefa { id, foco: agente },
-                Pedido::Iniciar(agente) => self.iniciar_agente(agente, ui.ctx(), agora),
-                Pedido::Remover(agente) => self.remover_agente(agente, agora),
-                Pedido::Capturar(agente) => self.capturar(agente, id),
-                Pedido::LimparHistorico(agente, guardadas) => {
-                    let nome = agentes.iter().find(|a| a.id == agente).map(|a| a.nome_com_papel()).unwrap_or_default();
-                    self.dialogo = Some(Dialogo::LimparHistorico { agente, nome, guardadas, erro: None });
-                }
-            }
-        }
-    }
-
     /// Os pedidos de consulta ao banco dos agentes da tarefa, entre o
     /// cabeçalho e o terminal; depois da decisão, a linha com o desfecho.
     fn pedidos_de_consulta(&mut self, ui: &mut egui::Ui, tarefa: i64, agentes: &[AgenteTela], agora: f64) {
@@ -2185,214 +1931,6 @@ impl Colmeia {
                 }
             }
         }
-    }
-
-    /// A faixa sobre a lousa de uma tarefa sem agente: o caminho para abrir
-    /// um continua à vista, e "Fechar lousa" volta ao estado vazio.
-    fn faixa_sem_agentes(&mut self, ui: &mut egui::Ui, faixa: egui::Rect, id: i64) {
-        let p = cores();
-        let tem_claude = !self.demo && self.opcoes_de_agente().iter().any(|o| o.id == "claude");
-        let pode = self.pode_mudar();
-        let (mut novo, mut retomar, mut fechar) = (false, false, false);
-        ui.painter().rect(faixa, CornerRadius::same(tema::RAIO_SUPERFICIE), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
-        let mut filho =
-            ui.new_child(egui::UiBuilder::new().max_rect(faixa.shrink2(egui::vec2(14.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        filho.label(RichText::new("Esta tarefa ainda não tem agentes.").color(p.texto).size(13.0));
-        if !self.demo {
-            filho.add_space(8.0);
-            novo = tema::botao_principal(&mut filho, "Adicionar agente", pode).clicked();
-            if tem_claude {
-                retomar = tema::botao_secundario_com(&mut filho, "Retomar conversa do Claude Code", pode).clicked();
-            }
-        }
-        filho.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            fechar = tema::botao_secundario(ui, "Fechar lousa").on_hover_text("Voltar à tarefa (Ctrl+Shift+Q)").clicked();
-        });
-        if fechar {
-            self.alternar_lousa_da_tarefa(id);
-        }
-        if novo || retomar {
-            self.adicionar_agente(id, retomar);
-        }
-    }
-
-    /// Tarefa sem agentes: abrir um novo ou retomar uma conversa do Claude Code
-    /// começada em outro lugar (no IntelliJ, por exemplo) na mesma pasta.
-    fn sem_agentes(&mut self, ui: &mut egui::Ui, id: i64, pasta: &str) {
-        let tem_claude = !self.demo && self.opcoes_de_agente().iter().any(|o| o.id == "claude");
-        let pode = self.pode_mudar();
-        let (mut novo, mut retomar) = (false, false);
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.2);
-            ui.allocate_ui(egui::vec2(520.0, 0.0), |ui| {
-                tema::moldura_janela().show(ui, |ui| {
-                    ui.set_width(472.0);
-                    let texto = if self.demo {
-                        "Na demonstração, os agentes são terminais de teste.".to_string()
-                    } else {
-                        format!("Para falar com o Claude, adicione um agente: o terminal dele abre aqui, em {pasta}, com a caixa de mensagem embaixo. Se você já conversava com o Claude Code nessa pasta, dá para continuar a mesma conversa.")
-                    };
-                    tema::cabecalho(ui, "Esta tarefa ainda não tem agentes", &texto);
-                    if self.demo {
-                        return;
-                    }
-                    ui.add_space(18.0);
-                    ui.horizontal(|ui| {
-                        novo = tema::botao_principal(ui, "Adicionar agente", pode).clicked();
-                        if tem_claude {
-                            ui.add_space(8.0);
-                            retomar = tema::botao_secundario_com(ui, "Retomar conversa do Claude Code", pode).clicked();
-                        }
-                    });
-                });
-            });
-        });
-        if novo || retomar {
-            self.adicionar_agente(id, retomar);
-        }
-    }
-
-    /// Desenha a caixa de um agente: cabeçalho com estado e menu, e o terminal.
-    /// Um agente parado mostra o que ficou na tela e um cartão com o fim e os botões.
-    #[allow(clippy::too_many_arguments)]
-    fn caixa_terminal(
-        &mut self,
-        ui: &mut egui::Ui,
-        caixa: egui::Rect,
-        agente: &AgenteTela,
-        tarefa: i64,
-        focado: bool,
-        fonte: f32,
-        agora: f64,
-    ) -> Option<Pedido> {
-        let p = cores();
-        let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa));
-        let mut pedido = None;
-        let demo = self.demo;
-        let pode = self.pode_mudar();
-        let visual = if demo { EstadoVisual::Trabalhando } else { agente.visual() };
-        let parado = !demo && !agente.ativo;
-        // A borda acompanha o selo: numa tarefa com vários agentes, dá para ver qual precisa de você.
-        // Uma borda de destaque por vez: com o teclado na caixa de mensagem, o
-        // terminal em foco fica só marcado de leve.
-        let teclado_no_compositor = focado && Compositor::com_foco(ui.ctx());
-        let borda = match visual {
-            _ if teclado_no_compositor => Stroke::new(1.0, p.destaque.gamma_multiply(0.5)),
-            _ if focado => Stroke::new(1.5, p.destaque),
-            EstadoVisual::PedeAprovacao | EstadoVisual::PedeConsulta | EstadoVisual::SuaVez => Stroke::new(1.5, p.alerta),
-            EstadoVisual::Erro => Stroke::new(1.5, p.erro),
-            _ => Stroke::new(1.0, p.borda),
-        };
-        let resposta_caixa = egui::Frame::new()
-            .fill(p.superficie_alta)
-            .stroke(borda)
-            .corner_radius(CornerRadius::same(tema::RAIO_SUPERFICIE))
-            .inner_margin(egui::Margin::symmetric(0, 6))
-            .show(&mut filho, |ui| {
-                // A moldura soma a margem de 6 em cima e embaixo e a borda: sem
-                // descontar, a caixa passa 12 px da área e cobre o vão até a
-                // caixa de mensagem.
-                ui.set_min_size(caixa.size() - egui::vec2(3.0, 15.0));
-                let cabecalho = ui.horizontal(|ui| {
-                    ui.set_height(28.0);
-                    ui.add_space(10.0);
-                    let (ponto, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    tema::ponto(ui.painter(), ponto.center(), 3.5, visual);
-                    ui.label(texto_forte(agente.nome(), 13.5).color(p.texto));
-                    ui.label(RichText::new(format!("· {}", agente.papel)).color(p.suave));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(6.0);
-                        if !demo {
-                            let mais = tema::botao_icone(ui, tema::Icone::Mais, 24.0).on_hover_text("Ações do agente");
-                            egui::Popup::menu(&mais).show(|ui| {
-                                ui.set_min_width(240.0);
-                                let pode_capturar = focado && pode && !self.lousa_na_tarefa.contains(&tarefa);
-                                let item = tema::opcao_menu_com(ui, "Capturar terminal", Some("Ctrl+Shift+S"), pode_capturar);
-                                if !focado {
-                                    ui.label(RichText::new("Foque o terminal para capturar").color(p.suave).size(11.5));
-                                }
-                                if item {
-                                    pedido = Some(Pedido::Capturar(agente.id));
-                                    ui.close();
-                                }
-                                let guardadas = self.compositor.tamanho_historico(agente.id);
-                                if tema::opcao_menu_com(ui, "Limpar histórico de mensagens", None, pode && guardadas > 0) {
-                                    pedido = Some(Pedido::LimparHistorico(agente.id, guardadas));
-                                    ui.close();
-                                }
-                                if tema::opcao_menu_com(ui, "Parar e remover agente", None, pode) {
-                                    pedido = Some(Pedido::Remover(agente.id));
-                                    ui.close();
-                                }
-                            });
-                            ui.add_space(6.0);
-                        }
-                        tema::etiqueta_ui(ui, visual.selo(), tema::fonte_etiqueta(), visual.cor()).on_hover_text(if focado {
-                            agente.texto_estado()
-                        } else {
-                            format!("{} · clique para focar", agente.texto_estado())
-                        });
-                    });
-                });
-                if !demo && pode {
-                    cabecalho.response.interact(egui::Sense::click()).context_menu(|ui| {
-                        ui.set_min_width(220.0);
-                        if tema::opcao_menu(ui, "Parar e remover agente", false) {
-                            pedido = Some(Pedido::Remover(agente.id));
-                            ui.close();
-                        }
-                    });
-                }
-                let lousa_por_cima = focado && self.lousa_na_tarefa.contains(&tarefa);
-                match self.terminais.get_mut(&agente.id) {
-                    // A lousa cobre o terminal: ele não é desenhado (nem recebe o teclado).
-                    _ if lousa_por_cima => {
-                        let (r, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-                        // A linha de 1 px em cima separa a lousa do cabeçalho do agente.
-                        ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, p.borda));
-                        self.area_lousa = Some(egui::Rect::from_min_max(r.min + egui::vec2(0.0, 1.0), r.max));
-                    }
-                    Some(t) => {
-                        if t.mostrar(ui, fonte, focado).clicked() && !focado {
-                            pedido = Some(Pedido::Focar(agente.id));
-                        }
-                    }
-                    None => {
-                        let resposta = ui.allocate_response(ui.available_size(), egui::Sense::click());
-                        if resposta.clicked() && !focado {
-                            pedido = Some(Pedido::Focar(agente.id));
-                        }
-                    }
-                }
-                // Com a gaveta de arquivos por cima, o cartão de fim sairia em
-                // tirinha ao lado dela: fica escondido até a gaveta fechar.
-                if parado && !(focado && (self.gaveta == Some(tarefa) || lousa_por_cima)) {
-                    let centro = ui.min_rect().center();
-                    if let Some(p) = cartao_de_fim(ui, centro, agente, focado, pode) {
-                        pedido = Some(p);
-                    }
-                }
-            });
-        // Clarão de 0,3 s na borda do terminal capturado: o único redesenho seguido da captura.
-        if let Some((capturado, inicio)) = self.clarao
-            && capturado == agente.id
-        {
-            let t = ((agora - inicio) / CLARAO) as f32;
-            if t < 1.0 {
-                let cor = p.texto.gamma_multiply(1.0 - t);
-                ui.painter().rect_stroke(
-                    resposta_caixa.response.rect,
-                    CornerRadius::same(tema::RAIO_SUPERFICIE),
-                    Stroke::new(3.0, cor),
-                    egui::StrokeKind::Inside,
-                );
-                ui.ctx().request_repaint();
-            } else {
-                self.clarao = None;
-            }
-        }
-        let _ = tarefa;
-        pedido
     }
 
     /// Aviso do rodapé: some sozinho; pede um único redesenho para o momento de sumir.
@@ -2535,24 +2073,43 @@ impl Colmeia {
             && let Tela::Tarefa { id, foco } = self.tela
             && foco != 0
         {
-            if self.lousa_na_tarefa.contains(&id) {
-                // A captura sairia com a lousa por cima.
-                let agora = ctx.input(|i| i.time);
-                self.avisar(TipoAviso::Alerta, "Feche a lousa para capturar o terminal", agora);
-            } else {
+            if self.na_aba(id, tarefa::Aba::Terminal) {
                 self.capturar(foco, id);
+            } else {
+                // A captura sairia com outra aba no lugar do terminal.
+                let agora = ctx.input(|i| i.time);
+                self.avisar(TipoAviso::Alerta, "Volte à aba Terminal para capturar", agora);
             }
         }
-        // Ctrl+Shift+E: a gaveta de arquivos; Ctrl+Shift+B: capturar o navegador.
+        // Na tarefa: Ctrl+1…6 trocam a aba; Ctrl+Shift+Q a Lousa e
+        // Ctrl+Shift+E os Arquivos (de novo, voltam ao Terminal);
+        // Ctrl+Shift+B captura o navegador. Na aba Arquivos, Ctrl+P busca
+        // pelo nome e Ctrl+Shift+F pelo texto.
         if let Tela::Tarefa { id, .. } = self.tela {
+            let numeros = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
+            for (aba, tecla) in tarefa::Aba::TODAS.into_iter().zip(numeros) {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, tecla)) {
+                    self.mudar_aba(id, aba, ctx);
+                }
+            }
             if atalho(Key::Q) {
-                self.alternar_lousa_da_tarefa(id);
+                self.alternar_aba(id, tarefa::Aba::Lousa, ctx);
             }
             if atalho(Key::E) {
-                self.alternar_gaveta(id, ctx);
+                self.alternar_aba(id, tarefa::Aba::Arquivos, ctx);
             }
             if atalho(Key::B) && self.modelo.navegadores.contains(&id) {
                 self.capturar_navegador(id, ctx);
+            }
+            if self.na_aba(id, tarefa::Aba::Arquivos)
+                && let Some(a) = self.abas_arquivos.get_mut(&id)
+            {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::P)) {
+                    a.focar_nome();
+                }
+                if atalho(Key::F) {
+                    a.focar_texto();
+                }
             }
         }
     }
@@ -2657,7 +2214,7 @@ impl Colmeia {
         }
         let visivel = match self.tela {
             Tela::Lousa(ws) => dono.workspace_id == ws,
-            Tela::Tarefa { id, .. } => dono.tarefa_id == id && self.lousa_na_tarefa.contains(&id),
+            Tela::Tarefa { id, .. } => dono.tarefa_id == id && self.na_aba(id, tarefa::Aba::Lousa),
             _ => false,
         };
         if !visivel {
@@ -2682,21 +2239,6 @@ impl Colmeia {
         self.voltar_para_lousa = None;
         self.abelha.resumo_aberto = false;
         self.filtro = None;
-    }
-
-    /// Abre ou fecha a lousa por cima do terminal da tarefa (Ctrl+Shift+Q).
-    fn alternar_lousa_da_tarefa(&mut self, tarefa: i64) {
-        if self.lousa_na_tarefa.insert(tarefa) {
-            self.novidade_na_lousa.remove(&tarefa);
-            return;
-        }
-        self.lousa_na_tarefa.remove(&tarefa);
-        // A lousa fechou: o teclado volta ao terminal.
-        if let Tela::Tarefa { foco, .. } = self.tela
-            && let Some(t) = self.terminais.get(&foco)
-        {
-            t.focar();
-        }
     }
 
     /// Desenha a lousa do dono na área e devolve o que ela pediu.
@@ -2773,60 +2315,6 @@ impl Colmeia {
             }
             self.tema.aplicar(ctx);
             ctx.request_repaint();
-        }
-    }
-
-    // Gaveta de arquivos
-
-    fn alternar_gaveta(&mut self, tarefa: i64, ctx: &egui::Context) {
-        if self.gaveta == Some(tarefa) {
-            self.fechar_gaveta(tarefa);
-            return;
-        }
-        self.gaveta = Some(tarefa);
-        self.arvores.entry(tarefa).or_insert_with(|| gaveta::Arvore::nova(ctx, tarefa)).focar = true;
-    }
-
-    /// Fecha a gaveta e devolve o teclado ao terminal em foco.
-    fn fechar_gaveta(&mut self, tarefa: i64) {
-        self.gaveta = None;
-        if let Tela::Tarefa { foco, .. } = self.tela
-            && let Some(t) = self.terminais.get(&foco)
-        {
-            t.focar();
-        }
-        let _ = tarefa;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn mostrar_gaveta(&mut self, ctx: &egui::Context, tarefa: i64, area: egui::Rect, largura: f32, pasta: &str, _foco: Option<i64>, agora: f64) {
-        let editor = self.editor;
-        let Some(arvore) = self.arvores.get_mut(&tarefa) else { return };
-        match arvore.mostrar(ctx, area, largura, pasta, editor.map(|(nome, _)| nome)) {
-            None => {}
-            Some(gaveta::PedidoGaveta::Fechar) => self.fechar_gaveta(tarefa),
-            Some(gaveta::PedidoGaveta::AbrirPasta) => {
-                if let Err(e) = sistema::abrir_pasta(pasta) {
-                    self.erro(format!("Não consegui abrir a pasta: {e}"), agora);
-                }
-            }
-            Some(gaveta::PedidoGaveta::AbrirNoEditor(arquivo)) => {
-                if let Some((nome, comando)) = editor
-                    && let Err(e) = sistema::abrir_arquivo_com(comando, &arquivo)
-                {
-                    self.erro(format!("Não consegui abrir no {nome}: {e}"), agora);
-                }
-            }
-            Some(gaveta::PedidoGaveta::AbrirNoSistema(arquivo)) => {
-                if let Err(e) = sistema::abrir_no_sistema(&arquivo) {
-                    self.erro(format!("Não consegui abrir: {e}"), agora);
-                }
-            }
-            // A citação vai para a caixa de mensagem, que fica com o teclado.
-            Some(gaveta::PedidoGaveta::Citar(texto)) => {
-                self.compositor.citar(&texto);
-                self.gaveta = None;
-            }
         }
     }
 
@@ -3417,8 +2905,9 @@ impl eframe::App for Colmeia {
             .frame(egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20 + m, top: if com_faixa { 10 } else { 10 + m }, bottom: 10 }))
             .show(ui, |ui| self.topo(ui, agora, resumo));
 
-        // A saída do Play, embaixo, em todas as telas (a altura muda pela borda).
-        if self.play.painel.is_some() && !self.demo {
+        // A saída do Play, embaixo, em todas as telas menos a tarefa (lá ela
+        // fica na aba Navegador e Play: o terminal dos agentes não muda de tamanho).
+        if self.play.painel.is_some() && !self.demo && !matches!(self.tela, Tela::Tarefa { .. }) {
             let mut aviso = None;
             let pode = self.pode_mudar();
             let bytes = self.bytes.clone();
@@ -3519,10 +3008,8 @@ impl eframe::App for Colmeia {
                 registro::Acao::AbrirTarefa { tarefa, agente, lousa } => {
                     self.abrir_tarefa(tarefa, agente);
                     if lousa {
-                        // O agente mexeu na lousa: ela abre junto, enquadrada no que ele pôs.
-                        self.lousa_na_tarefa.insert(tarefa);
-                        self.tarefa_na_tela = Some(tarefa);
-                        self.novidade_na_lousa.remove(&tarefa);
+                        // O agente mexeu na lousa: a tarefa abre na Lousa, enquadrada no que ele pôs.
+                        self.mudar_aba(tarefa, tarefa::Aba::Lousa, &ctx);
                         let dono = api::DonoLousa { workspace_id: 0, tarefa_id: tarefa };
                         self.lousas.entry(dono).or_insert_with(|| lousa::Lousa::nova(&ctx, dono, agora)).enquadrar_agente = true;
                     }
@@ -3562,7 +3049,6 @@ impl eframe::App for Colmeia {
             self.mostrar_popover_navegador(&ctx);
         } else {
             self.popover_navegador = None;
-            self.gaveta = None;
         }
 
         self.play.mostrar_dialogo(&ctx);

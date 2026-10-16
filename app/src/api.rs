@@ -1422,6 +1422,129 @@ pub fn ver_arquivo(tarefa: i64, caminho: &str, mostrar: bool) -> Result<Previa, 
     chamar("GET", &format!("/v1/tarefas/{tarefa}/arquivo?caminho={}{mostrar}", codificar_url(caminho)), None)
 }
 
+/// Um arquivo achado pela busca por nome.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Nome {
+    pub caminho: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct BuscaNome {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub arquivos: Vec<Nome>,
+    #[serde(default)]
+    pub mais: bool,
+}
+
+/// Uma linha achada pela busca por texto, com o trecho já cortado pelo núcleo.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Achado {
+    pub caminho: String,
+    pub linha: usize,
+    pub texto: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct BuscaTexto {
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub achados: Vec<Achado>,
+    #[serde(default)]
+    pub mais: bool,
+}
+
+/// Um arquivo diferente da branch base: A (novo), M (mudou) ou D (apagado).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Mudanca {
+    pub caminho: String,
+    pub estado: String,
+    #[serde(default)]
+    pub mais: usize,
+    #[serde(default)]
+    pub menos: usize,
+    #[serde(default)]
+    pub binario: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Mudancas {
+    pub base: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub arquivos: Vec<Mudanca>,
+    #[serde(default)]
+    pub mais: bool,
+}
+
+/// Uma linha do diff: "trecho", "igual", "mais" ou "menos", com os números
+/// de antes e depois (0 quando não tem).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LinhaDiff {
+    pub tipo: String,
+    #[serde(default)]
+    pub antiga: usize,
+    #[serde(default)]
+    pub nova: usize,
+    #[serde(default)]
+    pub texto: String,
+}
+
+/// O diff de um arquivo: "diff", "binario", "sensivel" ou "igual".
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Diferenca {
+    pub tipo: String,
+    pub base: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub linhas: Vec<LinhaDiff>,
+    #[serde(default)]
+    pub cortado: bool,
+    #[serde(default)]
+    pub caminho_absoluto: String,
+}
+
+/// O que o agente (ou você) escreveu por último sobre a tarefa.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Descricao {
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub tipo: String,
+    #[serde(default)]
+    pub autor: String,
+    /// O momento no fuso local, "16/10 às 14:58".
+    #[serde(default)]
+    pub quando: String,
+}
+
+pub fn buscar_nome(tarefa: i64, termo: &str) -> Result<BuscaNome, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/arquivos/busca?termo={}", codificar_url(termo)), None)
+}
+
+pub fn buscar_texto(tarefa: i64, termo: &str, maiusculas: bool) -> Result<BuscaTexto, String> {
+    let m = if maiusculas { "&maiusculas=1" } else { "" };
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/arquivos/texto?termo={}{m}", codificar_url(termo)), None)
+}
+
+pub fn mudancas(tarefa: i64) -> Result<Mudancas, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/mudancas"), None)
+}
+
+pub fn ver_mudanca(tarefa: i64, caminho: &str, mostrar: bool) -> Result<Diferenca, String> {
+    let mostrar = if mostrar { "&mostrar=1" } else { "" };
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/mudancas/arquivo?caminho={}{mostrar}", codificar_url(caminho)), None)
+}
+
+pub fn descricao(tarefa: i64) -> Result<Descricao, String> {
+    chamar("GET", &format!("/v1/tarefas/{tarefa}/descricao"), None)
+}
+
+/// A linha do tempo de uma tarefa (a aba da tarefa).
+pub fn linha_da_tarefa(perfil: i64, tarefa: i64, antes: i64) -> Result<PaginaLinha, String> {
+    let mut caminho = format!("/v1/perfis/{perfil}/linha-do-tempo?limite=200&tarefa={tarefa}");
+    if antes > 0 {
+        caminho += &format!("&antes={antes}");
+    }
+    chamar("GET", &caminho, None)
+}
+
 /// A imagem do arquivo, como PNG reduzido pelo núcleo.
 pub fn imagem_do_arquivo(tarefa: i64, caminho: &str) -> Result<Vec<u8>, String> {
     match canal::pedir_bytes("GET", &format!("/v1/tarefas/{tarefa}/arquivo/imagem?caminho={}", codificar_url(caminho)), "application/json", &[])? {

@@ -373,19 +373,12 @@ impl Compositor {
 
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(interno).layout(egui::Layout::left_to_right(egui::Align::Min)));
         let em_foco = agentes.iter().find(|a| a.id == foco).map_or_else(String::new, |a| format!("{} · {}", a.nome(), a.papel));
-        let destino = if self.para_todos { format!("todos ({})", agentes.len()) } else { em_foco.clone() };
-        let resposta = tema::chip(&mut filho, "Para", &destino, self.para_todos);
-        egui::Popup::menu(&resposta).show(|ui| {
-            ui.set_min_width(250.0);
-            if tema::opcao_menu(ui, &format!("{em_foco} (em foco)"), !self.para_todos) {
-                self.para_todos = false;
-                ui.close();
-            }
-            if tema::opcao_menu(ui, &format!("Todos os {} agentes da tarefa", agentes.len()), self.para_todos) {
-                self.para_todos = true;
-                ui.close();
-            }
-        });
+        // Para quem vai: o agente em foco ou todos os da tarefa.
+        if agentes.len() > 1
+            && let Some(i) = tema::segmentado(&mut filho, &["Um agente", "Todos"], usize::from(self.para_todos))
+        {
+            self.para_todos = i == 1;
+        }
         filho.add_space(6.0);
         // Só um agente rodando recebe mensagem: o texto de um parado se perderia.
         let destinos: Vec<i64> = agentes.iter().filter(|a| a.ativo && (self.para_todos || a.id == foco)).map(|a| a.id).collect();

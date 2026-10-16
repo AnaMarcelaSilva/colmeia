@@ -89,11 +89,13 @@ Da daily, da sprint ou do slide (P), é possível fazer um pedido ao agente de u
 
 Todo Claude Code iniciado pela Colmeia recebe ferramentas próprias via MCP, restritas à sua tarefa. Com elas o agente lê a tarefa e a nota, complementa a nota, anexa imagens, usa o navegador da tarefa, escreve na lousa e pede consultas ao banco. Codex, Gemini e OpenCode ainda não recebem essas ferramentas.
 
-O **navegador da tarefa** é um Chrome com perfil próprio, separado do seu, que abre ao lado da janela e pode ser capturado com Ctrl+Shift+B. A gaveta de **arquivos** (Ctrl+Shift+E) mostra a pasta da tarefa em modo somente leitura, com pré-visualização de texto e imagem, e pede confirmação antes de mostrar `.env` e chaves.
+A tarefa abre em abas: **Terminal** (os agentes em fichas em cima do terminal em foco, com o contexto usado num anel, e o mosaico a um clique), **Arquivos**, **Lousa**, **Navegador e Play**, **Descrição** (o que o agente escreveu ao terminar) e **Linha do tempo** (só os eventos dela). Trocar de aba não muda o tamanho do terminal.
+
+O **navegador da tarefa** é um Chrome com perfil próprio, separado do seu, que abre ao lado da janela e pode ser capturado com Ctrl+Shift+B. A aba **Arquivos** (Ctrl+Shift+E) mostra a pasta da tarefa em modo somente leitura: a árvore, a busca por nome (Ctrl+P) e por texto no código (Ctrl+Shift+F), o arquivo com o número da linha e o que o agente mudou contra a branch base. Para editar, o botão abre no IntelliJ, na linha. Ela pede confirmação antes de mostrar `.env` e chaves, e a busca por texto não olha esses arquivos.
 
 ### Rodar o projeto (Play)
 
-Como no IntelliJ, cada projeto tem **configurações de execução**: um comando do shell, a pasta onde ele roda e as variáveis de ambiente. A Colmeia traz as configurações do IntelliJ (Go, Go test, Flutter, npm e Shell, de `.idea/workspace.xml` e `.run/`) e sugere as do `package.json`, do `Makefile`, do Cargo e do Go. O botão **Rodar** fica no quadro do projeto e no topo da tarefa (lá, roda na pasta da tarefa); a saída aparece num painel embaixo, com Parar e Rodar de novo, e quem roda é o núcleo: fechar a janela não para o programa. Shift+F10 roda e Ctrl+F2 para.
+Como no IntelliJ, cada projeto tem **configurações de execução**: um comando do shell, a pasta onde ele roda e as variáveis de ambiente. A Colmeia traz as configurações do IntelliJ (Go, Go test, Flutter, npm e Shell, de `.idea/workspace.xml` e `.run/`) e sugere as do `package.json`, do `Makefile`, do Cargo e do Go. O botão **Rodar** fica no quadro do projeto e na aba Navegador e Play da tarefa (lá, roda na pasta da tarefa); a saída aparece num painel embaixo (na tarefa, dentro da aba), com Parar e Rodar de novo, e quem roda é o núcleo: fechar a janela não para o programa. Shift+F10 roda e Ctrl+F2 para.
 
 ### Lousa
 
@@ -124,6 +126,8 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Ctrl+Shift+K | Bancos de dados |
 | Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
+| Ctrl+1 … Ctrl+6 | Abas da tarefa |
+| Ctrl+P / Ctrl+Shift+F | Na aba Arquivos, busca pelo nome / pelo texto |
 | Ctrl+Esc | Volta ao quadro |
 | Enter, Shift+Enter ou Ctrl+Enter, ↑ ↓ | Na caixa de mensagem, envia, quebra a linha e navega pelas mensagens anteriores |
 | Ctrl+Enter, Esc | No console de banco, executa e cancela |

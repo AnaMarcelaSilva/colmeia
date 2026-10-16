@@ -93,6 +93,31 @@ pub fn abrir_arquivo_com(programa: &str, arquivo: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Os argumentos para abrir o arquivo numa linha: o IntelliJ usa
+/// `--line N arquivo`, o VS Code `--goto arquivo:N`; outro editor recebe só o arquivo.
+fn argumentos_na_linha(programa: &str, arquivo: &str, linha: Option<usize>) -> Vec<String> {
+    let nome = Path::new(programa).file_stem().and_then(|n| n.to_str()).unwrap_or(programa);
+    match (nome, linha) {
+        ("idea" | "idea.sh" | "idea64", Some(n)) => vec!["--line".into(), n.to_string(), arquivo.into()],
+        ("code", Some(n)) => vec!["--goto".into(), format!("{arquivo}:{n}")],
+        _ => vec![arquivo.into()],
+    }
+}
+
+/// Abre o arquivo no editor, na linha (se houver).
+pub fn abrir_na_linha(programa: &str, arquivo: &str, linha: Option<usize>) -> Result<(), String> {
+    if !Path::new(arquivo).is_file() {
+        return Err("o arquivo não está mais lá".into());
+    }
+    let mut comando = comando_limpo(programa);
+    comando.args(argumentos_na_linha(programa, arquivo, linha)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut comando, 0);
+    let mut filho = comando.spawn().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || filho.wait());
+    Ok(())
+}
+
 /// Extensões que o "Abrir no sistema" aceita: documentos, imagens e mídia.
 /// Fora da lista (scripts, .desktop, executáveis, arquivos sem extensão)
 /// só abre no editor: o abridor do sistema poderia executar.
@@ -203,6 +228,15 @@ mod testes {
         for nome in ["instalar.sh", "atalho.desktop", "programa", "Makefile", ".env", "app.exe", "script.py", "pagina.html", ".png"] {
             assert!(!abre_no_sistema(nome), "{nome}");
         }
+    }
+
+    #[test]
+    fn editor_abre_na_linha() {
+        assert_eq!(argumentos_na_linha("idea", "/x/a.rs", Some(12)), vec!["--line", "12", "/x/a.rs"]);
+        assert_eq!(argumentos_na_linha("/opt/idea/bin/idea.sh", "/x/a.rs", Some(3)), vec!["--line", "3", "/x/a.rs"]);
+        assert_eq!(argumentos_na_linha("code", "/x/a.rs", Some(7)), vec!["--goto", "/x/a.rs:7"]);
+        assert_eq!(argumentos_na_linha("idea", "/x/a.rs", None), vec!["/x/a.rs"]);
+        assert_eq!(argumentos_na_linha("vim", "/x/a.rs", Some(7)), vec!["/x/a.rs"]);
     }
 
     #[test]

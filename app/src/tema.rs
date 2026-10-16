@@ -528,6 +528,9 @@ pub struct Aba<'a> {
     pub icone: Icone,
     pub nome: &'a str,
     pub numero: Option<(usize, bool)>,
+    /// Um ponto no canto do nome: novidade desde a última visita (destaque)
+    /// ou algo aberto (verde).
+    pub ponto: Option<Color32>,
 }
 
 /// Abas sublinhadas: o sublinhado desliza até a escolhida (só durante a
@@ -545,8 +548,13 @@ pub fn abas(ui: &mut egui::Ui, abas: &[Aba], escolhida: usize, ate_x: f32) -> Op
             (nome, numero)
         })
         .collect();
-    let larguras: Vec<f32> =
-        medidas.iter().map(|(n, c)| 28.0 + 16.0 + 7.0 + n.size().x + c.as_ref().map_or(0.0, |c| 7.0 + c.size().x.max(6.0) + 12.0)).collect();
+    let larguras: Vec<f32> = medidas
+        .iter()
+        .zip(abas)
+        .map(|((n, c), a)| {
+            28.0 + 16.0 + 7.0 + n.size().x + c.as_ref().map_or(0.0, |c| 7.0 + c.size().x.max(6.0) + 12.0) + if a.ponto.is_some() { 9.0 } else { 0.0 }
+        })
+        .collect();
     let (rect, _) = ui.allocate_exact_size(vec2(larguras.iter().sum(), 40.0), Sense::hover());
     let pintor = ui.painter();
     pintor.line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(ate_x.max(rect.right()), rect.bottom() - 0.5)], Stroke::new(1.0, p.borda));
@@ -568,6 +576,7 @@ pub fn abas(ui: &mut egui::Ui, abas: &[Aba], escolhida: usize, ate_x: f32) -> Op
         cx += 16.0 + 7.0;
         ui.painter().galley(pos2(cx, meio - nome.size().y / 2.0), nome.clone(), cor);
         cx += nome.size().x;
+        let mut fim = cx;
         if let (Some(numero), Some((_, alerta))) = (numero, aba.numero) {
             let (fundo, texto) = match (alerta, ativa) {
                 (true, _) => (p.alerta.gamma_multiply(0.2), p.alerta),
@@ -577,6 +586,10 @@ pub fn abas(ui: &mut egui::Ui, abas: &[Aba], escolhida: usize, ate_x: f32) -> Op
             let pilula = Rect::from_min_size(pos2(cx + 7.0, meio - 9.0), vec2(numero.size().x.max(6.0) + 12.0, 18.0));
             ui.painter().rect_filled(pilula, CornerRadius::same(9), fundo);
             ui.painter().galley(pilula.center() - numero.size() / 2.0, numero, texto);
+            fim = pilula.right();
+        }
+        if let Some(cor) = aba.ponto {
+            ui.painter().circle_filled(pos2(fim + 6.0, meio - 5.0), 3.0, cor);
         }
         if resposta.clicked() && !ativa {
             clicada = Some(i);
@@ -1015,6 +1028,10 @@ pub enum Icone {
     Ciclo,
     Apresentar,
     Calendario,
+    // As abas da tarefa.
+    Terminal,
+    Pasta,
+    Globo,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1296,7 +1313,50 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
             pintor.line_segment([r.left_top() + vec2(4.0, -2.0), r.left_top() + vec2(4.0, 1.5)], traco);
             pintor.line_segment([r.right_top() + vec2(-4.0, -2.0), r.right_top() + vec2(-4.0, 1.5)], traco);
         }
+        Icone::Terminal => {
+            let r = caixa(15.0, 12.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.add(Shape::line(vec![r.left_top() + vec2(3.0, 3.5), r.left_top() + vec2(5.5, 6.0), r.left_top() + vec2(3.0, 8.5)], traco));
+            pintor.line_segment([r.left_top() + vec2(7.5, 8.5), r.left_top() + vec2(11.0, 8.5)], traco);
+        }
+        Icone::Pasta => {
+            let r = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(15.0, 11.0));
+            let aba = vec![r.left_top(), r.left_top() + vec2(5.0, 0.0), r.left_top() + vec2(6.5, 2.0), r.right_top() + vec2(0.0, 2.0)];
+            pintor.add(Shape::line(aba, traco));
+            pintor.rect_stroke(Rect::from_min_max(r.left_top() + vec2(0.0, 2.0), r.max), CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+        }
+        Icone::Globo => {
+            pintor.circle_stroke(c, 6.5, traco);
+            pintor.line_segment([c + vec2(-6.5, 0.0), c + vec2(6.5, 0.0)], traco);
+            let meridiano: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32 / 12.0 - 0.5);
+                    c + vec2(3.0 * a.cos(), 6.5 * a.sin())
+                })
+                .collect();
+            pintor.add(Shape::line(meridiano.clone(), traco));
+            pintor.add(Shape::line(meridiano.into_iter().map(|q| pos2(2.0 * c.x - q.x, q.y)).collect(), traco));
+        }
     }
+}
+
+/// O anel de uso (contexto do agente): o fundo em `realce` e o arco de 0 a
+/// 1 em `cor`, começando no topo, no sentido do relógio.
+pub fn anel(pintor: &egui::Painter, centro: Pos2, raio: f32, espessura: f32, parte: f32, cor: Color32) {
+    let p = cores();
+    pintor.circle_stroke(centro, raio, Stroke::new(espessura, p.realce));
+    let parte = parte.clamp(0.0, 1.0);
+    if parte <= 0.0 {
+        return;
+    }
+    let passos = ((48.0 * parte).ceil() as usize).max(2);
+    let pontos: Vec<Pos2> = (0..=passos)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * parte * i as f32 / passos as f32;
+            centro + vec2(a.cos(), a.sin()) * raio
+        })
+        .collect();
+    pintor.add(Shape::line(pontos, Stroke::new(espessura, cor)));
 }
 
 /// Divisória arrastável entre duas superfícies: invisível parada (o vão de

@@ -1,7 +1,6 @@
-//! Gaveta de arquivos do painel da tarefa: a árvore da pasta (só leitura,
-//! um nível por pedido, em cache por tarefa) e a pré-visualização de texto e
-//! imagem. Fica por cima do terminal, sem mudar o tamanho dele: um terminal
-//! que muda de tamanho faz o Claude Code redesenhar a tela inteira.
+//! A árvore da pasta da tarefa (só leitura, um nível por pedido, em cache
+//! por tarefa) e a pré-visualização de texto e imagem, com o número da
+//! linha. A aba Arquivos da tarefa põe as duas nas colunas dela.
 //!
 //! Tudo é buscado no núcleo, que confina os caminhos à pasta da tarefa. A
 //! gaveta só redesenha com entrada ou resposta: nada roda por tempo.
@@ -17,7 +16,6 @@ use crate::sistema;
 use crate::tema::{self, cores, forte};
 
 const ALTURA_LINHA: f32 = 26.0;
-const LARGURA_ARVORE: f32 = 320.0;
 const ALTURA_LINHA_TEXTO: f32 = 18.0;
 
 enum EstadoPasta {
@@ -35,6 +33,9 @@ enum EstadoPrevia {
 struct PreviaAberta {
     caminho: String,
     estado: EstadoPrevia,
+    /// A linha pedida (a busca por texto): marcada e rolada até ela uma vez.
+    linha: Option<usize>,
+    rolar: bool,
 }
 
 enum Resposta {
@@ -43,11 +44,11 @@ enum Resposta {
     Imagem(String, Result<egui::ColorImage, String>),
 }
 
-/// O que a gaveta pede ao painel.
+/// O que a árvore e a pré-visualização pedem ao painel.
 pub enum PedidoGaveta {
-    Fechar,
     AbrirPasta,
-    AbrirNoEditor(String),
+    /// O arquivo e, se houver, a linha.
+    AbrirNoEditor(String, Option<usize>),
     AbrirNoSistema(String),
     Citar(String),
 }
@@ -117,8 +118,14 @@ impl Arvore {
         }
     }
 
-    fn abrir_previa(&mut self, ctx: &egui::Context, caminho: &str, mostrar: bool) {
-        self.previa = Some(PreviaAberta { caminho: caminho.to_string(), estado: EstadoPrevia::Carregando });
+    pub fn abrir_previa(&mut self, ctx: &egui::Context, caminho: &str, mostrar: bool) {
+        self.abrir_na_linha(ctx, caminho, None, mostrar);
+    }
+
+    /// Abre o arquivo e, com `linha`, marca e rola até ela.
+    pub fn abrir_na_linha(&mut self, ctx: &egui::Context, caminho: &str, linha: Option<usize>, mostrar: bool) {
+        self.cursor = Some(caminho.to_string());
+        self.previa = Some(PreviaAberta { caminho: caminho.to_string(), estado: EstadoPrevia::Carregando, linha, rolar: linha.is_some() });
         let (tarefa, caminho) = (self.tarefa, caminho.to_string());
         registro::em_segundo_plano(&self.canal.0, ctx, move || {
             let r = api::ver_arquivo(tarefa, &caminho, mostrar);
@@ -194,15 +201,18 @@ impl Arvore {
         }
     }
 
-    /// O teclado da gaveta: ↑↓ andam, → abre, ← fecha (ou sobe), Enter
-    /// pré-visualiza, Esc fecha a pré-visualização e, depois, a gaveta.
-    fn teclado(&mut self, ctx: &egui::Context, linhas: &[Linha]) -> Option<PedidoGaveta> {
+    /// O arquivo aberto na pré-visualização, se houver.
+    pub fn aberto(&self) -> Option<&str> {
+        self.previa.as_ref().map(|p| p.caminho.as_str())
+    }
+
+    /// O teclado da árvore: ↑↓ andam, → abre, ← fecha (ou sobe), Enter
+    /// pré-visualiza, Esc fecha a pré-visualização.
+    fn teclado(&mut self, ctx: &egui::Context, linhas: &[Linha]) {
         let tecla = |k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         if tecla(Key::Escape) {
-            if self.previa.take().is_some() {
-                return None;
-            }
-            return Some(PedidoGaveta::Fechar);
+            self.previa = None;
+            return;
         }
         let entradas: Vec<(&String, &api::Entrada, bool)> = linhas
             .iter()
@@ -212,7 +222,7 @@ impl Arvore {
             })
             .collect();
         if entradas.is_empty() {
-            return None;
+            return;
         }
         let atual = self.cursor.as_ref().and_then(|c| entradas.iter().position(|(cam, _, _)| *cam == c));
         if tecla(Key::ArrowDown) {
@@ -240,70 +250,46 @@ impl Arvore {
                 }
             }
         }
-        None
     }
 
-    /// Desenha a gaveta presa ao canto de cima à esquerda de `area` (o
-    /// terminal em foco), com a altura dele. `largura_coluna`: a largura que
-    /// a pré-visualização pode ocupar.
-    pub fn mostrar(&mut self, ctx: &egui::Context, area: Rect, largura_coluna: f32, pasta: &str, editor: Option<&str>) -> Option<PedidoGaveta> {
-        self.receber(ctx);
-        let p = cores();
-        let mut pedido = None;
+    /// A árvore na `ui` (a coluna da esquerda da aba Arquivos). `mudadas`
+    /// marca os arquivos que mudaram contra a branch base.
+    pub fn mostrar_arvore(&mut self, ui: &mut egui::Ui, pasta: &str, mudadas: &HashMap<String, api::Mudanca>) -> Option<PedidoGaveta> {
+        let ctx = ui.ctx().clone();
+        self.receber(&ctx);
         let linhas = self.linhas();
         let id_foco = Id::new(("gaveta-arquivos", self.tarefa));
-        let com_teclado = ctx.memory(|m| m.has_focus(id_foco));
-        if com_teclado {
+        if ctx.memory(|m| m.has_focus(id_foco)) {
             let filtro = egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: true };
             ctx.memory_mut(|m| m.set_focus_lock_filter(id_foco, filtro));
-            pedido = self.teclado(ctx, &linhas);
+            self.teclado(&ctx, &linhas);
         }
-        let largura_total =
-            if self.previa.is_some() { (largura_coluna * 0.6).max(780.0).min(largura_coluna - 24.0).max(LARGURA_ARVORE) } else { LARGURA_ARVORE };
-        egui::Area::new(Id::new(("gaveta", self.tarefa))).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
-            tema::moldura_flutuante().inner_margin(egui::Margin::ZERO).show(ui, |ui| {
-                ui.set_min_size(vec2(largura_total, area.height() - 2.0));
-                ui.set_max_size(vec2(largura_total, area.height() - 2.0));
-                let caixa = ui.max_rect();
-                // O foco da gaveta: um retângulo que pega o teclado (uma vez só).
-                let foco = ui.interact(caixa, id_foco, Sense::focusable_noninteractive());
-                if std::mem::take(&mut self.focar) {
-                    foco.request_focus();
-                }
-                let arvore = Rect::from_min_size(caixa.min, vec2(LARGURA_ARVORE.min(caixa.width()), caixa.height()));
-                let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(arvore).layout(egui::Layout::top_down(egui::Align::Min)));
-                if let Some(pg) = self.coluna_arvore(&mut filho, &linhas, pasta, id_foco) {
-                    pedido = Some(pg);
-                }
-                if self.previa.is_some() {
-                    let direita = Rect::from_min_max(pos2(arvore.right() + 12.0, caixa.top()), caixa.max);
-                    let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(direita).layout(egui::Layout::top_down(egui::Align::Min)));
-                    if let Some(pg) = self.coluna_previa(&mut filho, editor) {
-                        pedido = Some(pg);
-                    }
-                }
-                let _ = p;
-            });
-        });
-        pedido
+        // O foco da árvore: um retângulo que pega o teclado (uma vez só).
+        let foco = ui.interact(ui.max_rect(), id_foco, Sense::focusable_noninteractive());
+        if std::mem::take(&mut self.focar) {
+            foco.request_focus();
+        }
+        self.coluna_arvore(ui, &linhas, pasta, id_foco, mudadas)
     }
 
-    fn coluna_arvore(&mut self, ui: &mut egui::Ui, linhas: &[Linha], pasta: &str, id_foco: Id) -> Option<PedidoGaveta> {
-        let p = cores();
+    /// A pré-visualização do arquivo aberto na `ui` (a coluna do meio).
+    pub fn mostrar_previa(&mut self, ui: &mut egui::Ui, editor: Option<&str>) -> Option<PedidoGaveta> {
+        let ctx = ui.ctx().clone();
+        self.receber(&ctx);
+        self.coluna_previa(ui, editor)
+    }
+
+    fn coluna_arvore(
+        &mut self,
+        ui: &mut egui::Ui,
+        linhas: &[Linha],
+        pasta: &str,
+        id_foco: Id,
+        mudadas: &HashMap<String, api::Mudanca>,
+    ) -> Option<PedidoGaveta> {
         let ctx = ui.ctx().clone();
         let mut pedido = None;
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_height(28.0);
-                ui.label(tema::texto_forte("Arquivos", 14.0).color(p.texto));
-                let largura = ui.available_width() - 28.0 - 8.0;
-                let (r, _) = ui.allocate_exact_size(vec2(largura.max(10.0), 20.0), Sense::hover());
-                tema::texto_sem_inicio(ui.painter(), r.min + vec2(4.0, 2.0), pasta, FontId::proportional(12.5), p.suave, largura - 4.0);
-                if tema::botao_icone(ui, tema::Icone::Fechar, 28.0).on_hover_text("Fechar (Esc)").clicked() {
-                    pedido = Some(PedidoGaveta::Fechar);
-                }
-            });
-            ui.add_space(8.0);
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if tema::botao_secundario(ui, "Abrir pasta").on_hover_text(pasta).clicked() {
                     pedido = Some(PedidoGaveta::AbrirPasta);
@@ -319,7 +305,7 @@ impl Arvore {
         let saida = egui::ScrollArea::vertical().id_salt(("arvore", self.tarefa)).auto_shrink(false).show_rows(ui, ALTURA_LINHA, linhas.len(), |ui, faixa| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for linha in &linhas[faixa] {
-                if let Some(pg) = self.linha(ui, linha, &ctx, id_foco) {
+                if let Some(pg) = self.linha(ui, linha, &ctx, id_foco, mudadas) {
                     pedido = Some(pg);
                 }
             }
@@ -329,7 +315,7 @@ impl Arvore {
         pedido
     }
 
-    fn linha(&mut self, ui: &mut egui::Ui, linha: &Linha, ctx: &egui::Context, id_foco: Id) -> Option<PedidoGaveta> {
+    fn linha(&mut self, ui: &mut egui::Ui, linha: &Linha, ctx: &egui::Context, id_foco: Id, mudadas: &HashMap<String, api::Mudanca>) -> Option<PedidoGaveta> {
         let p = cores();
         let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
         let (rect, _) = ui.allocate_exact_size(vec2(largura, ALTURA_LINHA), Sense::hover());
@@ -395,8 +381,23 @@ impl Arvore {
                 }
                 let fonte = if entrada.pasta { forte(13.0) } else { FontId::proportional(13.0) };
                 let cor_nome = if entrada.ignorada { p.suave } else { p.texto };
-                let tamanho = if entrada.pasta || entrada.link { String::new() } else { registro::tamanho(entrada.bytes) };
-                let g_tam = pintor.layout_no_wrap(tamanho, FontId::proportional(11.5), if realcada { p.texto } else { p.suave });
+                // O que mudou na branch: a letra no lugar do tamanho (A novo, M
+                // mudou); a pasta com algo mudado dentro ganha um ponto.
+                let mudanca = mudadas.get(caminho.as_str());
+                let mudou_dentro = entrada.pasta && mudanca.is_none() && {
+                    let prefixo = format!("{caminho}/");
+                    mudadas.keys().any(|k| k.starts_with(&prefixo))
+                };
+                let (tamanho, cor_tamanho) = match mudanca {
+                    Some(m) => (m.estado.clone(), cor_da_mudanca(&m.estado)),
+                    None if entrada.pasta || entrada.link => (String::new(), p.suave),
+                    None => (registro::tamanho(entrada.bytes), if realcada { p.texto } else { p.suave }),
+                };
+                let fonte_tamanho = if mudanca.is_some() { forte(11.5) } else { FontId::proportional(11.5) };
+                let g_tam = pintor.layout_no_wrap(tamanho, fonte_tamanho, cor_tamanho);
+                if mudou_dentro {
+                    pintor.circle_filled(pos2(rect.right() - 12.0, rect.center().y), 3.0, p.alerta);
+                }
                 let largura_nome = rect.right() - (x + 16.0) - g_tam.size().x - 12.0 - if entrada.link { 16.0 } else { 0.0 };
                 let g = tema::cortar(&pintor, &entrada.nome, egui::TextFormat::simple(fonte, cor_nome), largura_nome.max(20.0), 1, true);
                 let fim_nome = x + 16.0 + g.size().x;
@@ -404,7 +405,7 @@ impl Arvore {
                 if entrada.link {
                     tema::externo(&pintor, pos2(fim_nome + 6.0 + 5.0, rect.center().y), p.suave);
                 }
-                pintor.galley(pos2(rect.right() - 8.0 - g_tam.size().x, rect.center().y - g_tam.size().y / 2.0), g_tam, p.suave);
+                pintor.galley(pos2(rect.right() - 8.0 - g_tam.size().x, rect.center().y - g_tam.size().y / 2.0), g_tam, cor_tamanho);
                 let resposta = if entrada.ignorada {
                     resposta.on_hover_text("Não listada para não pesar")
                 } else if entrada.link {
@@ -430,7 +431,10 @@ impl Arvore {
         let p = cores();
         let ctx = ui.ctx().clone();
         let mut pedido = None;
+        // Rola até a linha pedida uma vez, quando o texto chega.
+        let rolar = self.previa.as_mut().is_some_and(|p| matches!(p.estado, EstadoPrevia::Pronta { .. }) && std::mem::take(&mut p.rolar));
         let Some(aberta) = &self.previa else { return None };
+        let aberta_linha = aberta.linha;
         let caminho = aberta.caminho.clone();
         let nome = caminho.rsplit('/').next().unwrap_or(&caminho).to_string();
         let mut fechar = false;
@@ -456,7 +460,7 @@ impl Arvore {
             pintor.galley(r.min + vec2(w_antes, -1.0), g, p.texto);
             let meta = match &aberta.estado {
                 EstadoPrevia::Pronta { previa, .. } if previa.tipo == "texto" => {
-                    format!("{} {} · {}", previa.linhas, if previa.linhas == 1 { "linha" } else { "linhas" }, registro::tamanho(previa.bytes))
+                    format!("{} {} · {} · só leitura", previa.linhas, if previa.linhas == 1 { "linha" } else { "linhas" }, registro::tamanho(previa.bytes))
                 }
                 EstadoPrevia::Pronta { previa, .. } if previa.tipo == "imagem" => format!("{} × {} · {}", previa.largura, previa.altura, previa.formato),
                 EstadoPrevia::Pronta { previa, .. } => registro::tamanho(previa.bytes),
@@ -484,7 +488,7 @@ impl Arvore {
                 absoluto = previa.caminho_absoluto.clone();
                 cortado = previa.cortado;
                 match previa.tipo.as_str() {
-                    "texto" => texto(ui, corpo, linhas, previa.cortado, &caminho),
+                    "texto" => texto(ui, corpo, linhas, previa.cortado, &caminho, aberta_linha, rolar),
                     "imagem" => {
                         ui.painter().rect(corpo, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie, Stroke::NONE, StrokeKind::Inside);
                         match imagem {
@@ -540,7 +544,7 @@ impl Arvore {
             let rotulo = if curto { nome_editor.to_string() } else { format!("Abrir no {nome_editor}") };
             let dica = if cortado { "Abrir o arquivo inteiro no editor" } else { "Abrir no editor" };
             if tema::botao_secundario_com(&mut filho, &rotulo, pronta).on_hover_text(dica).clicked() {
-                pedido = Some(PedidoGaveta::AbrirNoEditor(absoluto.clone()));
+                pedido = Some(PedidoGaveta::AbrirNoEditor(absoluto.clone(), aberta_linha));
             }
             filho.add_space(6.0);
         }
@@ -565,7 +569,7 @@ impl Arvore {
 
 /// O texto do arquivo: monoespaçado, com número de linha, sem quebra e só as
 /// linhas visíveis desenhadas.
-fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, caminho: &str) {
+fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, caminho: &str, alvo: Option<usize>, rolar: bool) {
     let p = cores();
     // O contorno marca onde o arquivo começa e acaba (nos temas claros, o
     // fundo do terminal quase não se separa da gaveta).
@@ -580,10 +584,18 @@ fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, camin
     // largura (as flutuantes só surgiam com o mouse em cima, e parecia que a
     // linha longa não tinha fim). Shift+rodinha também anda para o lado.
     filho.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-    egui::ScrollArea::both().id_salt(("previa-texto", caminho)).auto_shrink(false).show_rows(&mut filho, ALTURA_LINHA_TEXTO, linhas.len(), |ui, faixa| {
+    let mut rolagem = egui::ScrollArea::both().id_salt(("previa-texto", caminho)).auto_shrink(false);
+    if let Some(n) = alvo.filter(|_| rolar) {
+        // A linha achada fica no terço de cima.
+        rolagem = rolagem.vertical_scroll_offset((n.saturating_sub(1) as f32 * ALTURA_LINHA_TEXTO - area.height() / 3.0).max(0.0));
+    }
+    rolagem.show_rows(&mut filho, ALTURA_LINHA_TEXTO, linhas.len(), |ui, faixa| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for n in faixa {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().max(calha + 8.0), ALTURA_LINHA_TEXTO), Sense::hover());
+            if alvo == Some(n + 1) {
+                ui.painter().rect_filled(r, CornerRadius::ZERO, p.alerta.gamma_multiply(0.16));
+            }
             ui.painter().text(pos2(r.left() + calha - 8.0, r.center().y), Align2::RIGHT_CENTER, (n + 1).to_string(), fonte.clone(), p.suave);
             let g = ui.painter().layout_no_wrap(linhas[n].clone(), fonte.clone(), p.terminal_texto);
             let largura = g.size().x;
@@ -599,6 +611,16 @@ fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, camin
         ui.painter().rect_filled(faixa, CornerRadius { nw: 0, ne: 0, sw: tema::RAIO_CONTROLE, se: tema::RAIO_CONTROLE }, p.superficie);
         let g = ui.painter().layout_no_wrap("Mostrando os primeiros 256 KB · abra no editor para ver tudo".into(), FontId::proportional(12.5), p.texto);
         ui.painter().galley(pos2(faixa.left() + 12.0, faixa.center().y - g.size().y / 2.0), g, Color32::WHITE);
+    }
+}
+
+/// A cor da letra da mudança: A novo, M mudou, D apagado.
+pub fn cor_da_mudanca(estado: &str) -> Color32 {
+    let p = cores();
+    match estado {
+        "A" => p.ok,
+        "D" => p.erro,
+        _ => p.alerta,
     }
 }
 

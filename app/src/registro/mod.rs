@@ -19,6 +19,7 @@ mod historico;
 mod linha;
 mod lista;
 mod sprint;
+mod tarefa;
 
 use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -159,6 +160,12 @@ enum Periodo {
 type Chave = (i64, api::Recorte);
 
 enum Resposta {
+    /// Uma página da linha do tempo de uma tarefa (a aba da tarefa).
+    PaginaTarefa {
+        tarefa: i64,
+        primeira: bool,
+        resultado: Result<api::PaginaLinha, String>,
+    },
     Pagina {
         chave: Chave,
         primeira: bool,
@@ -242,6 +249,8 @@ pub struct Registro {
     canal: (Sender<Resposta>, Receiver<Resposta>),
     miniaturas: CacheImagens,
     visor: Option<Visor>,
+    /// A linha do tempo da tarefa aberta (a aba dela).
+    da_tarefa: Option<tarefa::LinhaDaTarefa>,
     /// Chegou evento com a página fora da tela: ao voltar, ela busca de novo
     /// (sem consulta periódica). Uma marca por página.
     sujas: [bool; 3],
@@ -333,6 +342,7 @@ impl Default for Registro {
             canal: mpsc::channel(),
             miniaturas: CacheImagens::new(Some(ALTURA_MINIATURA), MAX_MINIATURAS, "miniatura"),
             visor: None,
+            da_tarefa: None,
             sujas: [false; 3],
             conectado: true,
             dias: Vec::new(),
@@ -863,6 +873,7 @@ impl Registro {
                     }
                     Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar os assuntos: {e}"))),
                 },
+                Resposta::PaginaTarefa { tarefa, primeira, resultado } => self.receber_da_tarefa(tarefa, primeira, resultado),
                 // Resposta de um escopo (ou período) que já não está na tela.
                 _ => {}
             }
