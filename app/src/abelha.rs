@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::{self, Color32, Id, Order, Pos2, RichText, Sense, vec2};
+use eframe::egui::{self, Id, Order, Pos2, Rect, RichText, Sense, vec2};
 use mascote::{Estado, Tempo};
 
 use crate::dados::{Coluna, Tarefa};
@@ -33,7 +33,7 @@ pub struct Abelha {
     em_cima: bool,
 }
 
-/// Quadros por segundo da animação: suave o bastante para uma abelha de 78 px
+/// Quadros por segundo da animação: suave o bastante para uma abelha pequena
 /// e metade do custo de redesenhar a janela inteira a 60 por segundo.
 const QUADROS_ANIMACAO: f64 = 30.0;
 
@@ -54,19 +54,6 @@ pub fn estado_base<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, agentes_rodand
         Estado::Trabalhando
     } else {
         Estado::Dormindo
-    }
-}
-
-/// Cor do ponto ao lado de um projeto na barra lateral; nenhuma quando está tudo quieto.
-/// Um erro já visto sai da abelha, mas o ponto fica vermelho até ele ser resolvido:
-/// a abelha chama atenção, o ponto mostra onde está o problema.
-pub fn cor_ponto(estado: Estado, tem_erro: bool, concluiu_ha_pouco: bool) -> Option<Color32> {
-    match estado {
-        _ if tem_erro => Some(cores().erro),
-        Estado::Aguardando => Some(cores().alerta),
-        _ if concluiu_ha_pouco => Some(cores().destaque),
-        Estado::Trabalhando => Some(cores().ok),
-        _ => None,
     }
 }
 
@@ -99,15 +86,21 @@ impl Abelha {
         novo
     }
 
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str) -> egui::Response {
-        let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), 132.0), Sense::click());
-        let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    /// O nome do estado de agora ("Aguardando você"), para a linha ao lado dela.
+    pub fn nome(&self) -> &'static str {
+        self.estado.nome()
+    }
+
+    /// A abelha no quadrado `rect` (o lado é o tamanho dela), clicável em
+    /// `area`. O fundo e os textos ficam com quem chama: no pé do painel ela
+    /// vai ao lado do estado, no trilho recolhido vai sozinha.
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, area: Rect, rect: Rect, id: Id, agora: f64) -> egui::Response {
+        let resposta = ui.interact(area, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Anima só depois de uma troca de estado, durante a comemoração e por
         // uns segundos quando o mouse chega nela; no resto do tempo fica parada
         // e não pede redesenho nenhum (a janela inteira é redesenhada a cada
         // quadro, então uma abelha sempre animada custaria a janela inteira).
-        let ctx = ui.ctx().clone();
         let em_cima = resposta.hovered();
         if em_cima && !self.em_cima {
             self.animar_ate = self.animar_ate.max(agora + ANIMACAO);
@@ -115,20 +108,13 @@ impl Abelha {
         self.em_cima = em_cima;
         let animando = agora < self.animar_ate || self.estado == Estado::Comemorando;
         let t_visual = if animando {
-            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / QUADROS_ANIMACAO));
+            ui.ctx().request_repaint_after(Duration::from_secs_f64(1.0 / QUADROS_ANIMACAO));
             agora
         } else {
             self.tempo_parado()
         };
-
-        let pintor = ui.painter_at(rect);
-        if resposta.hovered() || self.resumo_aberto {
-            pintor.rect_filled(rect, 10.0, cores().realce);
-        }
         let tempo = Tempo { total: t_visual as f32, no_estado: (t_visual - self.mudou_em) as f32 };
-        mascote::desenhar(&pintor, rect.center() - vec2(0.0, 16.0), 78.0, self.estado, tempo);
-        pintor.text(rect.center_bottom() - vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, self.estado.nome(), egui::FontId::proportional(13.0), cores().texto);
-        pintor.text(rect.center_bottom() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, linha, egui::FontId::proportional(11.0), cores().suave);
+        mascote::desenhar(ui.painter(), rect.center(), rect.height(), self.estado, tempo);
         resposta
     }
 
@@ -145,6 +131,13 @@ impl Abelha {
     }
 }
 
+/// Quantos esperam você: os agentes esperando uma resposta ou, se forem
+/// mais, os cartões em "Aguardando você" (com ou sem agente esperando).
+pub fn esperando<'a>(tarefas: impl Iterator<Item = &'a Tarefa> + Clone) -> usize {
+    let agentes = tarefas.clone().flat_map(|t| &t.agentes).filter(|a| a.visual().espera_voce()).count();
+    agentes.max(tarefas.filter(|t| t.coluna == Coluna::AguardandoVoce).count())
+}
+
 /// A linha embaixo da abelha: quantos precisam de você, ou o que está acontecendo.
 pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tarefa> + Clone) -> String {
     let plural = |n: usize, um: &str, varios: &str| if n == 1 { format!("1 {um}") } else { format!("{n} {varios}") };
@@ -154,11 +147,7 @@ pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tar
             let n = agentes().filter(|a| a.erro_novo()).count() + tarefas.clone().filter(|t| t.erro.is_some() && !t.erro_visto && t.agentes.is_empty()).count();
             plural(n.max(1), "erro", "erros")
         }
-        Estado::Aguardando => {
-            let n = agentes().filter(|a| a.visual().espera_voce()).count();
-            let n = n.max(tarefas.clone().filter(|t| t.coluna == Coluna::AguardandoVoce).count());
-            plural(n, "esperando você", "esperando você")
-        }
+        Estado::Aguardando => plural(esperando(tarefas), "esperando você", "esperando você"),
         Estado::Comemorando => "tarefa concluída".to_string(),
         Estado::Trabalhando => {
             plural(agentes().filter(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando).count(), "agente trabalhando", "agentes trabalhando")

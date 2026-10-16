@@ -120,6 +120,16 @@ impl NovoProjeto {
             erro: None,
         }
     }
+
+    /// Já no workspace dado (o do painel); `None` começa num workspace novo.
+    pub fn no_workspace(mut self, workspace: Option<i64>) -> Self {
+        self.workspace = match workspace {
+            Some(id) if self.workspaces.iter().any(|w| w.id == id) => Some(id),
+            Some(_) => self.workspace,
+            None => None,
+        };
+        self
+    }
 }
 
 pub struct NovaTarefa {

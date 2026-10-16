@@ -56,9 +56,6 @@ pub struct Projeto {
     #[serde(default)]
     pub workspace_id: i64,
     pub workspace: String,
-    /// O workspace está recolhido na barra lateral.
-    #[serde(default)]
-    pub workspace_recolhido: bool,
     pub nome: String,
     pub caminho: String,
     /// "git" ou "pasta" (pasta de trabalho sem git).
@@ -925,11 +922,6 @@ pub fn definir_tema(perfil: i64, tema: &str) -> Result<(), String> {
 
 pub fn definir_aviso_captura(perfil: i64, mostrar: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "aviso_captura": mostrar }))).map(|_| ())
-}
-
-/// Recolhe ou abre o workspace na barra lateral (guardado no núcleo).
-pub fn recolher_workspace(workspace: i64, recolhido: bool) -> Result<(), String> {
-    chamar::<Ok>("PATCH", &format!("/v1/workspaces/{workspace}"), Some(json!({ "recolhido": recolhido }))).map(|_| ())
 }
 
 pub fn definir_tempo_agentes(perfil: i64, mostrar: bool) -> Result<(), String> {

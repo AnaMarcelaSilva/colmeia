@@ -50,6 +50,9 @@ pub struct Paleta {
     /// Sombra longa e fraca dos cartões.
     pub sombra: Color32,
     pub marca: CoresMarca,
+    /// As cores de etiqueta (roxo, azul, água, âmbar, rosa): o quadrado de
+    /// cada workspace no trilho, escolhido pelo nome.
+    pub etiquetas: [Color32; 5],
     pub terminal_fundo: Color32,
     pub terminal_texto: Color32,
     pub ansi: [Color32; 16],
@@ -100,6 +103,7 @@ pub const ESCURO: Paleta = Paleta {
     brilho: rgba(0xae8ff7, 51),
     sombra: rgba(0x000000, 90),
     marca: MARCA_ESCURO,
+    etiquetas: [rgb(0xae8ff7), rgb(0x6ea8fe), rgb(0x5fd0c9), rgb(0xf1b65f), rgb(0xf08bbd)],
     terminal_fundo: rgb(0x0d0f18),
     terminal_texto: rgb(0xd9dce6),
     ansi: [
@@ -130,6 +134,7 @@ pub const CLARO: Paleta = Paleta {
     brilho: rgba(0x6a43d4, 31),
     sombra: rgba(0x28285a, 25),
     marca: MARCA_CLARO,
+    etiquetas: [rgb(0x6a43d4), rgb(0x2e6bd6), rgb(0x0f7c78), rgb(0x8f5600), rgb(0xb8327a)],
     terminal_fundo: rgb(0xf6f7fb),
     terminal_texto: rgb(0x181b26),
     ansi: [
@@ -161,6 +166,7 @@ pub const LEITURA: Paleta = Paleta {
     brilho: rgba(0x7a4486, 26),
     sombra: rgba(0x503714, 25),
     marca: MARCA_CLARO,
+    etiquetas: [rgb(0x7a4486), rgb(0x3b5e8c), rgb(0x2f7470), rgb(0x7a5c00), rgb(0xa3405f)],
     terminal_fundo: rgb(0xf6efe0),
     terminal_texto: rgb(0x36291e),
     ansi: [
@@ -192,6 +198,7 @@ pub const FOSCO: Paleta = Paleta {
     brilho: rgba(0xab9ad9, 36),
     sombra: rgba(0x000000, 80),
     marca: MARCA_ESCURO,
+    etiquetas: [rgb(0xab9ad9), rgb(0x8eaedb), rgb(0x88c3c0), rgb(0xd8b277), rgb(0xd79bbb)],
     terminal_fundo: rgb(0x1c1c20),
     terminal_texto: rgb(0xd0cec7),
     ansi: [
@@ -910,6 +917,12 @@ pub enum Icone {
     Lapis,
     Agente,
     Parar,
+    // O trilho da barra lateral.
+    Grade,
+    Painel,
+    Engrenagem,
+    Teclado,
+    Tema,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1101,6 +1114,45 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
         Icone::Parar => {
             pintor.rect_filled(caixa(9.0, 9.0), CornerRadius::same(2), cor);
         }
+        Icone::Grade => {
+            for (dx, dy) in [(-3.5, -3.5), (3.5, -3.5), (-3.5, 3.5), (3.5, 3.5)] {
+                pintor.rect_stroke(Rect::from_center_size(c + vec2(dx, dy), vec2(5.5, 5.5)), CornerRadius::same(1), traco, egui::StrokeKind::Middle);
+            }
+        }
+        Icone::Painel => {
+            // A janela com a coluna da lateral à esquerda.
+            let r = caixa(15.0, 13.0);
+            pintor.rect_stroke(r, CornerRadius::same(3), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.left_top() + vec2(5.0, 0.0), r.left_bottom() + vec2(5.0, 0.0)], traco);
+        }
+        Icone::Engrenagem => {
+            for i in 0..6 {
+                let a = std::f32::consts::FRAC_PI_3 * i as f32;
+                let d = vec2(a.cos(), a.sin());
+                pintor.line_segment([c + d * 4.5, c + d * 7.0], Stroke::new(2.2, cor));
+            }
+            pintor.circle_stroke(c, 4.8, traco);
+            pintor.circle_filled(c, 1.6, cor);
+        }
+        Icone::Teclado => {
+            let r = caixa(16.0, 11.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            for dx in [-4.5, -1.5, 1.5, 4.5] {
+                pintor.circle_filled(c + vec2(dx, -1.8), 0.9, cor);
+            }
+            pintor.line_segment([c + vec2(-3.5, 2.3), c + vec2(3.5, 2.3)], traco);
+        }
+        Icone::Tema => {
+            // Meio cheio, meio vazio: claro e escuro.
+            pintor.circle_stroke(c, 6.5, traco);
+            let metade: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+                    c + vec2(6.5 * a.cos(), 6.5 * a.sin())
+                })
+                .collect();
+            pintor.add(Shape::convex_polygon(metade, cor, Stroke::NONE));
+        }
     }
 }
 
@@ -1129,12 +1181,16 @@ pub fn divisoria(ui: &mut egui::Ui, rect: Rect, id: egui::Id, vertical: bool) ->
 }
 
 /// Contador de pedidos pendentes: pílula de 18 px na cor de alerta, com o
-/// número (9+ acima de nove). `centro_direito` é o meio da borda direita.
-pub fn contador(pintor: &egui::Painter, centro_direito: Pos2, n: usize) -> Rect {
+/// número (9+ acima de nove). `centro_direito` é o meio da borda direita;
+/// `anel`, um contorno de 2 px na cor de baixo, para soltar do que ele cobre.
+pub fn contador(pintor: &egui::Painter, centro_direito: Pos2, n: usize, anel: Option<Color32>) -> Rect {
     let texto = if n > 9 { "9+".to_string() } else { n.to_string() };
     let galeria = pintor.layout_no_wrap(texto, forte(11.5), sobre_destaque());
     let largura = (galeria.size().x + 10.0).max(18.0);
     let rect = Rect::from_min_max(pos2(centro_direito.x - largura, centro_direito.y - 9.0), pos2(centro_direito.x, centro_direito.y + 9.0));
+    if let Some(cor) = anel {
+        pintor.rect_filled(rect.expand(2.0), CornerRadius::same(11), cor);
+    }
     pintor.rect_filled(rect, CornerRadius::same(9), cores().alerta);
     pintor.galley(rect.center() - galeria.size() / 2.0, galeria, sobre_destaque());
     rect
@@ -1849,6 +1905,15 @@ fn malha_gradiente(area: Rect, p: &Paleta) -> Mesh {
     malha
 }
 
+/// A cor de etiqueta de um nome (o quadrado do workspace): sai do próprio
+/// nome, sem gravar nada, e é a mesma em toda abertura e nos quatro temas.
+pub fn cor_do_nome(nome: &str) -> Color32 {
+    // FNV-1a: estável entre versões, ao contrário do hasher padrão.
+    let hash = nome.bytes().fold(0x811c9dc5_u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
+    let etiquetas = &cores().etiquetas;
+    etiquetas[hash as usize % etiquetas.len()]
+}
+
 /// Fundo da barra lateral: o trilho a 70%, o gradiente aparece de leve por
 /// baixo e o `suave` continua acima de 4,5:1 até no canto do brilho.
 pub fn fundo_lateral(p: &Paleta) -> Color32 {
@@ -1871,10 +1936,16 @@ pub fn rect_cartao_principal(janela: Rect, esquerda: f32) -> Rect {
 
 /// O cartão do conteúdo: sombra longa e fraca, borda suave e o fio de luz no topo.
 pub fn cartao_principal(pintor: &egui::Painter, rect: Rect) {
+    cartao_solto(pintor, rect, cores().fundo);
+}
+
+/// Um cartão solto sobre o gradiente (o do conteúdo, o painel da barra
+/// lateral): a sombra longa, a borda suave e o fio de luz no topo.
+pub fn cartao_solto(pintor: &egui::Painter, rect: Rect, fundo: Color32) {
     let p = cores();
     let raio = CornerRadius::same(RAIO_MOLDURA);
     pintor.add(egui::Shadow { offset: [0, 18], blur: 40, spread: 0, color: p.sombra }.as_shape(rect, raio));
-    pintor.rect(rect, raio, p.fundo, Stroke::new(1.0, misturar(p.borda, p.fundo, 0.2)), egui::StrokeKind::Inside);
+    pintor.rect(rect, raio, fundo, Stroke::new(1.0, misturar(p.borda, fundo, 0.2)), egui::StrokeKind::Inside);
     let curva = RAIO_MOLDURA as f32;
     pintor.hline((rect.left() + curva)..=(rect.right() - curva), rect.top() + 1.5, Stroke::new(1.0, p.luz));
 }
@@ -2048,7 +2119,7 @@ mod testes {
         // 4,5:1 em qualquer ponto, até no canto do brilho.
         let area = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
         for (nome, p) in TEMAS {
-            for x in [0.0, 120.0, 236.0] {
+            for x in [0.0, 32.0, 64.0] {
                 for y in [0.0, 300.0, 600.0, 900.0] {
                     let fundo = sobre(fundo_lateral(p), cor_do_gradiente(p, area, pos2(x, y)));
                     let r = contraste(p.suave, fundo);
@@ -2056,6 +2127,27 @@ mod testes {
                 }
             }
         }
+    }
+
+    #[test]
+    fn inicial_do_workspace_e_legivel_no_quadrado() {
+        // O quadrado escolhido é a etiqueta cheia, com a inicial na cor de
+        // sobre o destaque (a janela nos escuros, branco nos claros).
+        for (nome, p) in TEMAS {
+            let letra = if p.texto.r() < 128 { Color32::WHITE } else { p.janela };
+            for c in p.etiquetas {
+                let r = contraste(letra, c);
+                assert!(r >= 4.5, "inicial sobre a etiqueta {c:?} no tema {nome}: {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn cor_do_nome_e_estavel() {
+        assert_eq!(cor_do_nome("loja-web"), cor_do_nome("loja-web"));
+        let cores: std::collections::HashSet<_> =
+            ["Clientes", "Meus projetos", "Open source", "Empresa X", "cliente-x"].iter().map(|n| cor_do_nome(n)).collect();
+        assert!(cores.len() > 1, "nomes diferentes caem em cores diferentes");
     }
 
     #[test]

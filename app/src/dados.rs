@@ -50,8 +50,6 @@ pub struct Projeto {
     /// O workspace: o id (para a lousa dele) e o nome.
     pub workspace_id: i64,
     pub workspace: String,
-    /// O workspace está recolhido na barra lateral.
-    pub recolhido: bool,
     pub caminho: String,
     /// Pasta de trabalho sem git: sem branches nem cópias isoladas.
     pub sem_git: bool,
@@ -65,7 +63,6 @@ impl From<api::Projeto> for Projeto {
             nome: p.nome,
             workspace_id: p.workspace_id,
             workspace: p.workspace,
-            recolhido: p.workspace_recolhido,
             caminho: p.caminho,
             sem_git: p.tipo == "pasta",
             branch_padrao: p.branch_padrao,
@@ -517,13 +514,7 @@ pub enum Evento {
     },
     /// Um workspace foi recolhido ou aberto na barra lateral (nesta ou em outra tela).
     #[serde(rename = "workspace.recolhido")]
-    WorkspaceRecolhido {
-        seq: u64,
-        #[serde(default)]
-        workspace_id: i64,
-        #[serde(default)]
-        recolhido: bool,
-    },
+    WorkspaceRecolhido { seq: u64 },
     /// Uma configuração de execução do Play começou ou terminou (fora da
     /// corrente: não entra na linha do tempo).
     #[serde(rename = "comando.iniciou")]
@@ -711,11 +702,8 @@ impl Modelo {
                     }
                 }
             }
-            Evento::WorkspaceRecolhido { workspace_id, recolhido, .. } => {
-                for p in self.projetos.iter_mut().filter(|p| p.workspace_id == workspace_id) {
-                    p.recolhido = recolhido;
-                }
-            }
+            // A barra lateral não recolhe mais workspaces: o trilho mostra todos.
+            Evento::WorkspaceRecolhido { .. } => {}
             Evento::ProjetoRemovido { projeto_id, .. } => {
                 self.projetos.retain(|p| p.id != projeto_id);
                 for t in self.tarefas.iter().filter(|t| t.projeto_id == projeto_id) {
@@ -844,7 +832,6 @@ pub fn projetos_demo() -> Vec<Projeto> {
             nome: nome.into(),
             workspace_id: 1,
             workspace: "Empresa X".into(),
-            recolhido: false,
             caminho: String::new(),
             sem_git: false,
             branch_padrao: "main".into(),

@@ -19,6 +19,7 @@ mod entrada;
 mod eventos;
 mod execucao;
 mod gaveta;
+mod lateral;
 mod lousa;
 mod pedido;
 mod quadro;
@@ -178,9 +179,6 @@ enum RespostaNavegador {
 /// Largura mínima do título no cabeçalho do painel da tarefa.
 const TITULO_MINIMO: f32 = 160.0;
 
-/// Altura que a abelha e o seletor de tema ocupam no pé da barra lateral.
-const RESERVA_ABELHA: f32 = 250.0;
-
 /// Avisos de "precisa de você" que chegam juntos viram um só.
 const JUNTAR_AVISOS: f64 = 10.0;
 /// Duração do clarão na borda do terminal capturado.
@@ -212,6 +210,7 @@ struct Colmeia {
     escopo: Escopo,
     dialogo: Option<Dialogo>,
     abelha: Abelha,
+    lateral: lateral::Lateral,
     sem_abelha: bool,
     tema: tema::Escolha,
     favo: tema::Favo,
@@ -335,6 +334,7 @@ impl Colmeia {
             escopo: Escopo::Perfil,
             dialogo: None,
             abelha: Abelha::new(),
+            lateral: lateral::Lateral::default(),
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
             tema: escolha,
             favo: tema::Favo::default(),
@@ -1679,22 +1679,6 @@ impl Colmeia {
         self.tempo_pendente = Some((antes, recebe));
     }
 
-    /// Recolhe ou abre um workspace na barra lateral: muda aqui na hora e
-    /// grava no núcleo numa thread (as outras telas recebem pelo evento). Se
-    /// não gravar, só volta aberto na próxima vez que a Colmeia abrir.
-    fn recolher_workspace(&mut self, workspace: i64, recolhido: bool) {
-        for p in self.modelo.projetos.iter_mut().filter(|p| p.workspace_id == workspace) {
-            p.recolhido = recolhido;
-        }
-        if !self.demo {
-            std::thread::spawn(move || {
-                if let Err(e) = api::recolher_workspace(workspace, recolhido) {
-                    eprintln!("colmeia: não consegui guardar o workspace recolhido: {e}");
-                }
-            });
-        }
-    }
-
     /// A resposta do núcleo à opção do tempo: em erro, desfaz e avisa.
     fn receber_tempo(&mut self, agora: f64) {
         let Some((antes, recebe)) = &self.tempo_pendente else { return };
@@ -1733,251 +1717,88 @@ impl Colmeia {
         });
     }
 
-    fn lateral(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str) -> (Option<egui::Rect>, bool) {
-        let p = cores();
-        let rodando = !self.demo || self.carga != "parada";
-        let (mut caixa_abelha, mut abelha_clicada) = (None, false);
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-            tema::logo(ui.painter(), r.center(), 11.0);
-            ui.label(texto_forte("Colmeia", 17.0).color(p.texto));
-        });
-        ui.add_space(18.0);
-
-        // Perfil: trocar, criar ou sair.
-        let nome = self.perfil.as_ref().map(|p| p.nome.clone()).unwrap_or_default();
-        let resposta = tema::chip(ui, "Perfil", &nome, false);
-        // A lista é lida ao abrir o menu: um perfil criado em outro lugar aparece.
-        if resposta.clicked() && !self.demo {
-            self.perfis = api::perfis().unwrap_or_else(|_| self.perfis.clone());
-        }
-        if !self.demo {
-            let mut ir_para: Option<Tela> = None;
-            let mut trocar: Option<api::Perfil> = None;
-            egui::Popup::menu(&resposta).show(|ui| {
-                ui.set_min_width(220.0);
-                for outro in &self.perfis {
-                    let atual = self.perfil.as_ref().is_some_and(|p| p.id == outro.id);
-                    if tema::opcao_menu(ui, &outro.nome, atual) {
-                        if !atual {
-                            trocar = Some(outro.clone());
-                        }
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if tema::opcao_menu(ui, "Criar perfil…", false) {
-                    ir_para = Some(Tela::Entrada(Box::new(entrada::Entrada::new(true))));
-                    ui.close();
-                }
-                if tema::opcao_menu(ui, "Sair do perfil", false) {
-                    ir_para = Some(Tela::Entrada(Box::new(entrada::Entrada::new(false))));
-                    ui.close();
-                }
-            });
-            if let Some(perfil) = trocar {
-                self.entrar(perfil, ui.ctx());
-            }
-            if let Some(tela) = ir_para {
-                self.perfil = None;
-                self.ouvinte = None;
-                self.tela = tela;
-                return (None, false);
-            }
-        }
-        ui.add_space(14.0);
-
-        if item_lateral(ui, "Todos os projetos", self.escopo == Escopo::Perfil && !matches!(self.tela, Tela::Lousa(_) | Tela::Banco), None, false, None, 0.0)
-            .0
-            .clicked()
-        {
-            self.mudar_escopo(Escopo::Perfil);
-        }
-        if !self.demo {
-            ui.add_space(2.0);
-            let (resposta, _) = item_lateral(ui, "Bancos de dados", matches!(self.tela, Tela::Banco), None, false, Some(tema::Icone::Banco), 0.0);
-            // O contador dos pedidos de consulta esperando você, no lugar do ponto.
-            let pedidos = self.modelo.aprovacoes.len();
-            if pedidos > 0 {
-                tema::contador(ui.painter(), resposta.rect.right_center() - egui::vec2(14.0, 0.0), pedidos);
-            }
-            if resposta.on_hover_text("Bancos de dados (Ctrl+Shift+K)").clicked() {
-                self.alternar_banco(true);
-            }
-        }
-        ui.add_space(8.0);
-        let mut workspace_anterior = None;
-        let mut mudar = None;
-        let mut mudar_workspace = None;
-        let mut remover = None;
-        let mut abrir_lousa = None;
-        let mut recolher = None;
-        let pode = self.pode_mudar();
-        let lousa_aberta = if let Tela::Lousa(ws) = self.tela { Some(ws) } else { None };
-        let fora_do_escopo = matches!(self.tela, Tela::Lousa(_) | Tela::Banco);
-        // A lista rola quando não cabe acima da abelha e do tema (janela
-        // baixa, muitos projetos): a abelha nunca cobre um projeto.
-        let altura_lista = (ui.available_height() - RESERVA_ABELHA).max(96.0);
-        // Barra de rolagem sólida: aparece sempre que há mais embaixo (não só
-        // com o mouse em cima) e reserva a largura dela, sem cobrir o realce,
-        // a contagem nem o ponto de estado dos itens.
-        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-        ui.spacing_mut().scroll.bar_width = 6.0;
-        egui::ScrollArea::vertical().id_salt("lateral-projetos").max_height(altura_lista).auto_shrink([false, true]).show(ui, |ui| {
-            for projeto in &self.modelo.projetos {
-                // Recolhido, o workspace esconde a lousa e os projetos, menos o que está aberto.
-                let recolhido = projeto.recolhido && projeto.workspace_id != 0;
-                if workspace_anterior != Some((projeto.workspace_id, &projeto.workspace)) {
-                    // Uma linha fina separa um workspace do anterior.
-                    if workspace_anterior.is_some() {
-                        ui.add_space(4.0);
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-                        ui.painter().hline(r.x_range().shrink(8.0), r.center().y, Stroke::new(1.0, p.borda));
-                    }
-                    ui.add_space(6.0);
-                    workspace_anterior = Some((projeto.workspace_id, &projeto.workspace));
-                    // O nome do workspace abre todos os projetos dele (quadro, daily e sprint juntos).
-                    if projeto.workspace_id != 0 {
-                        let ativo = self.escopo == Escopo::Workspace(projeto.workspace_id) && !fora_do_escopo;
-                        let do_workspace = |id: i64| self.modelo.projetos.iter().any(|x| x.id == id && x.workspace_id == projeto.workspace_id);
-                        let n = self.modelo.projetos.iter().filter(|x| x.workspace_id == projeto.workspace_id).count();
-                        // O estado mais urgente das tarefas do workspace, para o ponto do recolhido.
-                        let tarefas = || self.modelo.tarefas.iter().filter(|t| do_workspace(t.projeto_id));
-                        let ponto = recolhido
-                            .then(|| {
-                                let estado = abelha::estado_base(tarefas(), rodando);
-                                let concluiu = self.abelha.conclusoes.iter().any(|c| do_workspace(c.projeto_id) && agora - c.em < abelha::CONCLUSAO_RECENTE);
-                                abelha::cor_ponto(estado, tarefas().any(|t| t.erro.is_some()), concluiu)
-                            })
-                            .flatten();
-                        let (resposta, seta) = cabecalho_lateral(ui, &projeto.workspace, ativo, n, recolhido, ponto);
-                        if resposta.on_hover_text(format!("Todos os projetos de {} (daily, sprint e quadro juntos)", projeto.workspace)).clicked() {
-                            mudar_workspace = Some(projeto.workspace_id);
-                        }
-                        if seta.clicked() {
-                            recolher = Some((projeto.workspace_id, !recolhido));
-                        }
-                    } else {
-                        ui.label(RichText::new(&projeto.workspace).color(p.suave).size(11.5));
-                    }
-                    // A lousa do workspace, antes dos projetos (fora da demonstração).
-                    if !self.demo && projeto.workspace_id != 0 && !recolhido {
-                        ui.add_space(2.0);
-                        let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", projeto.workspace);
-                        if item_lateral(ui, "Lousa", lousa_aberta == Some(projeto.workspace_id), None, false, Some(tema::Icone::Lousa), RECUO_WORKSPACE)
-                            .0
-                            .on_hover_text(dica)
-                            .clicked()
-                        {
-                            abrir_lousa = Some(projeto.workspace_id);
-                        }
-                    }
-                }
-                let ativo = self.escopo == Escopo::Projeto(projeto.id) && lousa_aberta.is_none() && !matches!(self.tela, Tela::Banco);
-                if recolhido && self.escopo != Escopo::Projeto(projeto.id) {
-                    continue;
-                }
-                let estado = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| t.projeto_id == projeto.id), rodando);
-                let concluiu = self.abelha.conclusoes.iter().any(|c| c.projeto_id == projeto.id && agora - c.em < abelha::CONCLUSAO_RECENTE);
-                let tem_erro = self.modelo.tarefas.iter().any(|t| t.projeto_id == projeto.id && t.erro.is_some());
-                let (resposta, mais) = item_lateral(
-                    ui,
-                    &projeto.nome,
-                    ativo,
-                    abelha::cor_ponto(estado, tem_erro, concluiu),
-                    !self.demo,
-                    None,
-                    if projeto.workspace_id != 0 { RECUO_WORKSPACE } else { 0.0 },
-                );
-                let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
-                if resposta.clicked() {
-                    mudar = Some(projeto.id);
-                }
-                if self.demo {
-                    continue;
-                }
-                let menu = |ui: &mut egui::Ui, remover: &mut Option<(i64, String)>| {
-                    ui.set_min_width(240.0);
-                    if tema::opcao_menu_com(ui, "Remover da Colmeia…", None, pode) {
-                        *remover = Some((projeto.id, projeto.nome.clone()));
-                        ui.close();
-                    }
-                };
-                resposta.context_menu(|ui| menu(ui, &mut remover));
-                if let Some(mais) = mais {
-                    egui::Popup::menu(&mais).show(|ui| menu(ui, &mut remover));
-                }
-            }
-        });
-        if let Some(id) = mudar {
-            self.mudar_escopo(Escopo::Projeto(id));
-        }
-        if let Some((ws, recolhido)) = recolher {
-            self.recolher_workspace(ws, recolhido);
-            // A lista já foi desenhada neste quadro: sem pedir outro, os
-            // projetos só somem quando o mouse mexer.
-            ui.ctx().request_repaint();
-        }
-        if let Some(ws) = mudar_workspace {
-            // Da lousa ou dos bancos, o workspace abre no quadro.
-            if fora_do_escopo {
-                self.tela = Tela::Quadro;
-            }
-            self.mudar_escopo(Escopo::Workspace(ws));
-        }
-        if let Some(ws) = abrir_lousa {
-            self.abrir_lousa_do_workspace(ws);
-        }
-        if let Some((id, nome)) = remover {
-            self.dialogo = Some(Dialogo::RemoverProjeto { id, nome, erro: None });
-        }
-        ui.add_space(6.0);
-        if !self.demo
-            && pode
-            && item_lateral(ui, "+ Novo projeto", false, None, false, None, 0.0).0.clicked()
-            && let Some(perfil) = &self.perfil
-        {
-            self.dialogo = Some(Dialogo::NovoProjeto(dialogos::NovoProjeto::new(perfil.id)));
-        }
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            // Tema: um chip com menu, como o do perfil. Quatro nomes lado a lado
-            // não cabem na barra sem ficarem espremidos.
-            let resposta = tema::chip(ui, "Tema", self.tema.nome(), false);
-            let mut escolhido = None;
-            egui::Popup::menu(&resposta).show(|ui| {
-                ui.set_min_width(160.0);
-                for opcao in tema::Escolha::TODAS {
-                    if tema::opcao_menu(ui, opcao.nome(), opcao == self.tema) {
-                        escolhido = Some(opcao);
-                        ui.close();
-                    }
-                }
-            });
-            if let Some(opcao) = escolhido
-                && opcao != self.tema
-            {
-                self.tema = opcao;
-                self.tema.aplicar(ui.ctx());
-                if !self.demo
-                    && let Some(perfil) = &mut self.perfil
-                {
-                    perfil.tema = self.tema.chave().into();
-                    let _ = api::definir_tema(perfil.id, self.tema.chave());
-                }
-            }
-            ui.add_space(10.0);
+    /// A barra lateral deste quadro: o trilho e o painel (em `lateral.rs`),
+    /// com o que a tela sabe agora.
+    fn mostrar_lateral(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str, rodando: bool) -> lateral::Saida {
+        let lugar = match self.tela {
+            Tela::Tarefa { id, foco } => lateral::Lugar::Tarefa { id, foco },
+            Tela::Lousa(ws) => lateral::Lugar::Lousa(ws),
+            Tela::Banco => lateral::Lugar::Banco,
+            Tela::Quadro | Tela::Registro(_) | Tela::Entrada(_) => lateral::Lugar::Quadro,
+        };
+        let vista = lateral::Vista {
+            projetos: &self.modelo.projetos,
+            tarefas: &self.modelo.tarefas,
+            perfil: self.perfil.as_ref(),
+            perfis: &self.perfis,
+            tema: self.tema,
+            escopo: self.escopo,
+            lugar,
+            pedidos_banco: self.modelo.aprovacoes.len(),
+            demo: self.demo,
+            pode: self.pode_mudar(),
+            rodando,
+            linha,
             // COLMEIA_SEM_ABELHA=1 desliga a abelha, como a opção por perfil.
-            if !self.sem_abelha {
-                let resposta = self.abelha.mostrar(ui, agora, linha);
-                if resposta.clicked() {
+            com_abelha: !self.sem_abelha,
+            agora,
+        };
+        self.lateral.mostrar(ui, &mut self.abelha, &vista)
+    }
+
+    /// O que foi pedido na barra lateral. Devolve se a abelha foi clicada
+    /// (o clique não conta como "fora" do resumo que ele abriu).
+    fn tratar_lateral(&mut self, acoes: Vec<lateral::Acao>, ctx: &egui::Context) -> bool {
+        use lateral::Acao;
+        let mut abelha_clicada = false;
+        for acao in acoes {
+            match acao {
+                Acao::Escopo(escopo) => self.mudar_escopo(escopo),
+                Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, agente),
+                Acao::Lousa(ws) => self.abrir_lousa_do_workspace(ws),
+                Acao::Bancos => self.alternar_banco(true),
+                Acao::NovoProjeto(workspace) => {
+                    if let Some(perfil) = &self.perfil {
+                        self.dialogo = Some(Dialogo::NovoProjeto(dialogos::NovoProjeto::new(perfil.id).no_workspace(workspace)));
+                    }
+                }
+                Acao::RemoverProjeto { id, nome } => self.dialogo = Some(Dialogo::RemoverProjeto { id, nome, erro: None }),
+                Acao::LerPerfis => self.perfis = api::perfis().unwrap_or_else(|_| self.perfis.clone()),
+                Acao::TrocarPerfil(perfil) => self.entrar(perfil, ctx),
+                Acao::Entrada { criar } => {
+                    self.perfil = None;
+                    self.ouvinte = None;
+                    self.tela = Tela::Entrada(Box::new(entrada::Entrada::new(criar)));
+                }
+                Acao::Tema(opcao) => self.mudar_tema(opcao, ctx),
+                Acao::TempoAgentes(mostrar) => self.mudar_tempo(ctx, mostrar),
+                Acao::AvisoCaptura(mostrar) => {
+                    if let Some(perfil) = &mut self.perfil {
+                        perfil.aviso_captura = mostrar;
+                        let _ = api::definir_aviso_captura(perfil.id, mostrar);
+                    }
+                }
+                Acao::Proximo => self.proximo_que_precisa(),
+                Acao::Linha => self.alternar_linha(),
+                Acao::Daily => self.abrir_daily(),
+                Acao::Abelha => {
                     self.abelha.resumo_aberto = !self.abelha.resumo_aberto;
                     abelha_clicada = true;
                 }
-                caixa_abelha = Some(resposta.rect);
             }
-        });
-        (caixa_abelha, abelha_clicada)
+        }
+        abelha_clicada
+    }
+
+    fn mudar_tema(&mut self, opcao: tema::Escolha, ctx: &egui::Context) {
+        self.tema = opcao;
+        self.tema.aplicar(ctx);
+        if !self.demo
+            && let Some(perfil) = &mut self.perfil
+        {
+            perfil.tema = self.tema.chave().into();
+            let _ = api::definir_tema(perfil.id, self.tema.chave());
+        }
     }
 
     fn painel_tarefa(&mut self, ui: &mut egui::Ui, id: i64, foco: i64, agora: f64) {
@@ -2627,17 +2448,10 @@ impl Colmeia {
             self.tela_antes_do_banco = None;
         }
         if atalho(Key::L) {
-            // Da lousa do workspace, a linha do tempo de todos os projetos (não
-            // a do projeto que estava escolhido antes de abrir a lousa).
-            if matches!(self.tela, Tela::Lousa(_)) {
-                self.escopo = Escopo::Perfil;
-                self.registro.marcar_suja();
-            }
-            self.tela = if matches!(self.tela, Tela::Registro(registro::Aba::Linha)) { Tela::Quadro } else { Tela::Registro(registro::Aba::Linha) };
+            self.alternar_linha();
         }
         if atalho(Key::D) {
-            self.tela = Tela::Registro(registro::Aba::Daily);
-            self.registro.abrir_daily();
+            self.abrir_daily();
         }
         // Na lousa do workspace, F5 apresenta a lousa (Shift+F5: do item selecionado).
         if let Tela::Lousa(ws) = self.tela {
@@ -2690,6 +2504,23 @@ impl Colmeia {
                 self.capturar_navegador(id, ctx);
             }
         }
+    }
+
+    /// Ctrl+Shift+L: a linha do tempo; de novo, volta ao quadro.
+    fn alternar_linha(&mut self) {
+        // Da lousa do workspace, a linha do tempo de todos os projetos (não
+        // a do projeto que estava escolhido antes de abrir a lousa).
+        if matches!(self.tela, Tela::Lousa(_)) {
+            self.escopo = Escopo::Perfil;
+            self.registro.marcar_suja();
+        }
+        self.tela = if matches!(self.tela, Tela::Registro(registro::Aba::Linha)) { Tela::Quadro } else { Tela::Registro(registro::Aba::Linha) };
+    }
+
+    /// Ctrl+Shift+D: a daily.
+    fn abrir_daily(&mut self) {
+        self.tela = Tela::Registro(registro::Aba::Daily);
+        self.registro.abrir_daily();
     }
 
     // Apresentação
@@ -3257,122 +3088,6 @@ fn cartao_de_fim(ui: &mut egui::Ui, centro: egui::Pos2, agente: &AgenteTela, foc
     pedido
 }
 
-/// Item da barra lateral: linha inteira clicável, fundo ao passar o mouse e um
-/// ponto opcional na cor do estado do projeto. Com `menu`, o "⋯" aparece ao
-/// passar o mouse no lugar do ponto (que vai um pouco para a esquerda).
-fn item_lateral(
-    ui: &mut egui::Ui,
-    texto: &str,
-    ativo: bool,
-    ponto: Option<Color32>,
-    menu: bool,
-    icone: Option<tema::Icone>,
-    recuo: f32,
-) -> (egui::Response, Option<egui::Response>) {
-    let p = cores();
-    let (rect, resposta) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
-    // Dentro de um workspace, o item vai para a direita, embaixo do nome dele.
-    let rect = rect.with_min_x(rect.min.x + recuo);
-    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let em_cima = ui.rect_contains_pointer(rect);
-    pintar_fundo_lateral(ui, &resposta, rect, ativo, em_cima);
-    let fonte = if ativo { tema::forte(13.5) } else { egui::FontId::proportional(13.5) };
-    let cor = tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, p.suave, p.texto);
-    // Com ícone (a lousa do workspace), o texto vai a 32 da esquerda.
-    let x = match icone {
-        Some(i) => {
-            tema::desenhar_icone(ui.painter(), rect.left_center() + egui::vec2(17.0, 0.0), i, cor);
-            32.0
-        }
-        None => 10.0,
-    };
-    ui.painter().text(rect.left_center() + egui::vec2(x, 0.0), egui::Align2::LEFT_CENTER, texto, fonte, cor);
-    let mostrar_menu = menu && em_cima;
-    if let Some(cor) = ponto {
-        let x = if mostrar_menu { 40.0 } else { 14.0 };
-        ui.painter().circle_filled(rect.right_center() - egui::vec2(x, 0.0), 4.0, cor);
-    }
-    let mais = mostrar_menu.then(|| {
-        let r = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), egui::vec2(24.0, 24.0));
-        tema::botao_icone_em(ui, r, ui.id().with(("mais-projeto", texto)), tema::Icone::Mais)
-    });
-    (resposta, mais)
-}
-
-/// Fundo de um item da barra lateral: o realce dela no ativo e mais leve com
-/// o mouse em cima, entrando e saindo com a transição do tema.
-fn pintar_fundo_lateral(ui: &egui::Ui, resposta: &egui::Response, rect: egui::Rect, ativo: bool, em_cima: bool) {
-    let realce = tema::realce_lateral(cores());
-    let mouse = tema::transicao(ui, resposta.id.with("mouse"), em_cima);
-    let escolhido = tema::transicao(ui, resposta.id.with("ativo"), ativo);
-    let forca = escolhido.max(mouse * 0.6);
-    if forca > 0.0 {
-        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_CONTROLE), realce.gamma_multiply(forca));
-    }
-}
-
-/// Cabeçalho de um workspace na barra lateral: o nome, pequeno como antes,
-/// agora clicável (mostra todos os projetos dele). Com o mouse em cima o
-/// texto vai para a cor do texto (o suave sobre o realce não tem contraste
-/// nos temas claros); ativo, fundo de realce e seminegrito. O número de
-/// projetos aparece à direita só ativo ou com o mouse em cima.
-/// A seta à esquerda recolhe ou abre o workspace (devolvida à parte: o
-/// clique nela não abre a visão do workspace); recolhido, o ponto mostra o
-/// estado mais urgente dos projetos escondidos.
-fn cabecalho_lateral(ui: &mut egui::Ui, nome: &str, ativo: bool, projetos: usize, recolhido: bool, ponto: Option<Color32>) -> (egui::Response, egui::Response) {
-    let p = cores();
-    let (rect, resposta) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
-    let area_seta = egui::Rect::from_min_size(rect.min, egui::vec2(24.0, rect.height()));
-    let seta = ui.interact(area_seta, ui.id().with(("recolher-workspace", nome)), egui::Sense::click());
-    let seta = seta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if recolhido { "Mostrar os projetos" } else { "Recolher os projetos" });
-    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let em_cima = resposta.hovered() || seta.hovered();
-    pintar_fundo_lateral(ui, &resposta, rect, ativo, em_cima);
-    // O workspace se destaca dos projetos: seminegrito e na cor do texto
-    // sempre, maior que antes, com a seta na cor de destaque.
-    let (fonte, cor) = (tema::forte(12.5), p.texto);
-    // O ativo leva também a marca de 3 px à esquerda (no Leitura o realce
-    // do ativo e o do mouse em cima ficam quase iguais).
-    if ativo {
-        let marca = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 5.0), egui::vec2(3.0, rect.height() - 10.0));
-        ui.painter().rect_filled(marca, CornerRadius::same(2), p.destaque);
-    }
-    // A contagem sempre aparece: o cabeçalho parece um item da lista. Sobre o
-    // realce ela vai na cor do texto (o suave ali fica abaixo de 4,5:1); a
-    // diferença para o nome vem do peso.
-    let quantos = if projetos == 1 { "1 projeto".to_string() } else { format!("{projetos} projetos") };
-    let cor_quantos = if ativo || em_cima { p.texto } else { p.suave };
-    let g_quantos = ui.painter().layout_no_wrap(quantos, egui::FontId::proportional(11.0), cor_quantos);
-    // A seta desenhada (a fonte não tem ▸/▾): para a direita recolhido, para baixo aberto.
-    let c = rect.left_center() + egui::vec2(12.0, 0.0);
-    let cor_seta = if seta.hovered() { p.texto } else { p.destaque };
-    let pontas = if recolhido {
-        vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 3.5)]
-    } else {
-        vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
-    };
-    ui.painter().add(egui::Shape::convex_polygon(pontas, cor_seta, Stroke::NONE));
-    let reserva_ponto = if recolhido && ponto.is_some() { 14.0 } else { 0.0 };
-    let largura = rect.width() - 24.0 - 14.0 - g_quantos.size().x - reserva_ponto - 8.0;
-    let texto = tema::cortar(ui.painter(), nome, egui::text::TextFormat::simple(fonte, cor), largura, 1, false);
-    ui.painter().galley(rect.left_center() + egui::vec2(24.0, -texto.size().y / 2.0), texto, cor);
-    let pos = rect.right_center() - egui::vec2(14.0 + g_quantos.size().x, g_quantos.size().y / 2.0);
-    ui.painter().galley(pos, g_quantos, cor_quantos);
-    if recolhido && let Some(cor) = ponto {
-        ui.painter().circle_filled(egui::pos2(pos.x - 10.0, rect.center().y), 4.0, cor);
-    }
-    if resposta.has_focus() {
-        ui.painter().rect_stroke(rect, CornerRadius::same(tema::RAIO_CONTROLE), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
-    }
-    (resposta, seta)
-}
-
-/// Largura da barra lateral; o cartão do conteúdo começa logo depois.
-const LARGURA_LATERAL: f32 = 236.0;
-
-/// Quanto os projetos e a lousa de um workspace entram na barra lateral.
-const RECUO_WORKSPACE: f32 = 12.0;
-
 /// Um passo do caminho no topo: suave, com a cor do texto e a mãozinha ao
 /// passar o mouse, seguido do "›". Devolve se foi clicado.
 fn migalha(ui: &mut egui::Ui, texto: &str) -> bool {
@@ -3621,22 +3336,24 @@ impl eframe::App for Colmeia {
         let estado = self.abelha.atualizar(base, |p| no_escopo.contains(&p), agora);
         let linha = abelha::linha_de_estado(estado, self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)));
 
-        // O conteúdo vai num cartão solto da janela; a barra lateral fica
-        // direto sobre o gradiente, à esquerda dele.
-        let cartao = tema::rect_cartao_principal(janela, LARGURA_LATERAL);
+        // O conteúdo vai num cartão solto da janela, à direita da barra
+        // lateral (o trilho e, aberto, o painel do workspace).
+        let largura = self.lateral.largura(&ctx);
+        let cartao = tema::rect_cartao_principal(janela, largura);
         tema::cartao_principal(ui.painter(), cartao);
 
-        let mut abelha = (None, false);
+        let mut saida = lateral::Saida::default();
         egui::Panel::left("lateral")
-            .exact_size(LARGURA_LATERAL)
+            .exact_size(largura)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(tema::fundo_lateral(p)).inner_margin(egui::Margin::symmetric(14, 18)))
-            .show(ui, |ui| abelha = self.lateral(ui, agora, &linha));
+            .frame(egui::Frame::new())
+            .show(ui, |ui| saida = self.mostrar_lateral(ui, agora, &linha, rodando));
+        let caixa_abelha = saida.abelha;
+        let abelha_clicada = self.tratar_lateral(saida.acoes, &ctx);
         if matches!(self.tela, Tela::Entrada(_)) {
             return;
         }
-        let (caixa_abelha, abelha_clicada) = abelha;
 
         // As margens de dentro dos painéis somam a distância do cartão até a janela.
         let m = tema::MARGEM_MOLDURA as i8;
@@ -3915,7 +3632,6 @@ mod testes {
             nome: nome.into(),
             workspace_id: 0,
             workspace: ws.into(),
-            recolhido: false,
             caminho: String::new(),
             sem_git: false,
             branch_padrao: String::new(),
