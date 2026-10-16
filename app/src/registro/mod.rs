@@ -1,10 +1,10 @@
-//! Registro do trabalho: a linha do tempo, a página da daily e a da sprint,
+//! Registro do trabalho: o histórico, a página da daily e a da sprint,
 //! do escopo da barra lateral (o perfil inteiro, um workspace ou um projeto;
 //! com mais de um projeto, a daily e a sprint separam por projeto). Os textos vêm prontos do núcleo; aqui só
 //! se mostra, copia e salva. A daily e a sprint são uma prévia do deck da
 //! apresentação: os mesmos cartões, na mesma ordem dos slides.
 //!
-//! Desempenho: a linha do tempo é virtualizada (só o que aparece é
+//! Desempenho: a lista do histórico é virtualizada (só o que aparece é
 //! desenhado), os pedidos e as imagens são buscados fora da thread da tela, e
 //! as miniaturas ficam num cache limitado. Nada se atualiza por tempo: um
 //! evento novo traz a página visível de novo e só marca as outras.
@@ -15,6 +15,7 @@
 
 mod comum;
 mod daily;
+mod historico;
 mod linha;
 mod lista;
 mod sprint;
@@ -30,7 +31,7 @@ pub use comum::{
 };
 
 use crate::api;
-use crate::dados::Projeto;
+use crate::dados::{Projeto, Tarefa};
 use crate::tema::{self, TipoAviso, cores};
 
 /// O que a página sabe do escopo, tirado dos projetos da barra lateral (sem
@@ -84,7 +85,7 @@ impl<'a> Escopo<'a> {
 /// As páginas do registro.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Aba {
-    Linha,
+    Historico,
     Daily,
     Sprint,
 }
@@ -92,7 +93,7 @@ pub enum Aba {
 impl Aba {
     fn indice(self) -> usize {
         match self {
-            Aba::Linha => 0,
+            Aba::Historico => 0,
             Aba::Daily => 1,
             Aba::Sprint => 2,
         }
@@ -108,14 +109,13 @@ pub enum Acao {
         lousa: bool,
     },
     IrParaQuadro,
-    VerTodos,
     /// Mudar o escopo (o perfil, um workspace ou um projeto): "Só este
     /// projeto", "Ver o workspace inteiro", o chip "Ver".
     Recorte(api::Recorte),
     /// Abrir o quadro deste projeto.
     AbrirQuadro(i64),
-    /// Abrir a tela de bancos nesta conexão (um item da linha do tempo).
-    AbrirBanco(i64),
+    /// "Reabrir" no Histórico: a tarefa volta para o Backlog.
+    Reabrir(i64),
     Avisar(TipoAviso, String),
     /// Abrir a apresentação no slide da tarefa (o clique num cartão abre em janela).
     Apresentar {
@@ -153,14 +153,6 @@ enum Periodo {
     Dias14,
     Mes,
     Escolher,
-}
-
-/// Filtros da linha do tempo (um por vez).
-#[derive(Clone, Copy, PartialEq)]
-enum Filtro {
-    Conclusoes,
-    Erros,
-    Capturas,
 }
 
 /// Perfil e recorte da tela: respostas de outro escopo são descartadas.
@@ -256,7 +248,7 @@ pub struct Registro {
     /// O núcleo está ligado; sem ele, nada é pedido nem copiado.
     pub conectado: bool,
 
-    // Linha do tempo
+    // Histórico: as páginas da linha do tempo do núcleo.
     dias: Vec<api::Dia>,
     proximo: i64,
     criado_em: String,
@@ -266,9 +258,12 @@ pub struct Registro {
     novidades: usize,
     no_topo: bool,
     ir_ao_topo: bool,
-    filtro: Option<Filtro>,
-    /// Cartões abertos com "Ver mais" (dia e tarefa).
-    expandidos: HashSet<(String, i64)>,
+    /// As concluídas por dia, montadas quando chega uma página.
+    concluidas: Option<(historico::ChaveDias, Vec<historico::DiaConcluidas>)>,
+    /// A tarefa aberta à direita, a busca e "O que importa" (ou "Tudo").
+    selecionada: Option<i64>,
+    busca: String,
+    so_importa: bool,
 
     // Daily
     daily: Option<api::Daily>,
@@ -349,8 +344,10 @@ impl Default for Registro {
             novidades: 0,
             no_topo: true,
             ir_ao_topo: false,
-            filtro: None,
-            expandidos: HashSet::new(),
+            concluidas: None,
+            selecionada: None,
+            busca: String::new(),
+            so_importa: false,
             daily: None,
             deck_daily: None,
             erro_daily: None,
@@ -416,8 +413,8 @@ impl Registro {
         self.sujas = [true; 3];
         self.sujas[aba.indice()] = false;
         match aba {
-            Aba::Linha if self.no_topo => self.pedir_pagina(ctx, true),
-            Aba::Linha => self.novidades += 1,
+            Aba::Historico if self.no_topo => self.pedir_pagina(ctx, true),
+            Aba::Historico => self.novidades += 1,
             Aba::Daily => self.pedir_daily(ctx),
             Aba::Sprint => self.pedir_sprint(ctx),
         }
@@ -435,7 +432,7 @@ impl Registro {
             return;
         }
         match aba {
-            Aba::Linha if self.no_topo => self.pedir_pagina(ctx, true),
+            Aba::Historico if self.no_topo => self.pedir_pagina(ctx, true),
             Aba::Daily => self.pedir_daily(ctx),
             _ => self.sujas[aba.indice()] = true,
         }
@@ -617,7 +614,7 @@ impl Registro {
         }
         self.sujas[aba.indice()] = false;
         match aba {
-            Aba::Linha => {
+            Aba::Historico => {
                 self.carregando = false;
                 self.pedir_pagina(ctx, true);
             }
@@ -653,7 +650,7 @@ impl Registro {
         let deck = match aba {
             Aba::Daily => self.deck_daily.as_ref(),
             Aba::Sprint => self.deck_sprint.as_ref(),
-            Aba::Linha => None,
+            Aba::Historico => None,
         }?;
         (!deck.vazio).then_some(deck)
     }
@@ -663,7 +660,7 @@ impl Registro {
         match aba {
             Aba::Daily => self.deck_daily.as_ref().is_some_and(|d| d.vazio),
             Aba::Sprint => self.deck_sprint.as_ref().is_some_and(|d| d.vazio),
-            Aba::Linha => false,
+            Aba::Historico => false,
         }
     }
 
@@ -675,7 +672,7 @@ impl Registro {
         match aba {
             Aba::Daily => self.daily.as_ref().filter(|d| !d.vazio).map(|_| self.texto_daily.clone()),
             Aba::Sprint => self.sprint.as_ref().filter(|s| !s.vazio).map(|_| self.texto_sprint.clone()),
-            Aba::Linha => None,
+            Aba::Historico => None,
         }
     }
 
@@ -888,7 +885,8 @@ impl Registro {
 
     /// Desenha a página do `recorte`. `projetos` são todos os do perfil, na
     /// ordem da barra lateral (para os nomes, os links e o "sem atividade").
-    pub fn mostrar(&mut self, ui: &mut egui::Ui, aba: Aba, perfil: i64, recorte: api::Recorte, projetos: &[Projeto]) -> Vec<Acao> {
+    /// `tarefas` dão a branch e os agentes da tarefa aberta no histórico.
+    pub fn mostrar(&mut self, ui: &mut egui::Ui, aba: Aba, perfil: i64, recorte: api::Recorte, projetos: &[Projeto], tarefas: &[Tarefa]) -> Vec<Acao> {
         let ctx = ui.ctx().clone();
         let mut acoes = Vec::new();
         let chave = (perfil, recorte);
@@ -920,7 +918,7 @@ impl Registro {
         if self.conectado && std::mem::take(&mut self.sujas[aba.indice()]) {
             // A página aparece depois de eventos que ela não viu (ou pela primeira vez).
             match aba {
-                Aba::Linha => {
+                Aba::Historico => {
                     self.carregando = false;
                     if self.no_topo || self.dias.is_empty() {
                         self.pedir_pagina(&ctx, true);
@@ -934,18 +932,17 @@ impl Registro {
         }
         self.receber(&ctx, &mut acoes);
 
-        // As três páginas na mesma moldura de 1120, com o título na mesma
-        // coluna esquerda; a linha do tempo lê melhor em 880, alinhada à
-        // esquerda da moldura (o título não pula ao trocar de aba).
+        // A daily e a sprint na mesma moldura de 1120, com o título na mesma
+        // coluna esquerda; o histórico (lista e tarefa lado a lado) usa a
+        // largura toda, como o quadro.
         let area = ui.available_rect_before_wrap();
-        let largura = area.width().min(1120.0);
-        let largura = if aba == Aba::Linha { largura.min(880.0 + comum::MARGEM_ROLAGEM) } else { largura };
-        let esquerda = area.center().x - area.width().min(1120.0) / 2.0;
+        let largura = if aba == Aba::Historico { area.width() } else { area.width().min(1120.0) };
+        let esquerda = area.center().x - largura / 2.0;
         let caixa = egui::Rect::from_min_size(egui::pos2(esquerda, area.top()), vec2(largura, area.height()));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::top_down(egui::Align::Min)));
         let escopo = Escopo::novo(recorte, projetos);
         match aba {
-            Aba::Linha => self.pagina_linha(&mut filho, recorte, &mut acoes),
+            Aba::Historico => self.pagina_historico(&mut filho, tarefas, matches!(recorte, api::Recorte::Projeto(_)), &mut acoes),
             Aba::Daily => self.pagina_daily(&mut filho, &escopo, &mut acoes),
             Aba::Sprint => self.pagina_sprint(&mut filho, &escopo, &mut acoes),
         }

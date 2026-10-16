@@ -189,6 +189,32 @@ func TestSprint(t *testing.T) {
 	}
 }
 
+func TestTarefaQueAndaSozinhaChegaAoConcluido(t *testing.T) {
+	h := &historico{t: t}
+	t3 := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 3}
+	h.add("2026-09-28 08:00", "tarefa.criada", t3, map[string]any{"id": 3, "titulo": "Ajustar frete", "projeto_id": 1, "projeto_nome": "loja-web"})
+	h.add("2026-09-28 08:05", "tarefa.atualizada", t3, map[string]any{"tarefa": tarefa(3, "Ajustar frete", "trabalhando"), "coluna_antes": "backlog", "origem": "automatico"})
+	h.add("2026-09-28 08:20", "tarefa.atualizada", t3, map[string]any{"tarefa": tarefa(3, "Ajustar frete", "aguardando"), "coluna_antes": "trabalhando", "origem": "automatico"})
+	h.add("2026-09-28 08:30", "tarefa.atualizada", t3, map[string]any{"tarefa": tarefa(3, "Ajustar frete", "revisao"), "coluna_antes": "aguardando", "origem": "automatico"})
+	h.add("2026-09-28 08:50", "tarefa.atualizada", t3, map[string]any{"tarefa": tarefa(3, "Ajustar frete", "concluido"), "coluna_antes": "revisao", "origem": "automatico"})
+	c := contexto()
+	c.Tarefas = map[int64]TarefaAtual{3: {ID: 3, Titulo: "Ajustar frete", Coluna: "concluido", ProjetoID: 1}}
+	c.Ativos = nil
+	textos := []string{}
+	for _, item := range Montar(h.eventos, c)[0].Itens {
+		textos = append(textos, item.Hora+" "+item.Tipo+" "+item.Texto)
+	}
+	// Trabalhando e Aguardando ficam de fora; Revisão e Concluído entram.
+	esperado := []string{
+		"08:50 concluiu Concluiu “Ajustar frete”.",
+		"08:30 moveu “Ajustar frete” foi para Revisão.",
+		"08:00 criou Criou a tarefa “Ajustar frete” em loja-web.",
+	}
+	if strings.Join(textos, "\n") != strings.Join(esperado, "\n") {
+		t.Errorf("itens:\n%s\n\nesperado:\n%s", strings.Join(textos, "\n"), strings.Join(esperado, "\n"))
+	}
+}
+
 func TestEventosAntigosSemTitulo(t *testing.T) {
 	h := &historico{t: t}
 	// Como a entrega B gravava: "tarefa" é só o número.

@@ -163,6 +163,8 @@ pub struct NovaTarefa {
     erro: Option<String>,
     /// Foco no título uma vez só, ao abrir.
     focar: bool,
+    /// Onde ela entra: o Backlog, ou a coluna do "+" no quadro.
+    coluna: Coluna,
 }
 
 impl NovaTarefa {
@@ -180,7 +182,13 @@ impl NovaTarefa {
             titulo: String::new(),
             erro: None,
             focar: true,
+            coluna: Coluna::Backlog,
         }
+    }
+
+    pub fn na_coluna(mut self, coluna: Coluna) -> Self {
+        self.coluna = coluna;
+        self
     }
 }
 
@@ -479,7 +487,7 @@ fn novo_projeto(ui: &mut egui::Ui, d: &mut NovoProjeto, perfil: i64) -> Resultad
 }
 
 fn nova_tarefa(ui: &mut egui::Ui, d: &mut NovaTarefa) -> Resultado {
-    tema::cabecalho(ui, "Nova tarefa", &format!("Em {}. Ela entra no Backlog.", d.projeto.nome));
+    tema::cabecalho(ui, "Nova tarefa", &format!("Em {}. Ela entra em {}.", d.projeto.nome, d.coluna.nome()));
     ui.add_space(16.0);
     if !d.projetos.is_empty() {
         let resposta = tema::chip(ui, "Projeto", &d.projeto.nome, false);
@@ -495,7 +503,7 @@ fn nova_tarefa(ui: &mut egui::Ui, d: &mut NovaTarefa) -> Resultado {
         });
         if let Some(p) = escolhido {
             let titulo = std::mem::take(&mut d.titulo);
-            *d = NovaTarefa::new(p, std::mem::take(&mut d.projetos));
+            *d = NovaTarefa::new(p, std::mem::take(&mut d.projetos)).na_coluna(d.coluna);
             d.titulo = titulo;
         }
         ui.add_space(12.0);
@@ -563,7 +571,14 @@ fn nova_tarefa(ui: &mut egui::Ui, d: &mut NovaTarefa) -> Resultado {
     };
     let pedido = api::NovaTarefa { titulo: d.titulo.trim(), branch, copia: d.copia, nova: d.nova, base: &d.base };
     match api::criar_tarefa(d.projeto.id, &pedido) {
-        Ok(_) => Resultado::Mudou,
+        Ok(t) => {
+            // Se não der para mover, ela fica no Backlog, à vista: criar de
+            // novo daria uma tarefa repetida.
+            if d.coluna != Coluna::Backlog {
+                let _ = api::mover_tarefa(t.id, d.coluna.chave());
+            }
+            Resultado::Mudou
+        }
         Err(e) => {
             d.erro = Some(e);
             Resultado::Continua

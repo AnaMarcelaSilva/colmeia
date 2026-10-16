@@ -149,12 +149,6 @@ impl Bancos {
         self.reler_ao_mostrar = true;
     }
 
-    /// Abrir a tela já numa conexão (a linha do tempo).
-    pub fn abrir_conexao(&mut self, id: i64) {
-        self.escolhida = Some(id);
-        self.arvore.escolhido = Some(arvore::No::Conexao(id));
-    }
-
     fn em_segundo_plano(&self, ctx: &egui::Context, pedido: impl FnOnce() -> Resposta + Send + 'static) {
         registro::em_segundo_plano(&self.envio, ctx, pedido);
     }

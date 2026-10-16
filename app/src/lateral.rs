@@ -320,7 +320,7 @@ impl Lateral {
             // Na demonstração os atalhos de teclado ficam desligados; daqui, só o primeiro anda.
             let itens = [
                 ("Próximo que precisa de você", "Ctrl+Shift+P", true),
-                ("Linha do tempo", "Ctrl+Shift+L", !v.demo),
+                ("Histórico", "Ctrl+Shift+L", !v.demo),
                 ("Daily", "Ctrl+Shift+D", !v.demo),
                 ("Bancos de dados", "Ctrl+Shift+K", !v.demo),
             ];

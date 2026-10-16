@@ -91,7 +91,7 @@ impl Escopo {
 enum Tela {
     Entrada(Box<entrada::Entrada>),
     Quadro,
-    /// Linha do tempo, daily ou sprint.
+    /// Histórico, daily ou sprint.
     Registro(registro::Aba),
     /// `foco` é o agente em tempo real (0 quando a tarefa não tem agentes).
     Tarefa {
@@ -213,6 +213,8 @@ struct Colmeia {
     dialogo_seguinte: Option<Dialogo>,
     abelha: Abelha,
     lateral: lateral::Lateral,
+    /// O destaque do resumo e o Concluído de hoje.
+    quadro: quadro::Quadro,
     sem_abelha: bool,
     tema: tema::Escolha,
     favo: tema::Favo,
@@ -338,6 +340,7 @@ impl Colmeia {
             dialogo_seguinte: None,
             abelha: Abelha::new(),
             lateral: lateral::Lateral::default(),
+            quadro: quadro::Quadro::default(),
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
             tema: escolha,
             favo: tema::Favo::default(),
@@ -985,6 +988,30 @@ impl Colmeia {
         }
     }
 
+    /// Dá para criar tarefas: fora da demonstração, com o núcleo e um projeto.
+    fn pode_criar(&self) -> bool {
+        !self.demo && self.pode_mudar() && !self.modelo.projetos.is_empty()
+    }
+
+    /// Abre o diálogo da tarefa nova; ela entra em `coluna` (o "+" de cada coluna).
+    fn nova_tarefa(&mut self, coluna: Coluna) {
+        // Em "Todos os projetos" e num workspace, o diálogo deixa escolher o projeto.
+        let todos: Vec<Projeto> = self.projetos_no_escopo().into_iter().cloned().collect();
+        let projeto = self.projeto_em_foco().cloned().or_else(|| todos.first().cloned());
+        if let Some(projeto) = projeto {
+            let outros = if self.escopo.projeto().is_none() { todos } else { Vec::new() };
+            self.dialogo = Some(Dialogo::NovaTarefa(dialogos::NovaTarefa::new(projeto, outros).na_coluna(coluna)));
+        }
+    }
+
+    /// "Reabrir" no Histórico: a tarefa volta para o Backlog.
+    fn reabrir(&mut self, id: i64, ctx: &egui::Context, agora: f64) {
+        if let Some(t) = self.modelo.tarefas.iter_mut().find(|t| t.id == id) {
+            t.coluna = Coluna::Backlog;
+            self.mover(id, Coluna::Backlog, ctx, agora);
+        }
+    }
+
     fn mover(&mut self, id: i64, coluna: Coluna, ctx: &egui::Context, agora: f64) {
         let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) else {
             return;
@@ -1172,7 +1199,7 @@ impl Colmeia {
         true
     }
 
-    fn topo(&mut self, ui: &mut egui::Ui, agora: f64) {
+    fn topo(&mut self, ui: &mut egui::Ui, agora: f64, resumo: quadro::Resumo) {
         let p = cores();
         // O caminho é clicável: o perfil e o workspace (e o projeto, dentro
         // de uma tarefa) fecham a tela atual e abrem o quadro deles.
@@ -1277,6 +1304,12 @@ impl Colmeia {
                     }
                 }
             }
+            // O resumo do quadro ao lado do nome: o clique destaca as tarefas dele.
+            // Na demonstração, este lado tem os controles de teste: o resumo vai para a barra.
+            if matches!(self.tela, Tela::Quadro) && !self.demo {
+                ui.add_space(8.0);
+                quadro::mostrar_resumo(ui, resumo, &mut self.quadro.foco);
+            }
             if !self.demo {
                 if self.mostrar_fps {
                     medir(ui);
@@ -1333,7 +1366,7 @@ impl Colmeia {
     /// Barra acima do quadro e do registro: a troca entre as quatro páginas e
     /// os filtros à esquerda; à direita, "Nova tarefa" no quadro e
     /// "Apresentar" e "Copiar texto" na daily e na sprint.
-    fn barra(&mut self, ui: &mut egui::Ui, agora: f64) {
+    fn barra(&mut self, ui: &mut egui::Ui, agora: f64, resumo: quadro::Resumo) {
         // Pasta sem git não tem branches para filtrar.
         let sem_branches = self.projeto_em_foco().is_some_and(|p| p.sem_git);
         let aba = match self.tela {
@@ -1346,18 +1379,26 @@ impl Colmeia {
         let mut mudar_tempo = None;
         let mut barra_arranjo: Option<ArranjoBarra> = None;
         ui.horizontal(|ui| {
-            ui.set_height(34.0);
+            ui.set_height(40.0);
             if !self.demo {
-                let largura_antes = ui.cursor().min.x;
                 let atual = match aba {
                     None => 0,
-                    Some(registro::Aba::Linha) => 1,
+                    Some(registro::Aba::Historico) => 1,
                     Some(registro::Aba::Daily) => 2,
                     Some(registro::Aba::Sprint) => 3,
                 };
-                if let Some(i) = tema::segmentado(ui, &["Quadro", "Linha do tempo", "Daily", "Sprint"], atual) {
+                // O número do Quadro é o que espera você, em âmbar.
+                let abas = [
+                    tema::Aba { icone: tema::Icone::Grade, nome: "Quadro", numero: (resumo.espera > 0).then_some((resumo.espera, true)) },
+                    tema::Aba { icone: tema::Icone::Relogio, nome: "Histórico", numero: None },
+                    tema::Aba { icone: tema::Icone::Apresentar, nome: "Daily", numero: None },
+                    tema::Aba { icone: tema::Icone::Calendario, nome: "Sprint", numero: None },
+                ];
+                let direita = ui.max_rect().right();
+                let largura_antes = ui.cursor().min.x;
+                if let Some(i) = tema::abas(ui, &abas, atual, direita) {
                     self.tela = match i {
-                        1 => Tela::Registro(registro::Aba::Linha),
+                        1 => Tela::Registro(registro::Aba::Historico),
                         2 => Tela::Registro(registro::Aba::Daily),
                         3 => Tela::Registro(registro::Aba::Sprint),
                         _ => Tela::Quadro,
@@ -1366,7 +1407,7 @@ impl Colmeia {
                 // Dica sobre a troca inteira.
                 let area = egui::Rect::from_min_max(egui::pos2(largura_antes, ui.min_rect().top()), ui.min_rect().max);
                 ui.interact(area, ui.id().with("dica-troca"), egui::Sense::hover())
-                    .on_hover_text("Quadro, linha do tempo (Ctrl+Shift+L), daily (Ctrl+Shift+D) e sprint");
+                    .on_hover_text("Quadro, histórico (Ctrl+Shift+L), daily (Ctrl+Shift+D) e sprint");
                 ui.add_space(12.0);
                 if let Some(aba) = aba {
                     // O grupo da direita é medido antes: o chip "Ver" fica com o
@@ -1415,18 +1456,20 @@ impl Colmeia {
                         }
                     }
                 });
+                ui.add_space(8.0);
+                quadro::mostrar_resumo(ui, resumo, &mut self.quadro.foco);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
                 let pode = self.pode_mudar();
                 let dica_tempo = if pode {
-                    "Quanto tempo os agentes trabalharam e quanto esperaram você. Fica salvo neste perfil e vale para a daily, a sprint, a linha do tempo, a apresentação e o texto copiado."
+                    "Quanto tempo os agentes trabalharam e quanto esperaram você. Fica salvo neste perfil e vale para a daily, a sprint, o histórico, a apresentação e o texto copiado."
                 } else {
                     "Sem conexão com o núcleo"
                 };
                 let arranjo = barra_arranjo.unwrap_or_default();
                 match aba {
-                    Some(registro::Aba::Linha) => {
+                    Some(registro::Aba::Historico) => {
                         if let Some(rotulo) = arranjo.caixa {
                             let mut marcada = tempo;
                             if tema::caixa_marcar_com(ui, rotulo, &mut marcada, pode).on_hover_text(dica_tempo).changed() {
@@ -1435,7 +1478,7 @@ impl Colmeia {
                         } else {
                             let mais = tema::botao_icone(ui, tema::Icone::Mais, 32.0);
                             let aberto = egui::Popup::is_id_open(ui.ctx(), egui::Id::new("menu-registro"));
-                            let mais = if aberto { mais } else { mais.on_hover_text("Mais opções da linha do tempo") };
+                            let mais = if aberto { mais } else { mais.on_hover_text("Mais opções do histórico") };
                             egui::Popup::menu(&mais).id(egui::Id::new("menu-registro")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                                 ui.set_min_width(240.0);
                                 if opcao_tempo(ui, tempo, pode) {
@@ -1532,17 +1575,10 @@ impl Colmeia {
                         }
                     }
                     None => {
-                        let pode = !self.demo && self.pode_mudar() && !self.modelo.projetos.is_empty();
-                        let resposta = tema::botao_principal(ui, "+ Nova tarefa", pode);
+                        let resposta = tema::botao_principal(ui, "+ Nova tarefa", self.pode_criar());
                         let resposta = if !self.pode_mudar() { resposta.on_hover_text("Indisponível sem o núcleo") } else { resposta };
                         if resposta.clicked() {
-                            // Em "Todos os projetos" e num workspace, o diálogo deixa escolher o projeto.
-                            let todos: Vec<Projeto> = self.projetos_no_escopo().into_iter().cloned().collect();
-                            let projeto = self.projeto_em_foco().cloned().or_else(|| todos.first().cloned());
-                            if let Some(projeto) = projeto {
-                                let outros = if self.escopo.projeto().is_none() { todos } else { Vec::new() };
-                                self.dialogo = Some(Dialogo::NovaTarefa(dialogos::NovaTarefa::new(projeto, outros)));
-                            }
+                            self.nova_tarefa(Coluna::Backlog);
                         }
                         // O Play do projeto em foco (num workspace ou em todos, não há um só),
                         // à esquerda do "+ Nova tarefa".
@@ -1590,7 +1626,7 @@ impl Colmeia {
         let atualizando = self.registro.atualizando();
         let tem_apresentar = atualizando || self.registro.deck(aba).is_some();
         let tem_copiar = atualizando || self.registro.texto(aba).is_some();
-        arranjar_barra(aba == registro::Aba::Linha, aba == registro::Aba::Sprint, tem_apresentar, tem_copiar, pecas, livre, chip)
+        arranjar_barra(aba == registro::Aba::Historico, aba == registro::Aba::Sprint, tem_apresentar, tem_copiar, pecas, livre, chip)
     }
 
     /// O que o chip "Ver" diz: "todos os projetos", o workspace ou o projeto
@@ -2521,7 +2557,7 @@ impl Colmeia {
         }
     }
 
-    /// Ctrl+Shift+L: a linha do tempo; de novo, volta ao quadro.
+    /// Ctrl+Shift+L: o histórico; de novo, volta ao quadro.
     fn alternar_linha(&mut self) {
         // Da lousa do workspace, a linha do tempo de todos os projetos (não
         // a do projeto que estava escolhido antes de abrir a lousa).
@@ -2529,7 +2565,7 @@ impl Colmeia {
             self.escopo = Escopo::Perfil;
             self.registro.marcar_suja();
         }
-        self.tela = if matches!(self.tela, Tela::Registro(registro::Aba::Linha)) { Tela::Quadro } else { Tela::Registro(registro::Aba::Linha) };
+        self.tela = if matches!(self.tela, Tela::Registro(registro::Aba::Historico)) { Tela::Quadro } else { Tela::Registro(registro::Aba::Historico) };
     }
 
     /// Ctrl+Shift+D: a daily.
@@ -3350,6 +3386,9 @@ impl eframe::App for Colmeia {
         let base = abelha::estado_base(self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)), rodando);
         let estado = self.abelha.atualizar(base, |p| no_escopo.contains(&p), agora);
         let linha = abelha::linha_de_estado(estado, self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id)));
+        let filtro = self.filtro.as_deref();
+        let resumo =
+            quadro::resumir(self.modelo.tarefas.iter().filter(|t| no_escopo.contains(&t.projeto_id) && filtro.is_none_or(|b| t.branch == b)), &self.terminais);
 
         // O conteúdo vai num cartão solto da janela, à direita da barra
         // lateral (o trilho e, aberto, o painel do workspace).
@@ -3376,7 +3415,7 @@ impl eframe::App for Colmeia {
         egui::Panel::top("topo")
             .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20 + m, top: if com_faixa { 10 } else { 10 + m }, bottom: 10 }))
-            .show(ui, |ui| self.topo(ui, agora));
+            .show(ui, |ui| self.topo(ui, agora, resumo));
 
         // A saída do Play, embaixo, em todas as telas (a altura muda pela borda).
         if self.play.painel.is_some() && !self.demo {
@@ -3406,23 +3445,25 @@ impl eframe::App for Colmeia {
             match self.tela {
                 Tela::Quadro if self.modelo.projetos.is_empty() && self.conexao == Conexao::Ligado => self.sem_projetos(ui),
                 Tela::Quadro => {
-                    self.barra(ui, agora);
-                    let pode = self.pode_mudar();
+                    self.barra(ui, agora, resumo);
                     // O nome do projeto aparece no cartão fora da visão de um projeto só.
                     let rotulos = self.escopo.projeto().is_none().then(|| rotulos_de_projeto(&self.modelo.projetos, &no_escopo));
-                    acoes = quadro::mostrar(
-                        ui,
-                        &mut self.modelo.tarefas,
-                        &no_escopo,
-                        rotulos.as_ref(),
-                        self.filtro.as_deref(),
-                        &self.terminais,
-                        &self.modelo.frases,
-                        pode,
-                    );
+                    let hoje = sistema::hoje();
+                    let vista = quadro::Vista {
+                        no_escopo: &no_escopo,
+                        rotulos: rotulos.as_ref(),
+                        filtro: self.filtro.as_deref(),
+                        terminais: &self.terminais,
+                        frases: &self.modelo.frases,
+                        pode_mudar: self.pode_mudar(),
+                        pode_criar: self.pode_criar(),
+                        com_historico: !self.demo,
+                        hoje: &hoje,
+                    };
+                    acoes = quadro::mostrar(ui, &mut self.quadro, &mut self.modelo.tarefas, &vista);
                 }
                 Tela::Registro(aba) => {
-                    self.barra(ui, agora);
+                    self.barra(ui, agora, resumo);
                     let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
                     self.registro.conectado = self.pode_mudar();
                     self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
@@ -3430,7 +3471,7 @@ impl eframe::App for Colmeia {
                     self.registro.caixa_aberta = self.caixa_pedido.as_ref().map(|(c, _)| c.tarefa);
                     // O conteúdo das páginas tem as próprias margens (24 nas laterais).
                     ui.add_space(4.0);
-                    acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos);
+                    acoes_linha = self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos, &self.modelo.tarefas);
                 }
                 Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
                 Tela::Lousa(ws) => {
@@ -3463,6 +3504,8 @@ impl eframe::App for Colmeia {
             match acao {
                 quadro::Acao::AbrirTarefa(id) => self.abrir_tarefa(id, None),
                 quadro::Acao::Moveu(id, coluna) => self.mover(id, coluna, &ctx, agora),
+                quadro::Acao::NovaNaColuna(coluna) => self.nova_tarefa(coluna),
+                quadro::Acao::VerHistorico => self.tela = Tela::Registro(registro::Aba::Historico),
                 quadro::Acao::Remover(id) if self.demo => self.modelo.tarefas.retain(|t| t.id != id),
                 quadro::Acao::Remover(id) => {
                     if let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) {
@@ -3485,11 +3528,7 @@ impl eframe::App for Colmeia {
                     }
                 }
                 registro::Acao::IrParaQuadro => self.tela = Tela::Quadro,
-                registro::Acao::AbrirBanco(conexao) => {
-                    self.banco.abrir_conexao(conexao);
-                    self.alternar_banco(true);
-                }
-                registro::Acao::VerTodos => self.mudar_escopo(Escopo::Perfil),
+                registro::Acao::Reabrir(id) => self.reabrir(id, &ctx, agora),
                 registro::Acao::Recorte(r) => self.mudar_escopo(Escopo::do_recorte(r)),
                 registro::Acao::AbrirQuadro(projeto) => {
                     self.mudar_escopo(Escopo::Projeto(projeto));

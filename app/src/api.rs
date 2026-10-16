@@ -305,8 +305,6 @@ pub struct ItemLinha {
     #[serde(default)]
     pub tarefa_id: i64,
     #[serde(default)]
-    pub agente_id: i64,
-    #[serde(default)]
     pub removida: bool,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub anexos: Vec<i64>,
@@ -321,9 +319,6 @@ pub struct ItemLinha {
     pub titulo: String,
     #[serde(default)]
     pub coluna: String,
-    /// O item é de uma conexão de banco (o clique abre ela).
-    #[serde(default)]
-    pub conexao_id: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -332,12 +327,6 @@ pub struct Dia {
     pub titulo: String,
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub itens: Vec<ItemLinha>,
-    #[serde(default)]
-    pub concluidas: usize,
-    #[serde(default)]
-    pub erros: usize,
-    #[serde(default)]
-    pub tempo_s: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

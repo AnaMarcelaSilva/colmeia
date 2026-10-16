@@ -522,6 +522,90 @@ pub fn segmentado_com_largura(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usi
     clicada
 }
 
+/// Uma aba do topo: ícone, nome e, se houver, um número (em âmbar quando
+/// espera você).
+pub struct Aba<'a> {
+    pub icone: Icone,
+    pub nome: &'a str,
+    pub numero: Option<(usize, bool)>,
+}
+
+/// Abas sublinhadas: o sublinhado desliza até a escolhida (só durante a
+/// transição o egui pede quadros). Uma linha de 1 px corre por baixo de
+/// `ate_x`. Retorna a aba clicada.
+pub fn abas(ui: &mut egui::Ui, abas: &[Aba], escolhida: usize, ate_x: f32) -> Option<usize> {
+    let p = cores();
+    let medidas: Vec<(Arc<egui::Galley>, Option<Arc<egui::Galley>>)> = abas
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let fonte = if i == escolhida { forte(13.5) } else { FontId::proportional(13.5) };
+            let nome = ui.painter().layout_no_wrap(a.nome.to_owned(), fonte, p.texto);
+            let numero = a.numero.map(|(n, _)| ui.painter().layout_no_wrap(n.to_string(), forte(11.0), p.texto));
+            (nome, numero)
+        })
+        .collect();
+    let larguras: Vec<f32> =
+        medidas.iter().map(|(n, c)| 28.0 + 16.0 + 7.0 + n.size().x + c.as_ref().map_or(0.0, |c| 7.0 + c.size().x.max(6.0) + 12.0)).collect();
+    let (rect, _) = ui.allocate_exact_size(vec2(larguras.iter().sum(), 40.0), Sense::hover());
+    let pintor = ui.painter();
+    pintor.line_segment([pos2(rect.left(), rect.bottom() - 0.5), pos2(ate_x.max(rect.right()), rect.bottom() - 0.5)], Stroke::new(1.0, p.borda));
+    let id = ui.id().with(("abas", abas[0].nome));
+    let mut clicada = None;
+    let mut x = rect.left();
+    let mut partes = Vec::with_capacity(abas.len());
+    for (i, ((aba, (nome, numero)), largura)) in abas.iter().zip(medidas).zip(&larguras).enumerate() {
+        let parte = Rect::from_min_size(pos2(x, rect.top()), vec2(*largura, rect.height()));
+        partes.push(parte);
+        x += largura;
+        let resposta = ui.interact(parte, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let ativa = i == escolhida;
+        let cor = cor_animada(ui, resposta.id.with("cor"), ativa || resposta.hovered(), p.suave, p.texto);
+        let cor_icone = if ativa { p.destaque } else { cor };
+        let meio = parte.center().y - 1.0;
+        let mut cx = parte.left() + 14.0;
+        desenhar_icone(ui.painter(), pos2(cx + 8.0, meio), aba.icone, cor_icone);
+        cx += 16.0 + 7.0;
+        ui.painter().galley(pos2(cx, meio - nome.size().y / 2.0), nome.clone(), cor);
+        cx += nome.size().x;
+        if let (Some(numero), Some((_, alerta))) = (numero, aba.numero) {
+            let (fundo, texto) = match (alerta, ativa) {
+                (true, _) => (p.alerta.gamma_multiply(0.2), p.alerta),
+                (false, true) => (p.destaque.gamma_multiply(0.18), p.destaque),
+                (false, false) => (p.realce, p.suave),
+            };
+            let pilula = Rect::from_min_size(pos2(cx + 7.0, meio - 9.0), vec2(numero.size().x.max(6.0) + 12.0, 18.0));
+            ui.painter().rect_filled(pilula, CornerRadius::same(9), fundo);
+            ui.painter().galley(pilula.center() - numero.size() / 2.0, numero, texto);
+        }
+        if resposta.clicked() && !ativa {
+            clicada = Some(i);
+        }
+    }
+    // O sublinhado vai da aba anterior à nova, pela posição e pela largura.
+    if let Some(alvo) = partes.get(escolhida) {
+        let esquerda = ui.ctx().animate_value_with_time(id.with("esquerda"), alvo.left() - rect.left(), 0.22);
+        let largura = ui.ctx().animate_value_with_time(id.with("largura"), alvo.width(), 0.22);
+        let traco = Rect::from_min_size(pos2(rect.left() + esquerda + 14.0, rect.bottom() - 2.0), vec2(largura - 28.0, 2.0));
+        ui.painter().rect_filled(traco, CornerRadius::same(1), p.destaque);
+    }
+    clicada
+}
+
+/// O tipo da tarefa pelo prefixo da branch (sem gravar nada): o texto da
+/// etiqueta e a cor de etiqueta da paleta. Outro prefixo fica sem tipo.
+pub fn tipo_da_branch(branch: &str) -> Option<(&'static str, Color32)> {
+    let p = cores();
+    let prefixo = branch.split('/').next().unwrap_or_default();
+    match prefixo.to_ascii_lowercase().as_str() {
+        "feature" | "feat" => Some(("funcionalidade", p.etiquetas[1])),
+        "hotfix" | "fix" | "bugfix" => Some(("correção", p.etiquetas[4])),
+        "docs" | "doc" => Some(("docs", p.etiquetas[2])),
+        "main" | "master" => Some(("main", p.etiquetas[0])),
+        _ => None,
+    }
+}
+
 /// O `realce` que entra e sai com o mouse (itens de menu e de lista).
 pub fn fundo_ao_passar(ui: &egui::Ui, resposta: &Response, rect: Rect, raio: u8, ativo: bool) {
     let t = transicao(ui, resposta.id.with("mouse"), ativo && resposta.hovered());
@@ -923,6 +1007,14 @@ pub enum Icone {
     Engrenagem,
     Teclado,
     Tema,
+    // O quadro e as abas do topo.
+    Coluna,
+    Relogio,
+    Olho,
+    Check,
+    Ciclo,
+    Apresentar,
+    Calendario,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1152,6 +1244,57 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
                 })
                 .collect();
             pintor.add(Shape::convex_polygon(metade, cor, Stroke::NONE));
+        }
+        Icone::Coluna => {
+            // Uma coluna com dois cartões.
+            let r = caixa(12.0, 14.0);
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.left_top() + vec2(3.0, 4.0), r.right_top() + vec2(-3.0, 4.0)], traco);
+            pintor.line_segment([r.left_top() + vec2(3.0, 8.0), r.right_top() + vec2(-3.0, 8.0)], traco);
+        }
+        Icone::Relogio => {
+            pintor.circle_stroke(c, 6.5, traco);
+            pintor.add(Shape::line(vec![c + vec2(0.0, -3.5), c, c + vec2(2.5, 2.0)], traco));
+        }
+        Icone::Olho => {
+            let borda = |s: f32| -> Vec<Pos2> {
+                (0..=12).map(|i| c + vec2(-7.0 + 14.0 * i as f32 / 12.0, s * 4.5 * (std::f32::consts::PI * i as f32 / 12.0).sin())).collect()
+            };
+            pintor.add(Shape::line(borda(-1.0), traco));
+            pintor.add(Shape::line(borda(1.0), traco));
+            pintor.circle_stroke(c, 2.0, traco);
+        }
+        Icone::Check => {
+            pintor.add(Shape::line(vec![c + vec2(-5.0, 0.5), c + vec2(-1.5, 4.0), c + vec2(5.5, -4.0)], Stroke::new(1.8, cor)));
+        }
+        Icone::Ciclo => {
+            // Dois arcos com a ponta de seta: anda sozinha.
+            for meia in [0.0, std::f32::consts::PI] {
+                let arco: Vec<Pos2> = (0..=10)
+                    .map(|i| {
+                        let a = meia + 0.35 + 2.4 * i as f32 / 10.0;
+                        c + vec2(5.5 * a.cos(), 5.5 * a.sin())
+                    })
+                    .collect();
+                let fim = arco[arco.len() - 1];
+                let a = meia + 2.75;
+                let (tangente, raio) = (vec2(-a.sin(), a.cos()), vec2(a.cos(), a.sin()));
+                pintor.add(Shape::line(arco, traco));
+                pintor.add(Shape::convex_polygon(vec![fim + tangente * 2.5, fim - raio * 2.2, fim + raio * 2.2], cor, Stroke::NONE));
+            }
+        }
+        Icone::Apresentar => {
+            let r = Rect::from_center_size(c + vec2(0.0, -1.5), vec2(15.0, 10.0));
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.center_bottom(), r.center_bottom() + vec2(0.0, 4.0)], traco);
+            pintor.line_segment([r.center_bottom() + vec2(-3.0, 4.0), r.center_bottom() + vec2(3.0, 4.0)], traco);
+        }
+        Icone::Calendario => {
+            let r = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(14.0, 13.0));
+            pintor.rect_stroke(r, CornerRadius::same(2), traco, egui::StrokeKind::Middle);
+            pintor.line_segment([r.left_top() + vec2(0.0, 4.0), r.right_top() + vec2(0.0, 4.0)], traco);
+            pintor.line_segment([r.left_top() + vec2(4.0, -2.0), r.left_top() + vec2(4.0, 1.5)], traco);
+            pintor.line_segment([r.right_top() + vec2(-4.0, -2.0), r.right_top() + vec2(-4.0, 1.5)], traco);
         }
     }
 }

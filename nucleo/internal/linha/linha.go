@@ -779,9 +779,11 @@ func (m *montador) atualizada(e dados.Evento, quando time.Time, d conteudo, t ta
 	if colunaNova != "" {
 		m.colunas = append(m.colunas, mudancaDeColuna{quando, tarefa, projeto, colunaNova})
 	}
-	// As mudanças automáticas (Trabalhando ↔ Aguardando) já aparecem nas
-	// sessões dos agentes; aqui seriam só ruído.
-	if d.Origem == dados.OrigemAutomatica {
+	// As mudanças automáticas entre Backlog, Trabalhando e Aguardando já
+	// aparecem nas sessões dos agentes; aqui seriam só ruído. As que levam a
+	// Revisão e a Concluído (a tarefa anda sozinha) são o caminho dela e
+	// contam, como as suas: sem elas, a conclusão sumiria do histórico.
+	if d.Origem == dados.OrigemAutomatica && colunaNova != "revisao" && colunaNova != "concluido" {
 		return
 	}
 	if colunaNova == "" {

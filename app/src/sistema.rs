@@ -158,6 +158,37 @@ pub fn abrir_arquivo(arquivo: &str, ao_falhar: impl FnOnce(String) + Send + 'sta
     Ok(())
 }
 
+/// O dia de hoje no fuso do computador, "2026-10-16": o mesmo formato do
+/// `data` que o núcleo manda no fim do agente (o Concluído mostra só o de hoje).
+pub fn hoje() -> String {
+    let (ano, mes, dia) = data_local();
+    format!("{ano:04}-{mes:02}-{dia:02}")
+}
+
+#[cfg(unix)]
+fn data_local() -> (i32, u32, u32) {
+    // SAFETY: localtime_r só escreve no `tm` que recebe; time(NULL) não lê nada.
+    unsafe {
+        let agora = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&agora, &mut tm).is_null() {
+            return (1970, 1, 1);
+        }
+        (tm.tm_year + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)
+    }
+}
+
+#[cfg(windows)]
+fn data_local() -> (i32, u32, u32) {
+    // SAFETY: GetLocalTime só preenche o SYSTEMTIME que recebe.
+    let st = unsafe {
+        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
+        windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st);
+        st
+    };
+    (st.wYear as i32, st.wMonth as u32, st.wDay as u32)
+}
+
 pub const SEM_REPRODUTOR: &str = "Não achei um reprodutor de vídeo. Instale um, por exemplo mpv ou VLC.";
 
 #[cfg(test)]
@@ -172,5 +203,12 @@ mod testes {
         for nome in ["instalar.sh", "atalho.desktop", "programa", "Makefile", ".env", "app.exe", "script.py", "pagina.html", ".png"] {
             assert!(!abre_no_sistema(nome), "{nome}");
         }
+    }
+
+    #[test]
+    fn hoje_no_formato_do_nucleo() {
+        let h = hoje();
+        assert_eq!(h.len(), 10, "{h}");
+        assert!(h.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }), "{h}");
     }
 }
