@@ -71,3 +71,29 @@ func TestCopiaIsolada(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLeituraComLimiteESemBase(t *testing.T) {
+	ctx := context.Background()
+	raiz := repositorioDeTeste(t)
+	for _, nome := range []string{"a.txt", "b.txt", "c.txt"} {
+		os.WriteFile(filepath.Join(raiz, nome), []byte("pedido\npedido\n"), 0o600)
+	}
+	achados, mais, err := Grep(ctx, raiz, "pedido", false, 4)
+	if err != nil || len(achados) != 4 || !mais {
+		t.Errorf("grep com limite: %v %v %v", achados, mais, err)
+	}
+	if achados, mais, err := Grep(ctx, raiz, "nada-disso", false, 4); err != nil || len(achados) != 0 || mais {
+		t.Errorf("grep sem achado: %v %v %v", achados, mais, err)
+	}
+	lista, mais, err := ListarArquivos(ctx, raiz, 2)
+	if err != nil || len(lista) != 2 || !mais {
+		t.Errorf("lista com limite: %v %v %v", lista, mais, err)
+	}
+	exec.Command("git", "-C", raiz, "branch", "-m", "main", "trabalho").Run()
+	if _, _, err := Base(ctx, raiz); !errors.Is(err, ErrSemBase) {
+		t.Errorf("sem main nem master: %v", err)
+	}
+	if _, _, err := Base(ctx, t.TempDir()); !errors.Is(err, ErrNaoRepositorio) {
+		t.Errorf("sem git: %v", err)
+	}
+}

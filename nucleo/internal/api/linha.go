@@ -82,6 +82,9 @@ func periodo(r *http.Request, obrigatorio bool) (de, ate time.Time, err error) {
 // olham: o perfil inteiro (os dois zerados), um workspace ou um projeto.
 type recorte struct {
 	Projeto, Workspace int64
+	// Tarefa (só na linha do tempo): a aba Linha do tempo da tarefa. O
+	// contexto é o do projeto dela; os eventos, só os dela.
+	Tarefa int64
 }
 
 // recorteDoPedido lê projeto= ou workspace= (nunca os dois).
@@ -113,7 +116,7 @@ func recorteDoPedido(r *http.Request) (recorte, error) {
 }
 
 func (rc recorte) filtro(perfil int64) dados.FiltroEventos {
-	return dados.FiltroEventos{Perfil: perfil, Projeto: rc.Projeto, Workspace: rc.Workspace}
+	return dados.FiltroEventos{Perfil: perfil, Projeto: rc.Projeto, Workspace: rc.Workspace, Tarefa: rc.Tarefa}
 }
 
 func (rc recorte) desde(perfil int64, desde string) dados.FiltroEventos {
@@ -197,6 +200,30 @@ func (s *Servidor) contextoDaLinha(ctx context.Context, perfil dados.Perfil, rc 
 	return c, err
 }
 
+// recorteDaTarefa lê tarefa= (opcional, sem projeto= nem workspace=): a
+// tarefa precisa ser do perfil, e o recorte vira o projeto dela.
+func (s *Servidor) recorteDaTarefa(r *http.Request, perfil int64, rc recorte) (recorte, error) {
+	v := r.URL.Query().Get("tarefa")
+	if v == "" {
+		return rc, nil
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || id <= 0 {
+		return rc, dados.ErrInvalido{Motivo: "tarefa inválida"}
+	}
+	if rc.Projeto != 0 || rc.Workspace != 0 {
+		return rc, dados.ErrInvalido{Motivo: "Use tarefa sozinha, sem projeto nem workspace."}
+	}
+	t, _, dono, err := s.Banco.Tarefa(r.Context(), id)
+	if err != nil {
+		return rc, err
+	}
+	if dono != perfil {
+		return rc, dados.ErrNaoEncontrado
+	}
+	return recorte{Projeto: t.ProjetoID, Tarefa: id}, nil
+}
+
 func inicioDoDia(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // linhaDoTempo devolve os dias do perfil, do mais novo para o mais antigo, em
@@ -214,6 +241,10 @@ func (s *Servidor) linhaDoTempo(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, err := recorteDoPedido(r)
 	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if rc, err = s.recorteDaTarefa(r, p.ID, rc); err != nil {
 		responderErro(w, err)
 		return
 	}

@@ -257,3 +257,42 @@ func (b *Banco) UltimasNotas(ctx context.Context, tarefas []int64, tipo string) 
 	}
 	return notas, linhas.Err()
 }
+
+// Descricao é a nota mais recente da tarefa (daily ou sprint, de qualquer
+// período), com quem gravou por último: o agente (pelas ferramentas da
+// Colmeia) ou você. A aba Descrição da tarefa mostra este texto.
+type Descricao struct {
+	Nota
+	// Agente que gravou por último (0: foi você).
+	Agente     int64  `json:"agente_id"`
+	Ferramenta string `json:"ferramenta,omitempty"`
+	Papel      string `json:"papel,omitempty"`
+}
+
+// DescricaoDaTarefa traz a nota mais recente da tarefa e o autor. Sem nota,
+// volta vazia, sem erro.
+func (b *Banco) DescricaoDaTarefa(ctx context.Context, tarefa int64) (Descricao, error) {
+	d := Descricao{Nota: Nota{TarefaID: tarefa}}
+	err := b.db.QueryRowContext(ctx, `SELECT tipo, periodo, texto, atualizada_em FROM notas WHERE tarefa_id = ?
+		ORDER BY atualizada_em DESC, tipo LIMIT 1`, tarefa).Scan(&d.Tipo, &d.Periodo, &d.Texto, &d.AtualizadaEm)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, nil
+	}
+	if err != nil {
+		return d, err
+	}
+	err = b.db.QueryRowContext(ctx, `SELECT COALESCE(agente_id, 0) FROM eventos
+		WHERE tarefa_id = ? AND tipo = 'nota.atualizada' AND json_extract(dados, '$.tipo') = ? AND json_extract(dados, '$.periodo') = ?
+		ORDER BY id DESC LIMIT 1`, tarefa, d.Tipo, d.Periodo).Scan(&d.Agente)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return d, err
+	}
+	if d.Agente != 0 {
+		// O agente pode já ter sido removido: fica só o "um agente".
+		err = b.db.QueryRowContext(ctx, `SELECT ferramenta, papel FROM agentes WHERE id = ?`, d.Agente).Scan(&d.Ferramenta, &d.Papel)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return d, err
+		}
+	}
+	return d, nil
+}

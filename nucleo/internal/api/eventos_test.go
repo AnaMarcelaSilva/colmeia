@@ -503,3 +503,54 @@ func TestTarefaNaoAndaComErroNemComMudancaSua(t *testing.T) {
 		t.Errorf("colunas: %v", colunas)
 	}
 }
+
+func TestAbasDaTarefaLinhaDescricaoEArquivos(t *testing.T) {
+	srv := servidorComDados(t)
+	pasta := t.TempDir()
+	os.WriteFile(filepath.Join(pasta, "pedidos.go"), []byte("package main // pedido\n"), 0o600)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/workspaces", map[string]string{"nome": "W"})
+	pedir(t, "POST", srv.URL+"/v1/workspaces/1/projetos", map[string]string{"nome": "loja-web", "caminho": pasta})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Tela de pedidos"})
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Outra"})
+
+	// A linha do tempo de uma tarefa só traz os eventos dela.
+	status, linha := pedir(t, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo?tarefa=2", nil)
+	dias, _ := linha["dias"].([]any)
+	if status != http.StatusOK || len(dias) != 1 {
+		t.Fatalf("linha da tarefa: %d %v", status, linha)
+	}
+	for _, item := range dias[0].(map[string]any)["itens"].([]any) {
+		if item.(map[string]any)["tarefa_id"] != 2.0 {
+			t.Errorf("item de outra tarefa: %v", item)
+		}
+	}
+	if status, _ := pedir(t, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo?tarefa=99", nil); status != http.StatusNotFound {
+		t.Errorf("tarefa de fora: %d", status)
+	}
+	if status, _ := pedir(t, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo?tarefa=1&projeto=1", nil); status != http.StatusBadRequest {
+		t.Errorf("tarefa com projeto: %d", status)
+	}
+
+	// Descrição: vazia até alguém escrever; depois, o texto e o autor.
+	if status, d := pedir(t, "GET", srv.URL+"/v1/tarefas/1/descricao", nil); status != http.StatusOK || d["texto"] != "" || d["autor"] != "" {
+		t.Errorf("descrição vazia: %d %v", status, d)
+	}
+	pedir(t, "PUT", srv.URL+"/v1/tarefas/1/notas", map[string]string{"tipo": "daily", "periodo": "2026-10-02", "texto": "Tela pronta"})
+	if status, d := pedir(t, "GET", srv.URL+"/v1/tarefas/1/descricao", nil); status != http.StatusOK || d["texto"] != "Tela pronta" || d["autor"] != "Você" {
+		t.Errorf("descrição: %d %v", status, d)
+	}
+
+	// Arquivos: a busca por nome funciona sem git; texto e mudanças pedem git.
+	if status, r := pedir(t, "GET", srv.URL+"/v1/tarefas/1/arquivos/busca?termo=ped", nil); status != http.StatusOK || len(r["arquivos"].([]any)) != 1 {
+		t.Errorf("busca por nome: %d %v", status, r)
+	}
+	for _, rota := range []string{"/v1/tarefas/1/arquivos/texto?termo=pedido", "/v1/tarefas/1/mudancas", "/v1/tarefas/1/mudancas/arquivo?caminho=pedidos.go"} {
+		if status, r := pedir(t, "GET", srv.URL+rota, nil); status != http.StatusBadRequest || r["erro"] != "a pasta da tarefa não é um repositório git" {
+			t.Errorf("%s sem git: %d %v", rota, status, r)
+		}
+	}
+	if status, _ := pedir(t, "GET", srv.URL+"/v1/tarefas/1/mudancas/arquivo?caminho=../fora", nil); status != http.StatusBadRequest {
+		t.Errorf("caminho de fora: %d", status)
+	}
+}

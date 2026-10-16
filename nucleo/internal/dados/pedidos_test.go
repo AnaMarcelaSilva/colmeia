@@ -133,3 +133,27 @@ func TestPedidosAoAgente(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestDescricaoEAUltimaNotaComOAutor(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	tarefa, agente := tarefaComAgente(t, b)
+	if d, err := b.DescricaoDaTarefa(ctx, tarefa.ID); err != nil || d.Texto != "" || d.Agente != 0 {
+		t.Fatalf("sem nota: %+v %v", d, err)
+	}
+	if _, err := b.GravarNota(ctx, GravacaoNota{Tarefa: tarefa.ID, Tipo: "daily", Periodo: "2026-10-02", Texto: "Minha nota"}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := b.DescricaoDaTarefa(ctx, tarefa.ID)
+	if err != nil || d.Texto != "Minha nota" || d.Agente != 0 {
+		t.Fatalf("nota sua: %+v %v", d, err)
+	}
+	// A mais recente vale, de qualquer tipo e período, com o agente que gravou.
+	if _, err := b.GravarNota(ctx, GravacaoNota{Tarefa: tarefa.ID, Tipo: "sprint", Periodo: "2026-10-01..2026-10-14", Texto: "Tela de pedidos pronta", Agente: agente.ID}); err != nil {
+		t.Fatal(err)
+	}
+	d, err = b.DescricaoDaTarefa(ctx, tarefa.ID)
+	if err != nil || d.Texto != "Tela de pedidos pronta" || d.Agente != agente.ID || d.Ferramenta != agente.Ferramenta || d.Tipo != "sprint" || d.AtualizadaEm == "" {
+		t.Fatalf("nota do agente: %+v %v", d, err)
+	}
+}
