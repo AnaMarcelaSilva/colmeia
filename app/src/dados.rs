@@ -325,6 +325,8 @@ pub struct Modelo {
     /// lugar do cartão de pedido, até o próximo).
     pub resolvidas: std::collections::HashMap<i64, Resolvida>,
     pub uso: Uso,
+    /// Tarefas cuja frase da reunião o agente está escrevendo.
+    pub frases: std::collections::HashSet<i64>,
 }
 
 /// O uso que os agentes do Claude Code mandam pela statusLine: o contexto de
@@ -421,6 +423,9 @@ pub enum Evento {
         #[serde(default)]
         semana: Option<api::LimiteUso>,
     },
+    /// O núcleo pediu ao agente a frase da reunião (ou terminou de esperar).
+    #[serde(rename = "tarefa.frase")]
+    TarefaFrase { seq: u64, tarefa_id: i64, escrevendo: bool },
     #[serde(rename = "agente.estado")]
     AgenteEstado {
         seq: u64,
@@ -577,6 +582,7 @@ impl Evento {
             | Evento::AgenteTerminou { seq, .. }
             | Evento::AgenteEstado { seq, .. }
             | Evento::AgenteUso { seq, .. }
+            | Evento::TarefaFrase { seq, .. }
             | Evento::AnexoAdicionado { seq, .. }
             | Evento::AnexoRemovido { seq, .. }
             | Evento::NotaAtualizada { seq, .. }
@@ -607,7 +613,15 @@ impl Evento {
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
-            _ => !matches!(self, Evento::Ola { .. } | Evento::Recarregar | Evento::AgenteEstado { .. } | Evento::AgenteUso { .. } | Evento::Desconhecido),
+            _ => !matches!(
+                self,
+                Evento::Ola { .. }
+                    | Evento::Recarregar
+                    | Evento::AgenteEstado { .. }
+                    | Evento::AgenteUso { .. }
+                    | Evento::TarefaFrase { .. }
+                    | Evento::Desconhecido
+            ),
         }
     }
 }
@@ -634,6 +648,7 @@ impl Modelo {
         self.pedidos = q.pedidos;
         self.navegadores = q.navegadores.into_iter().collect();
         self.aprovacoes = q.aprovacoes;
+        self.frases = q.frases.into_iter().collect();
         self.uso = Uso {
             contextos: q.uso.agentes.into_iter().map(|a| (a.agente_id, a.contexto)).collect(),
             cinco_horas: q.uso.cinco_horas,
@@ -803,6 +818,13 @@ impl Modelo {
                     a.fim = None;
                     t.derivar();
                     efeitos.push(Efeito::Conectar(agente_id));
+                }
+            }
+            Evento::TarefaFrase { tarefa_id, escrevendo, .. } => {
+                if escrevendo {
+                    self.frases.insert(tarefa_id);
+                } else {
+                    self.frases.remove(&tarefa_id);
                 }
             }
             Evento::AgenteUso { agente_id, contexto, cinco_horas, semana, .. } => {
@@ -997,6 +1019,16 @@ mod testes {
         ));
         assert!(m.uso.contextos.is_empty() && m.uso.semana.is_some());
         assert!(versao > 0 && m.uso.versao > 1);
+    }
+
+    #[test]
+    fn frase_da_reuniao_pelo_quadro_e_pelos_eventos() {
+        let mut m = modelo();
+        m.carregar(serde_json::from_str(r#"{"seq":5,"projetos":[],"tarefas":[],"agentes":[],"frases":[10]}"#).unwrap());
+        assert!(m.frases.contains(&10));
+        m.aplicar(evento(r#"{"tipo":"tarefa.frase","seq":6,"tarefa_id":10,"escrevendo":false}"#));
+        assert!(m.frases.is_empty());
+        assert!(!evento(r#"{"tipo":"tarefa.frase","seq":7,"tarefa_id":10,"escrevendo":true}"#).entra_na_linha());
     }
 
     #[test]

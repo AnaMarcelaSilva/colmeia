@@ -108,3 +108,15 @@ func (b *Banco) LimparMensagens(ctx context.Context, agente int64) (int64, error
 	}
 	return r.RowsAffected()
 }
+
+// UltimaMensagemDaTarefa é a última mensagem que você mandou a um agente da
+// tarefa ("" se não houver).
+func (b *Banco) UltimaMensagemDaTarefa(ctx context.Context, tarefa int64) (string, error) {
+	var texto string
+	err := b.db.QueryRowContext(ctx, `SELECT m.texto FROM mensagens m JOIN agentes a ON a.id = m.agente_id
+		WHERE a.tarefa_id = ? ORDER BY m.id DESC LIMIT 1`, tarefa).Scan(&texto)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return texto, err
+}

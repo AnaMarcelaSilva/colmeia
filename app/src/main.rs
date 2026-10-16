@@ -3410,7 +3410,16 @@ impl eframe::App for Colmeia {
                     let pode = self.pode_mudar();
                     // O nome do projeto aparece no cartão fora da visão de um projeto só.
                     let rotulos = self.escopo.projeto().is_none().then(|| rotulos_de_projeto(&self.modelo.projetos, &no_escopo));
-                    acoes = quadro::mostrar(ui, &mut self.modelo.tarefas, &no_escopo, rotulos.as_ref(), self.filtro.as_deref(), &self.terminais, pode);
+                    acoes = quadro::mostrar(
+                        ui,
+                        &mut self.modelo.tarefas,
+                        &no_escopo,
+                        rotulos.as_ref(),
+                        self.filtro.as_deref(),
+                        &self.terminais,
+                        &self.modelo.frases,
+                        pode,
+                    );
                 }
                 Tela::Registro(aba) => {
                     self.barra(ui, agora);

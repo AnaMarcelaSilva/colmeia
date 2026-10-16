@@ -91,6 +91,8 @@ type Servidor struct {
 
 	// O uso que a statusLine dos agentes manda (veja uso.go).
 	uso memoriaUso
+	// A frase da reunião pedida aos agentes (veja frase.go).
+	frases frases
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -116,6 +118,7 @@ func (s *Servidor) Rotas() http.Handler {
 	s.adiadas = map[int64]*time.Timer{}
 	s.respondendo = map[int64]bool{}
 	s.uso.iniciar()
+	s.frases.iniciar()
 	mux.HandleFunc("POST /v1/encerrar", s.encerrar)
 	if s.Banco != nil {
 		if s.Navegadores == nil {

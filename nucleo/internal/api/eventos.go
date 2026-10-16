@@ -184,6 +184,7 @@ func (s *Servidor) Encerrar() {
 	}
 	close(s.parado)
 	<-s.trabalhou
+	s.frases.encerrar()
 }
 
 func (s *Servidor) guardarContexto(c dados.ContextoAgente) {
@@ -345,6 +346,7 @@ func (s *Servidor) publicarEventos(eventos []dados.Evento) {
 		if m := s.mensagemDoEvento(e); m != nil {
 			m["evento"] = e.ID
 			s.Avisos.Publicar(e.Escopo.Perfil, m)
+			s.aoGravarParaFrase(e, m)
 		}
 	}
 }
@@ -474,6 +476,8 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 	return nil
 }
 
+func lerDados(e dados.Evento, v any) { json.Unmarshal(e.Dados, v) }
+
 func cmpOr(a, b string) string {
 	if a != "" {
 		return a
@@ -586,7 +590,7 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores,
-		"aprovacoes": s.aprovacoesPendentes(id), "uso": s.uso.doPerfil(id)})
+		"aprovacoes": s.aprovacoesPendentes(id), "uso": s.uso.doPerfil(id), "frases": s.frases.doPerfil(id)})
 }
 
 // comEstado junta ao agente o que o núcleo sabe dele agora: se roda, em que

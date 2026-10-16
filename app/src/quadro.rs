@@ -32,8 +32,8 @@ fn mostra_motivo(t: &Tarefa) -> bool {
     t.motivo.is_some() && !t.agentes.iter().any(|a| a.visual().espera_voce())
 }
 
-fn altura_cartao(t: &Tarefa, com_projeto: bool) -> f32 {
-    let avisos = [mostra_motivo(t), t.erro.is_some()].iter().filter(|a| **a).count() as f32;
+fn altura_cartao(t: &Tarefa, com_projeto: bool, frase: bool) -> f32 {
+    let avisos = [mostra_motivo(t), t.erro.is_some(), frase].iter().filter(|a| **a).count() as f32;
     let projeto = if com_projeto { 16.0 } else { 0.0 };
     66.0 + projeto + 19.0 * avisos + 40.0 * t.agentes.len() as f32
 }
@@ -51,6 +51,7 @@ pub fn mostrar(
     rotulos: Option<&HashMap<i64, String>>,
     filtro: Option<&str>,
     terminais: &HashMap<i64, TerminalAgente>,
+    frases: &HashSet<i64>,
     pode_mudar: bool,
 ) -> Vec<Acao> {
     let mut acoes = Vec::new();
@@ -98,7 +99,7 @@ pub fn mostrar(
         pintor.galley(pilula.center() - contagem.size() / 2.0, contagem, p.suave);
 
         let mut filho = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(caixa.left() + 8.0, caixa.top() + 44.0), caixa.max - vec2(8.0, 8.0))));
-        let alturas: Vec<f32> = visiveis.iter().map(|&i| altura_cartao(&tarefas[i], com_projeto)).collect();
+        let alturas: Vec<f32> = visiveis.iter().map(|&i| altura_cartao(&tarefas[i], com_projeto, frases.contains(&tarefas[i].id))).collect();
         let total: f32 = alturas.iter().map(|h| h + ESPACO).sum();
         egui::ScrollArea::vertical().id_salt(("rolagem", i)).auto_shrink(false).show_viewport(&mut filho, |ui, janela| {
             ui.set_height(total);
@@ -109,7 +110,7 @@ pub fn mostrar(
                 // Virtualização: pula o que está fora da parte visível.
                 if y + h >= janela.min.y && y <= janela.max.y {
                     let rect = Rect::from_min_size(origem + vec2(0.0, y), vec2(largura, h));
-                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, rotulos, pode_mudar) {
+                    if let Some(a) = cartao(ui, rect, &tarefas[indice], terminais, rotulos, frases.contains(&tarefas[indice].id), pode_mudar) {
                         acoes.push(a);
                     }
                 }
@@ -148,6 +149,7 @@ fn cartao(
     t: &Tarefa,
     terminais: &HashMap<i64, TerminalAgente>,
     rotulos: Option<&HashMap<i64, String>>,
+    frase: bool,
     pode_mudar: bool,
 ) -> Option<Acao> {
     let p = cores();
@@ -186,6 +188,10 @@ fn cartao(
 
     if let Some(erro) = &t.erro {
         linha_cortada(pintor, pos2(x, y), &format!("Erro: {erro}"), FontId::proportional(12.0), p.erro, largura);
+        y += 19.0;
+    }
+    if frase {
+        linha_cortada(pintor, pos2(x, y), "Escrevendo a frase…", FontId::proportional(12.0), p.suave, largura);
         y += 19.0;
     }
     if let Some(motivo) = t.motivo.as_ref().filter(|_| mostra_motivo(t)) {

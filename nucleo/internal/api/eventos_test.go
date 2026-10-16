@@ -336,9 +336,14 @@ func TestLinhaDoTempoEResumos(t *testing.T) {
 	if status != http.StatusOK || len(dias) != 1 {
 		t.Fatalf("linha do tempo: %d %v", status, linha)
 	}
+	// A frase da reunião (montada, sem agente) pode entrar logo depois.
 	itens := dias[0].(map[string]any)["itens"].([]any)
-	if primeiro := itens[0].(map[string]any); primeiro["texto"] != "Concluiu “Analisar”." || primeiro["tipo"] != "concluiu" {
-		t.Errorf("item mais novo: %v", primeiro)
+	concluiu := false
+	for _, item := range itens[:min(2, len(itens))] {
+		concluiu = concluiu || item.(map[string]any)["texto"] == "Concluiu “Analisar”." && item.(map[string]any)["tipo"] == "concluiu"
+	}
+	if !concluiu {
+		t.Errorf("itens mais novos: %v", itens)
 	}
 	// Paginação: uma página de 1 aponta para a próxima.
 	if _, pagina := pedir(t, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo?limite=1", nil); pagina["proximo"] == 0.0 {
@@ -361,7 +366,7 @@ func TestLinhaDoTempoEResumos(t *testing.T) {
 		t.Errorf("projeto de fora: %d", status)
 	}
 	status, daily := pedir(t, "GET", srv.URL+"/v1/perfis/1/resumo?tipo=daily", nil)
-	if status != http.StatusOK || daily["texto"] != "Hoje: já concluí Analisar." {
+	if texto, _ := daily["texto"].(string); status != http.StatusOK || !strings.HasPrefix(texto, "Hoje: já concluí Analisar") {
 		t.Errorf("daily: %d %v", status, daily)
 	}
 	if status, sprint := pedir(t, "GET", srv.URL+"/v1/perfis/1/resumo?tipo=sprint&ultimos=7", nil); status != http.StatusOK || sprint["ate"] != time.Now().Format("02/01/2006") {

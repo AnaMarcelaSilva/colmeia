@@ -43,7 +43,7 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `GET /v1/ferramentas` | Ferramentas de agente instaladas e se permitem conta separada |
 | `GET` / `POST /v1/perfis` | Listar e criar perfis |
 | `PATCH /v1/perfis/{id}` | Mudar o tema do perfil (`tema`), o aviso antes de capturar (`aviso_captura`) ou a exibição do tempo dos agentes no registro (`tempo_agentes`, desligada por padrão; gera o evento `perfil.tempo_agentes`, levado às telas só com o booleano) |
-| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes, uso}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
+| `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes, uso, frases}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=` ou `workspace=` (nunca os dois: 400; de outro perfil: 404), `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
 | `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto, tempo_agentes}`; aceita `projeto=` ou `workspace=`. Com mais de um projeto no recorte, os blocos citam o projeto e o texto sai separado por projeto |
@@ -145,6 +145,7 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `agente.iniciou` | `agente_id`, `tarefa_id`, `desde`, `desde_hora` |
 | `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação`, `esperando resposta` ou `aprovar consulta`), `desde`, `desde_hora` |
 | `agente.uso` | `agente_id`, `tarefa_id`, `contexto?` (`usado`, `tamanho`, `porcentagem`), `cinco_horas?` e `semana?` (`porcentagem`, `volta`, `volta_texto`, "volta às 14:30"); só quando muda. Os limites são da conta do perfil; sem `contexto`, o agente ainda não tem |
+| `tarefa.frase` | `tarefa_id`, `escrevendo`: o núcleo pediu ao agente a frase da reunião (`true`) ou parou de esperar (`false`); fora da corrente, como o estado dos agentes |
 | `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `em` (momento completo, RFC 3339), `data` (dia local, `AAAA-MM-DD`), `hora`, `texto`) |
 | `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` (e `agente_id`, se veio de um agente) |
 | `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |
@@ -184,6 +185,8 @@ O núcleo acompanha a saída de cada terminal sem varredura periódica: cada lei
 O fim do processo vira `agente.terminou` com o motivo: `terminou` (código 0 ou 130, ou terminal comum), `interrompido` (sinal que não veio da Colmeia), `erro` (outro código numa ferramenta de IA), `removido` ou `nucleo_encerrado`.
 
 **Coluna automática.** Um agente de IA que começa numa tarefa do Backlog põe a tarefa em "Agente trabalhando" (um terminal comum não). Quando a Colmeia fecha um terminal, o estado do agente fica congelado até o fim ser gravado. Quando um agente passa a esperar você, a tarefa vai de "Agente trabalhando" para "Aguardando você"; quando ele volta a trabalhar (e ninguém mais da tarefa espera), ela volta, desde que a última mudança tenha sido do núcleo (`tarefas.coluna_auto`). Uma mudança sua zera a marca e o núcleo nunca a desfaz. Quando um agente termina bem (sem erro e sem ser parado pela Colmeia) e nenhum agente de IA da tarefa roda nem terminou mal, a tarefa vai de "Agente trabalhando" (ou de um "Aguardando você" posto pelo núcleo) para Revisão; em Revisão, um agente com papel `revisor` que termina bem a leva para Concluído. Sem revisor, ela fica em Revisão. Backlog, Concluído e um Aguardando seu não andam sozinhos. Parar um agente pela tela não move nada: a tela pergunta se move a tarefa ou a exclui.
+
+**Frase da reunião.** Quando a tarefa entra em Revisão ou Concluído (sozinha ou por você) e a nota da daily de hoje dela está vazia, o núcleo põe na fila do Claude Code que roda na tarefa um pedido da daily pedindo uma frase curta e falável, sem termos técnicos (o mesmo caminho dos pedidos: entra no terminal quando ele espera você, e ele responde pela nota). Respondido o pedido, a frase vai também para a nota da sprint atual, se ela estiver vazia. Sem Claude Code rodando, ou sem resposta em 3 minutos (o pedido é cancelado ou falha), entra uma frase montada com o título e a sua última mensagem a um agente da tarefa (sem ela, se parecer ter um segredo). A frase só é gravada numa nota que ainda não existe, conferida na própria gravação: o que você escreveu nunca é trocado.
 
 ### Pedidos ao agente
 

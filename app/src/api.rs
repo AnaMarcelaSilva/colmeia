@@ -141,6 +141,9 @@ pub struct Quadro {
     /// O uso que a statusLine dos agentes do Claude Code mandou.
     #[serde(default)]
     pub uso: UsoPerfil,
+    /// Tarefas cuja frase da reunião o agente está escrevendo agora.
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub frases: Vec<i64>,
 }
 
 /// O contexto da conversa de um agente: tokens na janela, o tamanho dela e
