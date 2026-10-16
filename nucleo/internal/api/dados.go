@@ -23,6 +23,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/perfis/{id}", s.atualizarPerfil)
 	mux.HandleFunc("GET /v1/perfis/{id}/quadro", s.quadro)
 	mux.HandleFunc("GET /v1/perfis/{id}/eventos", s.eventos)
+	mux.HandleFunc("POST /v1/perfis/{id}/abrir", s.pedirAbertura)
 	mux.HandleFunc("GET /v1/perfis/{id}/contas", s.listarContas)
 	mux.HandleFunc("PUT /v1/perfis/{id}/contas", s.definirContas)
 	mux.HandleFunc("GET /v1/perfis/{id}/workspaces", s.listarWorkspaces)
@@ -123,6 +124,9 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 		AvisoCaptura  *bool   `json:"aviso_captura"`
 		TempoAgentes  *bool   `json:"tempo_agentes"`
 		Autocompletar *bool   `json:"autocompletar_sql"`
+		MascoteModelo *string `json:"mascote_modelo"`
+		MascoteNome   *string `json:"mascote_nome"`
+		AbelhaFixa    *bool   `json:"abelha_fixa"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -152,7 +156,86 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if pedido.MascoteModelo != nil || pedido.MascoteNome != nil {
+		// Só um dos dois: o outro continua como está.
+		atual, err := s.Banco.Perfil(r.Context(), id)
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		modelo, nome := atual.MascoteModelo, atual.MascoteNome
+		if pedido.MascoteModelo != nil {
+			modelo = *pedido.MascoteModelo
+		}
+		if pedido.MascoteNome != nil {
+			nome = *pedido.MascoteNome
+		}
+		if err := s.Banco.DefinirMascote(r.Context(), id, modelo, nome); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if pedido.AbelhaFixa != nil {
+		if err := s.Banco.DefinirAbelhaFixa(r.Context(), id, *pedido.AbelhaFixa); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
 	responderJSON(w, map[string]any{"ok": true})
+}
+
+// pedirAbertura leva às janelas abertas do perfil o pedido de mostrar uma
+// tarefa (ou só a janela, com tarefa 0): é o "Abrir a Colmeia" da abelha
+// fixa. A resposta diz quantas janelas receberam; com nenhuma, quem pediu
+// abre o app. O pedido não é gravado: só vale para quem está ligado agora.
+func (s *Servidor) pedirAbertura(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		TarefaID int64 `json:"tarefa_id"`
+		AgenteID int64 `json:"agente_id"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if _, err := s.Banco.Perfil(r.Context(), id); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.TarefaID == 0 && pedido.AgenteID != 0 {
+		responderErro(w, dados.ErrInvalido{Motivo: "O agente precisa vir com a tarefa dele."})
+		return
+	}
+	// A tarefa e o agente têm de ser deste perfil: um pedido não abre nada de outro.
+	if pedido.TarefaID != 0 {
+		_, _, perfil, err := s.Banco.Tarefa(r.Context(), pedido.TarefaID)
+		if err == nil && perfil != id {
+			err = dados.ErrNaoEncontrado
+		}
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if pedido.AgenteID != 0 {
+		a, err := s.Banco.Agente(r.Context(), pedido.AgenteID)
+		if err == nil && a.TarefaID != pedido.TarefaID {
+			err = dados.ErrNaoEncontrado
+		}
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	janelas := s.Avisos.Janelas(id)
+	if janelas > 0 {
+		s.Avisos.Publicar(id, map[string]any{"tipo": "tela.abrir", "tarefa_id": pedido.TarefaID, "agente_id": pedido.AgenteID})
+	}
+	responderJSON(w, map[string]any{"janelas": janelas})
 }
 
 func (s *Servidor) atualizarWorkspace(w http.ResponseWriter, r *http.Request) {

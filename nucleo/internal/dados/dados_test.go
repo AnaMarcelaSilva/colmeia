@@ -464,6 +464,105 @@ func TestPreferenciaDoAutocompletar(t *testing.T) {
 	}
 }
 
+func TestMascoteDoPerfil(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	if perfil.MascoteModelo != "identidade" || perfil.MascoteNome != "Colmeia" {
+		t.Errorf("perfil novo: %+v", perfil)
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); p.MascoteModelo != "identidade" || p.MascoteNome != "Colmeia" || p.AbelhaFixa {
+		t.Errorf("perfil lido: %+v", p)
+	}
+	if err := b.DefinirMascote(ctx, perfil.ID, "zangao", "  Zum  "); err != nil {
+		t.Fatal(err)
+	}
+	if lista, _ := b.ListarPerfis(ctx); len(lista) != 1 || lista[0].MascoteModelo != "zangao" || lista[0].MascoteNome != "Zum" {
+		t.Errorf("perfis: %+v", lista)
+	}
+	for _, caso := range []struct{ modelo, nome string }{
+		{"unicornio", "Zum"},
+		{"", "Zum"},
+		{"favo", ""},
+		{"favo", "   "},
+		{"favo", "um nome comprido demais para o balão"},
+		{"favo", "duas\nlinhas"},
+	} {
+		var invalido ErrInvalido
+		if err := b.DefinirMascote(ctx, perfil.ID, caso.modelo, caso.nome); !errors.As(err, &invalido) {
+			t.Errorf("%q %q: %v", caso.modelo, caso.nome, err)
+		}
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); p.MascoteModelo != "zangao" || p.MascoteNome != "Zum" {
+		t.Errorf("um pedido recusado mudou a abelha: %+v", p)
+	}
+	if err := b.DefinirMascote(ctx, 99, "favo", "Zum"); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.mascote"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"modelo":"zangao"`) || !strings.Contains(string(eventos[0].Dados), `"nome":"Zum"`) {
+		t.Errorf("evento da abelha: %+v", eventos)
+	}
+}
+
+func TestAbelhaFixaDoPerfil(t *testing.T) {
+	b, _ := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	if err := b.DefinirAbelhaFixa(ctx, perfil.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); !p.AbelhaFixa {
+		t.Error("a abelha não ficou fixa")
+	}
+	if p, _ := b.Perfil(ctx, outro.ID); p.AbelhaFixa {
+		t.Error("a abelha fixa vale só para o perfil")
+	}
+	if err := b.DefinirAbelhaFixa(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.abelha_fixa"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"ligada":true`) {
+		t.Errorf("evento da abelha fixa: %+v", eventos)
+	}
+}
+
+// Um banco de antes da abelha por perfil (sem as colunas) ganha os padrões ao abrir.
+func TestMigracaoDaAbelhaPorPerfil(t *testing.T) {
+	b, dir := bancoDeTeste(t)
+	ctx := context.Background()
+	p, _ := b.CriarPerfil(ctx, "Pessoal", "claro")
+	if err := b.DefinirAutocompletarSQL(ctx, p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, coluna := range []string{"mascote_modelo", "mascote_nome", "abelha_fixa"} {
+		if _, err := b.db.Exec(`ALTER TABLE perfis DROP COLUMN ` + coluna); err != nil {
+			t.Fatal(coluna, err)
+		}
+	}
+	b.Fechar()
+
+	b2, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b2.Fechar()
+	perfil, err := b2.Perfil(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perfil.MascoteModelo != "identidade" || perfil.MascoteNome != "Colmeia" || perfil.AbelhaFixa {
+		t.Errorf("padrões depois da migração: %+v", perfil)
+	}
+	if perfil.Tema != "claro" || !perfil.AutocompletarSQL {
+		t.Errorf("a migração mexeu no resto do perfil: %+v", perfil)
+	}
+	if err := b2.DefinirMascote(ctx, p.ID, "favo", "Mel"); err != nil {
+		t.Fatalf("trocar a abelha depois da migração: %v", err)
+	}
+}
+
 func TestRecolherWorkspace(t *testing.T) {
 	b, _ := bancoDeTeste(t)
 	ctx := context.Background()
@@ -540,6 +639,9 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 	perfil, err := b2.Perfil(ctx, p.ID)
 	if err != nil || perfil.Tema != "fosco" || perfil.Nome != "Pessoal" {
 		t.Fatalf("perfil depois da migração: %+v, %v", perfil, err)
+	}
+	if perfil.MascoteModelo != "identidade" || perfil.MascoteNome != "Colmeia" || perfil.AbelhaFixa {
+		t.Errorf("a abelha depois da migração: %+v", perfil)
 	}
 	workspaces, _ := b2.ListarWorkspaces(ctx, p.ID)
 	if len(workspaces) != 1 || workspaces[0].ID != w.ID {

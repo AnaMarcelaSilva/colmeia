@@ -466,6 +466,19 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "mostrar": d.Mostrar}
+	case "perfil.mascote":
+		var d struct {
+			Modelo string `json:"modelo"`
+			Nome   string `json:"nome"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "modelo": d.Modelo, "nome": d.Nome}
+	case "perfil.abelha_fixa":
+		var d struct {
+			Ligada bool `json:"ligada"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "ligada": d.Ligada}
 	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
 		var d struct {
 			Descricao string `json:"descricao"`
@@ -496,7 +509,13 @@ func (s *Servidor) eventos(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	assinatura, err := s.Avisos.Assinar(id)
+	// A abelha fixa se apresenta na consulta: recebe o mesmo, mas não conta
+	// como janela aberta para os pedidos de abrir uma tarefa.
+	assinar := s.Avisos.Assinar
+	if r.URL.Query().Get("quem") == "abelha" {
+		assinar = s.Avisos.AssinarAbelha
+	}
+	assinatura, err := assinar(id)
 	if errors.Is(err, avisos.ErrMuitasAssinaturas) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return

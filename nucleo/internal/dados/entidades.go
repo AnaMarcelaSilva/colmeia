@@ -21,6 +21,24 @@ type Perfil struct {
 	// AutocompletarSQL: sugestões locais no console de bancos (palavras do
 	// SQL e nomes já carregados na árvore). Desligado por padrão.
 	AutocompletarSQL bool `json:"autocompletar_sql"`
+	// MascoteModelo e MascoteNome: o acabamento da abelha (um de
+	// ModelosMascote) e o nome que aparece no balão, no resumo e na abelha
+	// fixa. AbelhaFixa: a abelha num programa à parte, por cima das janelas.
+	MascoteModelo string `json:"mascote_modelo"`
+	MascoteNome   string `json:"mascote_nome"`
+	AbelhaFixa    bool   `json:"abelha_fixa"`
+}
+
+// ModelosMascote são os acabamentos que a tela sabe desenhar; o primeiro é o padrão.
+var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zangao"}
+
+// NomeMascotePadrao é o nome da abelha de um perfil novo.
+const NomeMascotePadrao = "Colmeia"
+
+const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa`
+
+func (p *Perfil) campos() []any {
+	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa}
 }
 
 type Conta struct {
@@ -93,7 +111,7 @@ func donoDoProjeto(ctx context.Context, tx *transacao, projeto int64) (int64, st
 // Perfis
 
 func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis ORDER BY nome`)
+	linhas, err := b.db.QueryContext(ctx, `SELECT `+colunasDoPerfil+` FROM perfis ORDER BY nome`)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +119,7 @@ func (b *Banco) ListarPerfis(ctx context.Context) ([]Perfil, error) {
 	perfis := []Perfil{}
 	for linhas.Next() {
 		var p Perfil
-		if err := linhas.Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL); err != nil {
+		if err := linhas.Scan(p.campos()...); err != nil {
 			return nil, err
 		}
 		perfis = append(perfis, p)
@@ -120,7 +138,7 @@ func (b *Banco) CriarPerfil(ctx context.Context, nome, tema string) (Perfil, err
 	if err := umDe("tema", tema, Temas); err != nil {
 		return Perfil{}, err
 	}
-	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true}
+	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true, MascoteModelo: ModelosMascote[0], MascoteNome: NomeMascotePadrao}
 	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO perfis (nome, tema, criado_em) VALUES (?, ?, ?)`, p.Nome, p.Tema, p.CriadoEm)
 		if err != nil {
@@ -151,8 +169,7 @@ func (b *Banco) DefinirTema(ctx context.Context, perfil int64, tema string) erro
 // Perfil devolve um perfil pelo id.
 func (b *Banco) Perfil(ctx context.Context, id int64) (Perfil, error) {
 	var p Perfil
-	err := b.db.QueryRowContext(ctx, `SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis WHERE id = ?`, id).
-		Scan(&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL)
+	err := b.db.QueryRowContext(ctx, `SELECT `+colunasDoPerfil+` FROM perfis WHERE id = ?`, id).Scan(p.campos()...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNaoEncontrado
 	}
@@ -200,6 +217,43 @@ func (b *Banco) DefinirAutocompletarSQL(ctx context.Context, perfil int64, ligad
 			return ErrNaoEncontrado
 		}
 		return registrar(ctx, tx, "perfil.autocompletar_sql", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
+	})
+}
+
+// DefinirMascote troca o acabamento e o nome da abelha do perfil. O nome é
+// curto (cabe no balão) e numa linha só.
+func (b *Banco) DefinirMascote(ctx context.Context, perfil int64, modelo, nome string) error {
+	if err := umDe("modelo da abelha", modelo, ModelosMascote); err != nil {
+		return err
+	}
+	nome, err := nomeValido("O nome da abelha", nome, 24)
+	if err != nil {
+		return err
+	}
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET mascote_modelo = ?, mascote_nome = ? WHERE id = ?`, modelo, nome, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.mascote", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "modelo": modelo, "nome": nome})
+	})
+}
+
+// DefinirAbelhaFixa guarda se a abelha fica fixa na área de trabalho. O
+// programa da abelha escuta o evento e sai quando ela é desligada.
+func (b *Banco) DefinirAbelhaFixa(ctx context.Context, perfil int64, ligada bool) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET abelha_fixa = ? WHERE id = ?`, ligada, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.abelha_fixa", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligada": ligada})
 	})
 }
 

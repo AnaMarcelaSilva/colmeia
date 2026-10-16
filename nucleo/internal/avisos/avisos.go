@@ -59,23 +59,44 @@ func (b *Barramento) Publicar(perfil int64, mensagem map[string]any) {
 	}
 }
 
-// Assinatura é uma tela recebendo os avisos de um perfil.
+// Assinatura é uma tela recebendo os avisos de um perfil. A abelha fixa
+// recebe os mesmos avisos, mas não conta como janela aberta (Janelas).
 type Assinatura struct {
 	perfil   int64
+	abelha   bool
 	fila     chan []byte
 	atrasada atomic.Bool
 	b        *Barramento
 }
 
-func (b *Barramento) Assinar(perfil int64) (*Assinatura, error) {
+func (b *Barramento) Assinar(perfil int64) (*Assinatura, error) { return b.assinar(perfil, false) }
+
+// AssinarAbelha é a assinatura do programa da abelha fixa.
+func (b *Barramento) AssinarAbelha(perfil int64) (*Assinatura, error) { return b.assinar(perfil, true) }
+
+func (b *Barramento) assinar(perfil int64, abelha bool) (*Assinatura, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.assinaturas) >= MaxAssinaturas {
 		return nil, ErrMuitasAssinaturas
 	}
-	a := &Assinatura{perfil: perfil, fila: make(chan []byte, TamanhoFila), b: b}
+	a := &Assinatura{perfil: perfil, abelha: abelha, fila: make(chan []byte, TamanhoFila), b: b}
 	b.assinaturas[a] = struct{}{}
 	return a, nil
+}
+
+// Janelas conta as janelas da Colmeia ligadas aos avisos do perfil, sem a
+// abelha fixa: diz se um pedido de abrir uma tarefa tem quem atenda.
+func (b *Barramento) Janelas(perfil int64) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for a := range b.assinaturas {
+		if a.perfil == perfil && !a.abelha {
+			n++
+		}
+	}
+	return n
 }
 
 func (a *Assinatura) Cancelar() {

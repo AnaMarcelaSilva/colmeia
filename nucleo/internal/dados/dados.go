@@ -159,8 +159,8 @@ CREATE TABLE IF NOT EXISTS comandos (
 
 // colunasPerfis é a definição da tabela perfis desde a versão 9 do banco
 // (com o tema fosco). A migração para ela está em migrarPerfis. As colunas
-// aviso_captura, tempo_agentes e autocompletar_sql nasceram em migrar e
-// ficam lá.
+// aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo,
+// mascote_nome e abelha_fixa nasceram em migrar e ficam lá.
 const colunasPerfis = `
 	id INTEGER PRIMARY KEY,
 	nome TEXT NOT NULL UNIQUE,
@@ -293,6 +293,11 @@ func migrar(db *sql.DB) error {
 		{"perfis", "tempo_agentes", "INTEGER NOT NULL DEFAULT 0"},
 		// Autocompletar no console de bancos (desligado por padrão).
 		{"perfis", "autocompletar_sql", "INTEGER NOT NULL DEFAULT 0"},
+		// O acabamento e o nome da abelha (a lista fica em ModelosMascote).
+		{"perfis", "mascote_modelo", "TEXT NOT NULL DEFAULT 'identidade'"},
+		{"perfis", "mascote_nome", "TEXT NOT NULL DEFAULT 'Colmeia'"},
+		// A abelha fixa na área de trabalho, num programa à parte (desligada por padrão).
+		{"perfis", "abelha_fixa", "INTEGER NOT NULL DEFAULT 0"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
@@ -422,9 +427,12 @@ func migrarPerfis(db *sql.DB) error {
 		`CREATE TABLE perfis_nova (` + colunasPerfis + `,
 			aviso_captura INTEGER NOT NULL DEFAULT 1,
 			tempo_agentes INTEGER NOT NULL DEFAULT 0,
-			autocompletar_sql INTEGER NOT NULL DEFAULT 0)`,
-		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql)
-			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql FROM perfis`,
+			autocompletar_sql INTEGER NOT NULL DEFAULT 0,
+			mascote_modelo TEXT NOT NULL DEFAULT 'identidade',
+			mascote_nome TEXT NOT NULL DEFAULT 'Colmeia',
+			abelha_fixa INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa)
+			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa FROM perfis`,
 		`DROP TABLE perfis`,
 		`ALTER TABLE perfis_nova RENAME TO perfis`,
 	} {

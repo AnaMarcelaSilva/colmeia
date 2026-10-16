@@ -83,3 +83,25 @@ func TestLimiteDeTelas(t *testing.T) {
 		t.Errorf("depois de uma sair: %v", err)
 	}
 }
+
+func TestJanelasNaoContamAAbelha(t *testing.T) {
+	b := Novo()
+	if b.Janelas(1) != 0 {
+		t.Fatal("sem ninguém")
+	}
+	abelha, _ := b.AssinarAbelha(1)
+	janela, _ := b.Assinar(1)
+	b.Assinar(2)
+	if n := b.Janelas(1); n != 1 {
+		t.Errorf("janelas do perfil 1: %d", n)
+	}
+	// A abelha recebe os avisos como qualquer tela.
+	b.Publicar(1, map[string]any{"tipo": "tela.abrir"})
+	if m := proxima(t, abelha); m["tipo"] != "tela.abrir" {
+		t.Errorf("a abelha recebeu %v", m)
+	}
+	janela.Cancelar()
+	if n := b.Janelas(1); n != 0 {
+		t.Errorf("depois de a janela fechar: %d", n)
+	}
+}
