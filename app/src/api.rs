@@ -82,7 +82,7 @@ pub struct Tarefa {
 }
 
 /// Como um agente terminou.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct Fim {
     pub codigo: i64,
     pub erro: bool,
@@ -91,6 +91,12 @@ pub struct Fim {
     /// Hora local, "14:40".
     pub hora: String,
     pub texto: String,
+    /// O momento completo (RFC 3339) e o dia local ("2026-10-16"): base do
+    /// "Concluído só de hoje" e do histórico por data. Vazios num núcleo antigo.
+    #[serde(default)]
+    pub em: String,
+    #[serde(default)]
+    pub data: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

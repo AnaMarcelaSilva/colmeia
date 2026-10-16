@@ -33,12 +33,24 @@ func horaDoMomento(momento string) string {
 	return hora(t)
 }
 
-// fimAgente é como um agente terminou, do jeito que a tela mostra.
+// dataDoMomento: o dia local, "2026-10-16".
+func dataDoMomento(momento string) string {
+	t, err := time.Parse(time.RFC3339Nano, momento)
+	if err != nil {
+		return ""
+	}
+	return t.Local().Format("2006-01-02")
+}
+
+// fimAgente é como um agente terminou, do jeito que a tela mostra. Em é o
+// momento completo (RFC 3339, UTC); Data e Hora, o dia e a hora locais, para
+// a tela separar o que terminou hoje sem lidar com fuso.
 type fimAgente struct {
 	Codigo int    `json:"codigo"`
 	Erro   bool   `json:"erro"`
 	Motivo string `json:"motivo"`
 	Em     string `json:"em"`
+	Data   string `json:"data"`
 	Hora   string `json:"hora"`
 	Texto  string `json:"texto"`
 }
@@ -102,7 +114,7 @@ type terminouDados struct {
 func fimDoEvento(e dados.Evento) fimAgente {
 	var d terminouDados
 	json.Unmarshal(e.Dados, &d)
-	return fimAgente{Codigo: d.Codigo, Erro: d.Erro, Motivo: d.Motivo, Em: e.Momento, Hora: horaDoMomento(e.Momento),
+	return fimAgente{Codigo: d.Codigo, Erro: d.Erro, Motivo: d.Motivo, Em: e.Momento, Data: dataDoMomento(e.Momento), Hora: horaDoMomento(e.Momento),
 		Texto: textoDoFim(d.Ferramenta, d.Papel, d.Motivo, d.Codigo)}
 }
 

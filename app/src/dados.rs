@@ -1103,12 +1103,25 @@ mod testes {
         m.carregar(serde_json::from_str(quadro).unwrap());
         let t = &m.tarefas[0];
         assert!(t.erro.is_some() && t.erro_visto);
+        // Um núcleo antigo não manda a data do fim: fica vazia.
+        assert_eq!(t.agentes[0].fim.as_ref().map(|f| f.data.as_str()), Some(""));
+    }
+
+    #[test]
+    fn fim_traz_a_data_completa() {
+        let mut m = modelo();
+        m.aplicar(evento(
+            r#"{"tipo":"agente.terminou","seq":6,"agente_id":7,"tarefa_id":10,
+            "fim":{"codigo":0,"erro":false,"motivo":"terminou","em":"2026-10-16T17:40:00Z","data":"2026-10-16","hora":"14:40","texto":"x"}}"#,
+        ));
+        let fim = m.tarefas[0].agentes[0].fim.clone().unwrap();
+        assert_eq!((fim.em.as_str(), fim.data.as_str(), fim.hora.as_str()), ("2026-10-16T17:40:00Z", "2026-10-16", "14:40"));
     }
 
     #[test]
     fn terminal_comum_que_sai_com_codigo_nao_e_erro() {
         let mut a = AgenteTela::da_api(&serde_json::from_str(r#"{"id":1,"tarefa_id":1,"ferramenta":"shell","papel":"dev","ativo":false}"#).unwrap());
-        a.fim = Some(api::Fim { codigo: 1, erro: false, motivo: "terminou".into(), hora: "10:00".into(), texto: String::new() });
+        a.fim = Some(api::Fim { codigo: 1, motivo: "terminou".into(), hora: "10:00".into(), ..Default::default() });
         assert_eq!(a.visual(), EstadoVisual::Terminou);
         assert_eq!(a.texto_estado(), "Terminal encerrado (código 1) às 10:00");
     }

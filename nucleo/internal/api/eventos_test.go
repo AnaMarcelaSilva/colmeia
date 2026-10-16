@@ -218,8 +218,14 @@ func TestCartaoAndaSozinhoComOAgente(t *testing.T) {
 	// Removido pela Colmeia: terminou, sem erro.
 	pedir(t, "DELETE", srv.URL+"/v1/agentes/1", nil)
 	m = eventos.esperar("agente.terminou", func(m map[string]any) bool { return m["tipo"] == "agente.terminou" })
-	if fim, _ := m["fim"].(map[string]any); fim["motivo"] != "removido" || fim["erro"] != false {
+	fim, _ := m["fim"].(map[string]any)
+	if fim["motivo"] != "removido" || fim["erro"] != false {
 		t.Errorf("fim do agente removido: %v", m)
+	}
+	// O fim traz o momento completo e o dia local, além da hora.
+	em, err := time.Parse(time.RFC3339Nano, fim["em"].(string))
+	if err != nil || time.Since(em) > time.Minute || fim["data"] != em.Local().Format("2006-01-02") || fim["hora"] != em.Local().Format("15:04") {
+		t.Errorf("data do fim: %v", fim)
 	}
 }
 

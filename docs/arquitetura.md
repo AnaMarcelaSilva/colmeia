@@ -145,7 +145,7 @@ O WebSocket `GET /v1/perfis/{id}/eventos` usa o mesmo token e recusa `Origin` de
 | `agente.iniciou` | `agente_id`, `tarefa_id`, `desde`, `desde_hora` |
 | `agente.estado` | `agente_id`, `tarefa_id`, `estado` (`trabalhando`, `aguardando`, `ocioso`), `motivo` (`pede aprovação`, `esperando resposta` ou `aprovar consulta`), `desde`, `desde_hora` |
 | `agente.uso` | `agente_id`, `tarefa_id`, `contexto?` (`usado`, `tamanho`, `porcentagem`), `cinco_horas?` e `semana?` (`porcentagem`, `volta`, `volta_texto`, "volta às 14:30"); só quando muda. Os limites são da conta do perfil; sem `contexto`, o agente ainda não tem |
-| `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `hora`, `texto`) |
+| `agente.terminou` | `agente_id`, `tarefa_id`, `fim` (`codigo`, `erro`, `motivo`, `em` (momento completo, RFC 3339), `data` (dia local, `AAAA-MM-DD`), `hora`, `texto`) |
 | `anexo.adicionado` / `anexo.removido` | `anexo_id`, `tarefa_id` (e `agente_id`, se veio de um agente) |
 | `nota.atualizada` | `tarefa_id`, `nota_tipo` (`daily` ou `sprint`), `periodo` (o texto da nota não vai no evento); `agente_id` e `modo` quando foi um agente |
 | `pedido.criado` / `pedido.entregue` / `pedido.respondido` / `pedido.cancelado` / `pedido.falhou` | `pedido_id`, `tarefa_id`, `agente_id` e `pedido` (o objeto, lido na hora; no histórico só fica o tamanho do texto) |
