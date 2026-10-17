@@ -19,10 +19,14 @@ const RAIO: u8 = 14;
 pub const LARGURA_CARTAO: f32 = 320.0;
 pub const ALTURA_BALAO: f32 = 112.0;
 
-/// A altura do resumo: com ou sem a tarefa em destaque.
-pub fn altura_resumo(com_destaque: bool) -> f32 {
-    if com_destaque { 196.0 } else { 150.0 }
+/// A altura do resumo: com ou sem a tarefa em destaque e a caixa para escrever à abelha.
+pub fn altura_resumo(com_destaque: bool, com_caixa: bool) -> f32 {
+    let base = if com_destaque { 196.0 } else { 150.0 };
+    if com_caixa { base + ALTURA_CAIXA } else { base }
 }
+
+/// A caixa do resumo para escrever à abelha (com os comandos ou a pergunta livre).
+const ALTURA_CAIXA: f32 = 40.0;
 
 fn cor(tipo: Tipo) -> Color32 {
     match tipo {
@@ -108,13 +112,19 @@ fn linha(ui: &Ui, pos: Pos2, texto: &str, fonte: FontId, cor: Color32, largura: 
 
 pub enum Pedido {
     Fechar,
-    Abrir { tarefa: i64, agente: Option<i64> },
+    /// A frase escrita no resumo foi mandada.
+    Escrever,
+    Abrir {
+        tarefa: i64,
+        agente: Option<i64>,
+    },
     AbrirColmeia,
     Desafixar,
 }
 
-/// O resumo, fixo até fechar: o nome, a contagem, o que mais pede você e os botões.
-pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, destaque: Option<&Aviso>) -> Option<Pedido> {
+/// O resumo, fixo até fechar: o nome, a contagem, o que mais pede você, a
+/// caixa para escrever à abelha (com `rascunho`) e os botões.
+pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, destaque: Option<&Aviso>, rascunho: Option<&mut String>) -> Option<Pedido> {
     let mut pedido = None;
     cartao(ui.painter(), rect, BORDA);
     let dentro = rect.shrink(14.0);
@@ -167,6 +177,14 @@ pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, de
         topo += 26.0;
     }
 
+    if let Some(texto) = rascunho {
+        let caixa = Rect::from_min_size(pos2(dentro.left(), topo), vec2(largura, 30.0));
+        if caixa_para_a_abelha(ui, caixa, nome, texto) {
+            pedido = Some(Pedido::Escrever);
+        }
+        topo += ALTURA_CAIXA;
+    }
+
     let rodape = Rect::from_min_max(pos2(dentro.left(), topo), pos2(dentro.right(), topo + 30.0));
     ui.scope_builder(UiBuilder::new().max_rect(rodape).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         if botao(ui, "Abrir a Colmeia", true).clicked() {
@@ -179,6 +197,39 @@ pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, de
         });
     });
     pedido
+}
+
+/// Uma linha para escrever à abelha; Enter (ou a seta) manda.
+fn caixa_para_a_abelha(ui: &mut Ui, caixa: Rect, nome: &str, texto: &mut String) -> bool {
+    ui.painter().rect(caixa, CornerRadius::same(8), Color32::from_white_alpha(6), Stroke::new(1.0, BORDA), StrokeKind::Inside);
+    let campo = Rect::from_min_max(caixa.min + vec2(10.0, 0.0), pos2(caixa.right() - 34.0, caixa.bottom()));
+    let resposta = ui
+        .scope_builder(UiBuilder::new().max_rect(campo).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.add(
+                egui::TextEdit::singleline(texto)
+                    .id(egui::Id::new("pergunta-abelha"))
+                    .frame(egui::Frame::NONE)
+                    .desired_width(campo.width())
+                    .char_limit(500)
+                    .text_color(TEXTO)
+                    .font(FontId::proportional(12.5))
+                    .hint_text(egui::RichText::new(format!("Pergunte ou peça à {nome}…")).color(SUAVE)),
+            )
+        })
+        .inner;
+    // Sem foco na janela, o teclado não chega: o clique na caixa pede o foco.
+    if resposta.clicked() && !ui.input(|i| i.viewport().focused.unwrap_or(false)) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+    let enter = resposta.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let seta = Rect::from_center_size(pos2(caixa.right() - 16.0, caixa.center().y), vec2(24.0, 24.0));
+    let botao = ui.interact(seta, egui::Id::new("mandar-pergunta"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let cor = if botao.hovered() { TEXTO } else { DESTAQUE };
+    let c = seta.center();
+    ui.painter().line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], Stroke::new(1.6, cor));
+    ui.painter().line_segment([c + vec2(1.0, -4.0), c + vec2(5.0, 0.0)], Stroke::new(1.6, cor));
+    ui.painter().line_segment([c + vec2(1.0, 4.0), c + vec2(5.0, 0.0)], Stroke::new(1.6, cor));
+    (enter || botao.clicked()) && !texto.trim().is_empty()
 }
 
 /// O balão de um aviso: some sozinho em 8 s (o fio embaixo mostra o tempo)
@@ -219,7 +270,21 @@ pub fn microfone(pintor: &egui::Painter, abelha: Rect) {
     pintor.circle_filled(c, 2.4, Color32::WHITE);
 }
 
-pub const ALTURA_BALAO_VOZ: f32 = 128.0;
+const ALTURA_BALAO_VOZ: f32 = 128.0;
+/// A resposta da pergunta livre pode ser longa: o balão cresce até estas linhas.
+const LINHAS_BALAO_VOZ: usize = 9;
+const ALTURA_LINHA: f32 = 18.0;
+/// Quantas letras cabem numa linha do balão, por alto (só para a altura).
+const LETRAS_POR_LINHA: usize = 44;
+
+fn linhas_da_resposta(texto: &str) -> usize {
+    texto.chars().count().div_ceil(LETRAS_POR_LINHA).clamp(2, LINHAS_BALAO_VOZ)
+}
+
+/// A altura do balão da voz para a resposta: duas linhas, ou mais se ela for longa.
+pub fn altura_balao_voz(texto: &str) -> f32 {
+    ALTURA_BALAO_VOZ + (linhas_da_resposta(texto) - 2) as f32 * ALTURA_LINHA
+}
 
 /// O que o balão da voz pede.
 pub enum PedidoVoz {
@@ -233,6 +298,8 @@ pub enum PedidoVoz {
 pub struct Fala<'a> {
     pub texto: &'a str,
     pub ouvido: &'a str,
+    /// A frase foi escrita no resumo, não falada.
+    pub escrito: bool,
     pub erro: bool,
     pub pergunta: bool,
     pub abrir: Option<i64>,
@@ -255,13 +322,18 @@ pub fn balao_voz(ui: &mut Ui, rect: Rect, nome: &str, f: &Fala) -> Option<Pedido
     if fechar(ui, pos2(dentro.right() - 8.0, dentro.top() + 9.0), egui::Id::new("fechar-voz")) {
         pedido = Some(PedidoVoz::Fechar);
     }
-    // A resposta em até duas linhas.
+    // A resposta em duas linhas, ou mais (a da pergunta livre).
+    let linhas = linhas_da_resposta(f.texto);
     let mut job = egui::text::LayoutJob::simple(f.texto.to_owned(), FontId::proportional(13.5), if f.erro { ERRO } else { TEXTO }, largura);
-    job.wrap.max_rows = 2;
+    job.wrap.max_rows = linhas;
     let g = ui.painter().layout_job(job);
+    // O que foi dito vem logo abaixo da resposta (a altura do balão é estimada antes).
+    let fim = dentro.top() + 22.0 + g.size().y.max(2.0 * ALTURA_LINHA);
     ui.painter().galley(pos2(dentro.left(), dentro.top() + 22.0), g, TEXTO);
     if !f.ouvido.is_empty() {
-        linha(ui, pos2(dentro.left(), dentro.top() + 62.0), &format!("Você disse: \u{201c}{}\u{201d}", f.ouvido), FontId::proportional(11.5), SUAVE, largura);
+        let quem = if f.escrito { "Você escreveu" } else { "Você disse" };
+        let y = fim + 4.0;
+        linha(ui, pos2(dentro.left(), y), &format!("{quem}: \u{201c}{}\u{201d}", f.ouvido), FontId::proportional(11.5), SUAVE, largura);
     }
     if f.pergunta || f.abrir.is_some() {
         let botoes = Rect::from_min_size(pos2(dentro.left(), dentro.bottom() - 30.0), vec2(largura, 30.0));

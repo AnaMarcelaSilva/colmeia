@@ -3,6 +3,8 @@
 //! a voz da abelha baixa o Kokoro, e o "ouvir o nome" deixa o microfone da
 //! abelha fixa aberto, com a sensibilidade e, para um nome que não é o
 //! padrão, 3 ou 4 gravações feitas aqui (que viram referências, não áudio).
+//! A pergunta livre com IA é uma opção à parte no menu (o mesmo diálogo, só
+//! com ela): é a única que usa tokens.
 
 use std::sync::Arc;
 
@@ -32,9 +34,28 @@ pub struct AjustesVoz {
     gravacao: Option<Gravacao>,
     aviso: Option<String>,
     erro: Option<String>,
+    /// Só a pergunta livre com IA (a opção à parte no menu).
+    so_pergunta: bool,
 }
 
 impl AjustesVoz {
+    /// A opção à parte: só a pergunta livre, sem perguntar dos modelos ao núcleo.
+    pub fn pergunta(perfil: &api::Perfil) -> Self {
+        AjustesVoz {
+            perfil: perfil.id,
+            opcoes: perfil.voz.clone(),
+            abelha_fixa: perfil.abelha_fixa,
+            nome_abelha: perfil.mascote_nome.clone(),
+            whisper: api::EstadoVoz::default(),
+            fala: api::EstadoVoz::default(),
+            nome: None,
+            gravacao: None,
+            aviso: None,
+            erro: None,
+            so_pergunta: true,
+        }
+    }
+
     pub fn new(perfil: &api::Perfil) -> Self {
         let mut erro = None;
         let mut ler = |r: Result<api::EstadoVoz, String>| {
@@ -56,6 +77,7 @@ impl AjustesVoz {
             gravacao: None,
             aviso: None,
             erro,
+            so_pergunta: false,
         }
     }
 
@@ -89,11 +111,14 @@ fn barra(ui: &mut egui::Ui, e: &api::EstadoVoz) {
 /// Mostra o diálogo; as mudanças vão ao núcleo e voltam pelo evento perfil.voz.
 pub fn mostrar(ui: &mut egui::Ui, d: &mut AjustesVoz) -> Resultado {
     let mut resultado = Resultado::Continua;
+    if d.so_pergunta {
+        return mostrar_pergunta(ui, d);
+    }
     receber_gravacao(ui.ctx(), d);
     tema::cabecalho(
         ui,
         "Comandos falados e voz da abelha",
-        "Fale com a abelha para rodar e parar projetos, abrir e encerrar tarefas e saber o que espera por você. Tudo roda neste computador, sem tokens, e o áudio não é gravado.",
+        "Fale com a abelha para rodar e parar projetos, abrir e encerrar tarefas e saber o que espera por você. Os comandos rodam neste computador, sem tokens, e o áudio não é gravado.",
     );
     egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
         comandos(ui, d);
@@ -274,6 +299,39 @@ fn ouvir_o_nome(ui: &mut egui::Ui, d: &mut AjustesVoz) -> bool {
         }
     }
     ligar
+}
+
+/// A pergunta livre com IA: separada das outras e avisando que gasta tokens.
+fn mostrar_pergunta(ui: &mut egui::Ui, d: &mut AjustesVoz) -> Resultado {
+    tema::cabecalho(
+        ui,
+        "Pergunta livre com IA",
+        "Pergunte à abelha sobre o andamento do trabalho, com as suas palavras. Desligada por padrão porque usa tokens.",
+    );
+    secao(
+        ui,
+        "Como funciona",
+        "O que não for um dos comandos vira uma pergunta sobre o andamento, como \u{201c}o que eu fiz hoje?\u{201d} ou \u{201c}o que falta na sprint?\u{201d}, respondida pelo Claude Code com a conta deste perfil. Cada pergunta gasta tokens. Ele recebe só um retrato curto das tarefas, dos agentes, das frases da reunião e do que aconteceu hoje, nunca o terminal, senhas ou bancos, e nada é guardado. Dá para falar (com os comandos ligados) ou escrever no resumo da abelha.",
+    );
+    let ligada = d.opcoes.voz_ia;
+    let clicou = if ligada {
+        tema::botao_alerta(ui, "Desligar a pergunta livre").clicked()
+    } else {
+        tema::botao_principal(ui, "Ligar a pergunta livre", true).clicked()
+    };
+    if clicou {
+        d.erro = None;
+        d.mudar(json!({ "voz_ia": !ligada }));
+    }
+    if let Some(e) = &d.erro {
+        ui.add_space(8.0);
+        ui.label(RichText::new(e).color(cores().erro).size(12.5));
+    }
+    ui.add_space(16.0);
+    if tema::botao_secundario(ui, "Fechar").clicked() {
+        return Resultado::Fechar;
+    }
+    Resultado::Continua
 }
 
 /// Um nome que não é o padrão: 3 ou 4 gravações, uma de cada vez.

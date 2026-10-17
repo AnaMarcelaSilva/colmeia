@@ -57,6 +57,9 @@ pub struct OpcoesVoz {
     pub voz_nome: bool,
     #[serde(default = "sensibilidade_padrao")]
     pub voz_sensibilidade: u8,
+    /// A pergunta livre com IA: o que não é comando vai ao Claude Code (usa tokens).
+    #[serde(default)]
+    pub voz_ia: bool,
 }
 
 fn sensibilidade_padrao() -> u8 {
@@ -65,7 +68,7 @@ fn sensibilidade_padrao() -> u8 {
 
 impl Default for OpcoesVoz {
     fn default() -> Self {
-        OpcoesVoz { voz_comandos: false, voz_abelha: false, voz_efeito: false, voz_nome: false, voz_sensibilidade: sensibilidade_padrao() }
+        OpcoesVoz { voz_comandos: false, voz_abelha: false, voz_efeito: false, voz_nome: false, voz_sensibilidade: sensibilidade_padrao(), voz_ia: false }
     }
 }
 

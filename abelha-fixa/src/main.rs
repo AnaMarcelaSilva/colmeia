@@ -8,7 +8,8 @@
 //! Com os comandos falados ligados no perfil, o clique (ou Ctrl+Alt+Espaço,
 //! de qualquer programa, no X11) abre o microfone para um comando e o resumo
 //! passa ao botão direito; com o "ouvir o nome", ela fica ouvindo o nome dela,
-//! com o ponto vermelho do microfone sempre à vista.
+//! com o ponto vermelho do microfone sempre à vista. Com os comandos ou a
+//! pergunta livre com IA, o resumo tem uma caixa para escrever à abelha.
 //!
 //! Uso: colmeia-abelha --perfil N (a janela abre com a opção "Fixar a
 //! abelha na área de trabalho").
@@ -55,10 +56,11 @@ struct Balao {
 const RESPOSTA: f64 = 10.0;
 const PERGUNTA: f64 = 60.0;
 
-/// A resposta de um comando falado, no balão.
+/// A resposta de um comando falado (ou escrito), no balão.
 struct Resposta {
     texto: String,
     ouvido: String,
+    escrito: bool,
     erro: bool,
     abrir: Option<i64>,
     ate: f64,
@@ -97,6 +99,8 @@ struct Fixa {
     voz: OpcoesVoz,
     conversa: Option<Conversa>,
     resposta: Option<Resposta>,
+    /// A frase sendo escrita no resumo.
+    rascunho: String,
     atalho: Option<atalho::Atalho>,
     envio: Sender<Mensagem>,
     _trava: Trava,
@@ -177,9 +181,9 @@ impl Fixa {
     /// O cartão que aparece com a abelha (a voz, o resumo ou o balão) e a altura dele.
     fn cartao(&self) -> Option<f32> {
         if self.com_voz() {
-            Some(tela::ALTURA_BALAO_VOZ)
+            Some(tela::altura_balao_voz(self.resposta.as_ref().map_or("", |r| r.texto.as_str())))
         } else if self.aberto {
-            Some(tela::altura_resumo(self.resumo.destaque().is_some()))
+            Some(tela::altura_resumo(self.resumo.destaque().is_some(), self.conversa.is_some()))
         } else {
             self.balao.as_ref().map(|_| tela::ALTURA_BALAO)
         }
@@ -190,15 +194,31 @@ impl Fixa {
         self.resposta.is_some() || self.conversa.as_ref().is_some_and(|c| !matches!(c.fase(), Fase::Parada))
     }
 
-    /// Liga ou desliga os comandos falados, o atalho e o ouvir o nome.
+    /// Liga ou desliga os comandos falados, o atalho e o ouvir o nome (e a
+    /// conversa escrita, que basta para a pergunta livre).
     fn ajustar_voz(&mut self, ctx: &egui::Context, voz: OpcoesVoz, agora: f64) {
         let antes = std::mem::replace(&mut self.voz, voz.clone());
-        if !voz.voz_comandos {
+        if !voz.voz_comandos && !voz.voz_ia {
             if let Some(c) = self.conversa.as_mut() {
                 c.fechar();
             }
             self.conversa = None;
             self.resposta = None;
+            self.atalho = None;
+            self.rascunho.clear();
+            return;
+        }
+        let perfil = self.perfil;
+        let acordar = ctx.clone();
+        let c = self.conversa.get_or_insert_with(|| Conversa::nova(perfil, Arc::new(move || acordar.request_repaint())));
+        c.falar = voz.voz_abelha;
+        c.efeito = voz.voz_efeito;
+        // Só a pergunta livre: sem microfone, sem atalho e sem ouvir o nome.
+        if !voz.voz_comandos {
+            c.cancelar();
+            if c.vigiando() {
+                c.desvigiar();
+            }
             self.atalho = None;
             return;
         }
@@ -212,11 +232,7 @@ impl Fixa {
                 Err(e) => eprintln!("abelha fixa: {e}"),
             }
         }
-        let perfil = self.perfil;
-        let acordar = ctx.clone();
-        let c = self.conversa.get_or_insert_with(|| Conversa::nova(perfil, Arc::new(move || acordar.request_repaint())));
-        c.falar = voz.voz_abelha;
-        c.efeito = voz.voz_efeito;
+        let Some(c) = self.conversa.as_mut() else { return };
         let mudou_o_nome = antes.voz_nome != voz.voz_nome || antes.voz_sensibilidade != voz.voz_sensibilidade || !c.vigiando();
         if !voz.voz_nome {
             if c.vigiando() {
@@ -233,13 +249,13 @@ impl Fixa {
             Err(e) => Some(e),
         };
         if let Some(texto) = erro {
-            self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA });
+            self.resposta = Some(Resposta { texto, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA });
         }
     }
 
     /// O clique (ou o atalho): abre o microfone; clicado ouvindo, cancela.
     fn falar(&mut self, agora: f64) {
-        let Some(c) = self.conversa.as_mut() else { return };
+        let Some(c) = self.conversa.as_mut().filter(|_| self.voz.voz_comandos) else { return };
         self.aberto = false;
         self.balao = None;
         if matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo) {
@@ -250,7 +266,7 @@ impl Fixa {
         c.calar();
         self.resposta = None;
         if let Err(texto) = c.ouvir() {
-            self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA });
+            self.resposta = Some(Resposta { texto, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA });
         }
     }
 
@@ -260,19 +276,22 @@ impl Fixa {
         for s in c.receber() {
             match s {
                 Saida::Ouvido(ouvido) => {
-                    self.resposta = Some(Resposta { texto: String::new(), ouvido, erro: false, abrir: None, ate: agora + PERGUNTA });
+                    self.resposta = Some(Resposta { texto: String::new(), ouvido, escrito: false, erro: false, abrir: None, ate: agora + PERGUNTA });
                 }
                 Saida::Resposta(r) => {
-                    let ouvido = self.resposta.take().map(|r| r.ouvido).unwrap_or_default();
+                    let (ouvido, escrito) = self.resposta.take().map(|r| (r.ouvido, r.escrito)).unwrap_or_default();
                     let abrir = (r.abrir > 0).then_some(r.abrir);
                     // "Abrir a tarefa": a abelha leva até ela (como o Abrir dos balões).
                     if let Some(t) = abrir {
                         ligacao::abrir_colmeia(self.perfil, t, None);
                     }
-                    let ate = agora + if r.confirmar.is_empty() { RESPOSTA } else { PERGUNTA };
-                    self.resposta = Some(Resposta { texto: r.texto, ouvido, erro: false, abrir, ate });
+                    // Uma resposta longa (a pergunta livre) fica o tempo de ler.
+                    let ate = agora + if r.confirmar.is_empty() { RESPOSTA.max(r.texto.chars().count() as f64 / 15.0) } else { PERGUNTA };
+                    self.resposta = Some(Resposta { texto: r.texto, ouvido, escrito, erro: false, abrir, ate });
                 }
-                Saida::Erro(texto) => self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA }),
+                Saida::Erro(texto) => {
+                    self.resposta = Some(Resposta { texto, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA })
+                }
                 Saida::Chamado => {
                     self.aberto = false;
                     self.balao = None;
@@ -302,6 +321,7 @@ impl Fixa {
         let fala = tela::Fala {
             texto: andamento.unwrap_or_else(|| r.map_or("", |r| r.texto.as_str())),
             ouvido: r.map_or("", |r| r.ouvido.as_str()),
+            escrito: r.is_some_and(|r| r.escrito),
             erro: andamento.is_none() && r.is_some_and(|r| r.erro),
             pergunta: andamento.is_none() && c.pergunta.is_some(),
             abrir: if andamento.is_none() { r.and_then(|r| r.abrir) } else { None },
@@ -359,6 +379,17 @@ impl Fixa {
             tela::Pedido::Fechar => {
                 self.aberto = false;
                 self.balao = None;
+            }
+            tela::Pedido::Escrever => {
+                let frase = self.rascunho.trim().to_string();
+                if let Some(c) = self.conversa.as_mut()
+                    && c.escrever(&frase)
+                {
+                    self.aberto = false;
+                    self.rascunho.clear();
+                    self.resposta =
+                        Some(Resposta { texto: String::new(), ouvido: frase, escrito: true, erro: false, abrir: None, ate: self.ultimo_quadro + PERGUNTA });
+                }
             }
             tela::Pedido::Abrir { tarefa, agente } => {
                 self.resumo.visto(tarefa);
@@ -455,7 +486,7 @@ impl eframe::App for Fixa {
             self.arrastar = false;
         }
         // Com os comandos falados, o clique é para falar e o resumo vai ao botão direito.
-        if resposta.clicked() && self.conversa.is_some() {
+        if resposta.clicked() && self.conversa.is_some() && self.voz.voz_comandos {
             self.falar(agora);
         } else if resposta.clicked() || resposta.secondary_clicked() {
             self.aberto = !self.aberto;
@@ -484,7 +515,8 @@ impl eframe::App for Fixa {
                 self.balao_voz(ui, rect);
             } else if self.aberto {
                 let destaque = self.resumo.destaque();
-                pedido = tela::resumo(ui, rect, &self.nome, self.ligada, self.resumo.contagem(), destaque.as_ref());
+                let rascunho = if self.conversa.is_some() { Some(&mut self.rascunho) } else { None };
+                pedido = tela::resumo(ui, rect, &self.nome, self.ligada, self.resumo.contagem(), destaque.as_ref(), rascunho);
             } else if let Some(b) = &mut self.balao {
                 // O tempo do balão só corre sem o mouse em cima.
                 if !ui.rect_contains_pointer(rect) {
@@ -579,6 +611,7 @@ fn main() -> eframe::Result {
                 voz: OpcoesVoz::default(),
                 conversa: None,
                 resposta: None,
+                rascunho: String::new(),
                 atalho: None,
                 envio,
                 _trava: trava,

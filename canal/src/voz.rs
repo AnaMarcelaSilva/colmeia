@@ -169,8 +169,12 @@ pub struct RespostaNucleo {
     pub abrir: i64,
 }
 
+/// Uma pergunta livre (com IA) pode levar o prazo inteiro do Claude Code no núcleo.
+const ESPERA_COMANDO: std::time::Duration = std::time::Duration::from_secs(75);
+
 fn post(caminho: &str, corpo: serde_json::Value) -> Result<RespostaNucleo, String> {
-    let (status, texto) = crate::pedir_com_corpo("POST", caminho, Some(&corpo.to_string())).map_err(|e| format!("Não consegui falar com o núcleo: {e}"))?;
+    let (status, texto) =
+        crate::pedir_com_corpo_ate("POST", caminho, Some(&corpo.to_string()), ESPERA_COMANDO).map_err(|e| format!("Não consegui falar com o núcleo: {e}"))?;
     if status != 200 {
         let erro = serde_json::from_str::<serde_json::Value>(&texto).ok().and_then(|v| v["erro"].as_str().map(String::from)).unwrap_or(texto);
         return Err(erro);
@@ -399,6 +403,20 @@ impl Conversa {
         }
     }
 
+    /// Uma frase escrita (no resumo da abelha) vai ao núcleo como uma falada,
+    /// sem abrir o microfone. Devolve `false` se já há uma conversa em andamento.
+    pub fn escrever(&mut self, texto: &str) -> bool {
+        let frase = texto.trim().to_string();
+        if frase.is_empty() || !matches!(self.fase, Fase::Parada) {
+            return false;
+        }
+        self.calar();
+        self.pergunta = None;
+        self.fase = Fase::Pensando;
+        self.perguntar(move |perfil| comando(perfil, &frase));
+        true
+    }
+
     /// Responde à pergunta no ar (o Sim ou o Não clicado).
     pub fn responder(&mut self, sim: bool) {
         let Some(ficha) = self.pergunta.take() else { return };
@@ -593,6 +611,18 @@ mod testes {
         assert_eq!(c.aplicar(Resposta::Amostra { numero: 3, segundos: 0.7 }), Some(Saida::Amostra(3)));
         assert_eq!(c.fase(), Fase::Parada);
         assert_eq!(c.aplicar(Resposta::Aprendido), Some(Saida::Aprendido));
+    }
+
+    #[test]
+    fn escrever_so_parada_e_com_texto() {
+        let mut c = conversa();
+        assert!(!c.escrever("   "));
+        assert_eq!(c.fase(), Fase::Parada);
+        // No meio de outra conversa, a frase escrita não vai (nada chega ao núcleo).
+        c.fase = Fase::Ouvindo;
+        assert!(!c.escrever("o que eu fiz hoje?"));
+        c.fase = Fase::Pensando;
+        assert!(!c.escrever("o que eu fiz hoje?"));
     }
 
     #[test]

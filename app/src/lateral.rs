@@ -107,6 +107,8 @@ pub enum Acao {
     ResumoDaAbelha,
     /// Abrir os ajustes dos comandos falados e da voz da abelha.
     Voz,
+    /// Abrir a opção da pergunta livre com IA (à parte: usa tokens).
+    PerguntaIA,
 }
 
 #[derive(Default)]
@@ -465,6 +467,11 @@ impl Lateral {
             let comandos = if v.perfil.is_some_and(|p| p.voz.voz_comandos) { "ligados" } else { "desligados" };
             if tema::opcao_menu_com(ui, "Comandos falados e voz da abelha", Some(comandos), pode) {
                 saida.acoes.push(Acao::Voz);
+                ui.close();
+            }
+            let pergunta = if v.perfil.is_some_and(|p| p.voz.voz_ia) { "ligada" } else { "usa tokens" };
+            if tema::opcao_menu_com(ui, "Pergunta livre com IA", Some(pergunta), pode) {
+                saida.acoes.push(Acao::PerguntaIA);
                 ui.close();
             }
         });

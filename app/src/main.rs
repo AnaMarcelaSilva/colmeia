@@ -1868,7 +1868,7 @@ impl Colmeia {
     /// Os comandos falados: o atalho (fora dos diálogos), as respostas e a
     /// tarefa que a resposta pede para abrir.
     fn receber_falada(&mut self, ctx: &egui::Context, agora: f64) {
-        if self.falada.ligada() && self.dialogo.is_none() && ctx.input_mut(|i| falada::Falada::tirar_atalho(&mut i.events)) {
+        if self.falada.ouve() && self.dialogo.is_none() && ctx.input_mut(|i| falada::Falada::tirar_atalho(&mut i.events)) {
             self.abelha.resumo_aberto = false;
             self.falada.alternar(agora);
         }
@@ -2045,7 +2045,7 @@ impl Colmeia {
                 Acao::Linha => self.alternar_linha(),
                 Acao::Daily => self.abrir_daily(),
                 // Com os comandos falados, o clique é para falar; o resumo fica no botão direito.
-                Acao::Abelha if self.falada.ligada() => {
+                Acao::Abelha if self.falada.ouve() => {
                     self.abelha.resumo_aberto = false;
                     self.falada.alternar(ctx.input(|i| i.time));
                     abelha_clicada = true;
@@ -2057,6 +2057,11 @@ impl Colmeia {
                 Acao::Voz => {
                     if let Some(p) = &self.perfil {
                         self.dialogo = Some(Dialogo::Voz(Box::new(ajustes_voz::AjustesVoz::new(p))));
+                    }
+                }
+                Acao::PerguntaIA => {
+                    if let Some(p) = &self.perfil {
+                        self.dialogo = Some(Dialogo::Voz(Box::new(ajustes_voz::AjustesVoz::pergunta(p))));
                     }
                 }
             }
@@ -3335,9 +3340,23 @@ impl eframe::App for Colmeia {
             && let Some(caixa) = caixa_abelha
         {
             let ancora = egui::pos2(caixa.right() + 20.0, caixa.bottom());
-            let (clicada, area) =
-                abelha::resumo(&ctx, &self.abelha.nome, ancora, &self.modelo.tarefas, |p| no_escopo.contains(&p), &self.abelha.conclusoes, rodando, agora);
-            if let Some((tarefa, agente)) = clicada {
+            // Com os comandos ou a pergunta livre, dá para escrever à abelha no resumo.
+            let rascunho = if self.falada.ligada() { Some(&mut self.falada.rascunho) } else { None };
+            let (clicada, escreveu, area) = abelha::resumo(
+                &ctx,
+                &self.abelha.nome,
+                ancora,
+                &self.modelo.tarefas,
+                |p| no_escopo.contains(&p),
+                &self.abelha.conclusoes,
+                rodando,
+                agora,
+                rascunho,
+            );
+            if escreveu {
+                self.abelha.resumo_aberto = false;
+                self.falada.escrever(agora);
+            } else if let Some((tarefa, agente)) = clicada {
                 self.abrir_tarefa(tarefa, agente);
             } else if area.clicked_elsewhere() && !abelha_clicada {
                 self.abelha.resumo_aberto = false;

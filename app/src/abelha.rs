@@ -176,7 +176,10 @@ pub fn linha_de_estado<'a>(estado: Estado, tarefas: impl Iterator<Item = &'a Tar
 
 /// Resumo aberto ao clicar na abelha: uma linha por agente que precisa de
 /// você (e por tarefa concluída), que leva à tarefa com foco nesse agente.
-/// Retorna a tarefa (e o agente) clicados e a resposta da área, para fechar ao clicar fora.
+/// Com `rascunho`, embaixo vai uma caixa para escrever à abelha (um comando
+/// ou, com a pergunta livre ligada, uma pergunta); Enter manda.
+/// Retorna a tarefa (e o agente) clicados, se a frase escrita foi mandada e
+/// a resposta da área, para fechar ao clicar fora.
 #[allow(clippy::too_many_arguments)]
 pub fn resumo(
     ctx: &egui::Context,
@@ -187,8 +190,10 @@ pub fn resumo(
     conclusoes: &[Conclusao],
     agentes_rodando: bool,
     agora: f64,
-) -> (Option<(i64, Option<i64>)>, egui::Response) {
+    rascunho: Option<&mut String>,
+) -> (Option<(i64, Option<i64>)>, bool, egui::Response) {
     let mut escolhida = None;
+    let mut escreveu = false;
     let area = egui::Area::new(Id::new("resumo-abelha")).order(Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(ancora).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(cores().superficie_alta).corner_radius(crate::tema::RAIO_SUPERFICIE).inner_margin(14).show(ui, |ui| {
             ui.set_width(360.0);
@@ -324,7 +329,40 @@ pub fn resumo(
             if vazio {
                 ui.label(RichText::new("Nada precisa de você agora.").color(cores().suave));
             }
+            if let Some(texto) = rascunho {
+                ui.add_space(8.0);
+                escreveu = caixa_para_a_abelha(ui, nome, texto);
+            }
         });
     });
-    (escolhida, area.response)
+    (escolhida, escreveu, area.response)
+}
+
+/// A caixa do resumo para escrever à abelha; devolve `true` quando mandou.
+fn caixa_para_a_abelha(ui: &mut egui::Ui, nome: &str, texto: &mut String) -> bool {
+    let mut mandar = false;
+    ui.horizontal(|ui| {
+        let largura = ui.available_width() - 34.0;
+        let campo = egui::Frame::new()
+            .fill(crate::tema::fundo_campo(cores(), false))
+            .stroke(egui::Stroke::new(1.0, cores().borda))
+            .corner_radius(crate::tema::RAIO_CONTROLE)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(texto)
+                        .id(Id::new("pergunta-abelha"))
+                        .frame(egui::Frame::NONE)
+                        .desired_width(largura - 18.0)
+                        .char_limit(500)
+                        .font(egui::FontId::proportional(13.0))
+                        .hint_text(RichText::new(format!("Pergunte ou peça à {nome}…")).color(cores().suave)),
+                )
+            })
+            .inner;
+        let enter = campo.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let botao = crate::tema::botao_icone(ui, crate::tema::Icone::Proximo, 22.0).on_hover_text("Mandar");
+        mandar = (enter || botao.clicked()) && !texto.trim().is_empty();
+    });
+    mandar
 }

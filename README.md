@@ -89,6 +89,8 @@ Em Ajustes, **Comandos falados e voz da abelha** liga cada item à parte; tudo v
 
 A **voz da abelha** fala a resposta com uma voz feminina em português (Kokoro, voz pf_dora), com um brilho e um eco curto opcionais. Ligar mostra o tamanho (104 MB) e o núcleo baixa uma vez o modelo, a voz e o ONNX Runtime das fontes oficiais, conferidos pelo SHA-256 (por enquanto, só no Linux x86-64). **Ouvir o nome** deixa a abelha fixa ouvindo o nome dela ("Colmeia, o que espera por mim?"), com o ponto vermelho do microfone sempre nela e a sensibilidade de 1 a 9. "Colmeia" já vem reconhecido; outro nome aprende com 3 ou 4 gravações feitas ali, que viram referências (não áudio). Tudo fica no `colmeia-voz`, que abre só quando usado ([decisão 0015](docs/decisoes/0015-comandos-falados-e-voz-da-abelha.md)).
 
+A **pergunta livre com IA** é uma opção à parte em Ajustes, desligada porque usa tokens. Ligada, o que não for um dos comandos vira uma pergunta sobre o andamento ("o que eu fiz hoje?", "o que falta na sprint?"), falada ou escrita na caixa do resumo da abelha. O núcleo manda ao Claude Code, num pedido só e sem ferramentas, a pergunta e um retrato curto do perfil: as tarefas com o estado, os agentes, as frases da reunião e o que aconteceu hoje, nunca o terminal, senhas ou bancos. A resposta, curta, aparece no balão e é falada com a voz da abelha ligada. Nada disso é guardado ([decisão 0016](docs/decisoes/0016-pergunta-livre-com-ia.md)).
+
 ### Histórico, daily e sprint
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
