@@ -36,6 +36,8 @@ func (n *nucleoFalso) Pedir(ctx context.Context, metodo, caminho string, corpo a
 		return 200, []byte(`{"lousa":3,"elementos":[{"id":1,"tipo":"nota","texto":"Fluxo da tela"}]}`), nil
 	case caminho == "/v1/agente/lousa/elementos":
 		return 200, []byte(`{"lousa":3,"ids":[7,8,9],"refs":{"a":7,"b":8}}`), nil
+	case caminho == "/v1/agente/coluna":
+		return 200, []byte(`{"tarefa":1,"coluna":"concluido"}`), nil
 	case caminho == "/v1/agente/bancos":
 		return 200, []byte(`{"conexoes":[{"id":4,"nome":"loja-web-dev","tipo":"postgres","banco":"loja"}]}`), nil
 	case caminho == "/v1/agente/bancos/4/consultas":
@@ -136,7 +138,7 @@ func TestServidorMCP(t *testing.T) {
 	for _, f := range ferramentas {
 		nomes = append(nomes, f.(map[string]any)["name"].(string))
 	}
-	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,listar_bancos,consultar_banco" {
+	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,mover_tarefa,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,listar_bancos,consultar_banco" {
 		t.Errorf("ferramentas: %v", nomes)
 	}
 
@@ -168,6 +170,28 @@ func TestServidorMCP(t *testing.T) {
 	}
 	if corpo := nucleo.corpos[len(nucleo.corpos)-1].(map[string]any); corpo["anexar"] != true {
 		t.Errorf("captura anexa por padrão: %v", corpo)
+	}
+
+	// Mover a tarefa: só Revisão ou Concluído, sem escolher outra tarefa.
+	if texto, erro := resultado(t, c.chamar(15, "mover_tarefa", `{"coluna":"concluido"}`)); erro || !strings.Contains(texto, "Concluído") {
+		t.Errorf("mover_tarefa: %q %v", texto, erro)
+	}
+	if p := nucleo.pedidos[len(nucleo.pedidos)-1]; p != "POST /v1/agente/coluna" {
+		t.Errorf("pedido de mover: %s", p)
+	}
+	antes = len(nucleo.pedidos)
+	for _, ruim := range []string{`{}`, `{"coluna":"concluido","tarefa":2}`, `{"coluna":5}`} {
+		if texto, erro := resultado(t, c.chamar(16, "mover_tarefa", ruim)); !erro {
+			t.Errorf("mover_tarefa aceitou %s: %q", ruim, texto)
+		}
+	}
+	if len(nucleo.pedidos) != antes {
+		t.Errorf("argumentos ruins chegaram ao núcleo: %v", nucleo.pedidos[antes:])
+	}
+	for _, f := range ferramentas {
+		if f := f.(map[string]any); f["name"] == "mover_tarefa" && !strings.Contains(f["description"].(string), "SOMENTE quando o usuário pedir") {
+			t.Errorf("a descrição precisa dizer que é só a pedido: %v", f["description"])
+		}
 	}
 
 	// A lousa da tarefa: ler e acrescentar (com refs e ligações).

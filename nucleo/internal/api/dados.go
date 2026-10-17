@@ -23,6 +23,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/perfis/{id}", s.atualizarPerfil)
 	mux.HandleFunc("GET /v1/perfis/{id}/quadro", s.quadro)
 	mux.HandleFunc("GET /v1/perfis/{id}/eventos", s.eventos)
+	mux.HandleFunc("POST /v1/perfis/{id}/janela", s.minimizarJanela)
 	mux.HandleFunc("POST /v1/perfis/{id}/abrir", s.pedirAbertura)
 	mux.HandleFunc("GET /v1/perfis/{id}/contas", s.listarContas)
 	mux.HandleFunc("PUT /v1/perfis/{id}/contas", s.definirContas)

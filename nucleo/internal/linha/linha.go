@@ -190,6 +190,7 @@ type Item struct {
 	quando      time.Time
 	titulo      string
 	coluna      string // coluna final de um movimento
+	peloAgente  bool   // o agente moveu a pedido da usuária
 	ferramenta  string
 	trabalhando int64
 	// Sessão que terminou bem: o agente ("Claude Code (dev)") e o tempo que
@@ -797,17 +798,29 @@ func (m *montador) atualizada(e dados.Evento, quando time.Time, d conteudo, t ta
 	if i, ok := m.movendo[tarefa]; ok && quando.Sub(m.itens[i].quando) <= juntarMovimentos && !m.itens[i].descartado {
 		item := &m.itens[i]
 		item.quando, item.Momento, item.Evento, item.coluna = quando, e.Momento, e.ID, colunaNova
+		item.peloAgente = d.Origem == dados.OrigemAgente
 		m.textoMovimento(item, tarefa, projeto)
 		return
 	}
 	item := m.novo(e, quando, TipoMoveu)
 	item.coluna = colunaNova
+	item.peloAgente = d.Origem == dados.OrigemAgente
 	m.textoMovimento(item, tarefa, projeto)
 	m.movendo[tarefa] = len(m.itens) - 1
 }
 
 func (m *montador) textoMovimento(item *Item, tarefa, projeto int64) {
 	item.titulo = m.titulo(tarefa)
+	if item.peloAgente {
+		onde := cmpOr(nomesColuna[item.coluna], item.coluna)
+		item.Tipo = TipoMoveu
+		if item.coluna == "concluido" {
+			item.Tipo = TipoConcluiu
+		}
+		item.Texto = m.cita(tarefa, projeto) + " foi para " + onde + ", movida pelo agente a pedido."
+		item.Curto = "Foi para " + onde + ", movida pelo agente a pedido."
+		return
+	}
 	if item.coluna == "concluido" {
 		item.Tipo = TipoConcluiu
 		item.Texto = "Concluiu " + m.cita(tarefa, projeto) + "."

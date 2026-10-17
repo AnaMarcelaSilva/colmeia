@@ -1,6 +1,7 @@
 package comandovoz
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -312,5 +313,52 @@ func TestSemChamado(t *testing.T) {
 	}
 	if got := SemChamado("Zuzu, como foi o dia?", "Zuzu"); got != "como foi o dia?" {
 		t.Errorf("outro nome: %q", got)
+	}
+}
+
+func TestVocabularioTemONomeOsProjetosEAsTarefasAbertasPrimeiro(t *testing.T) {
+	q := Quadro{
+		Projetos: []Projeto{{ID: 1, Nome: "loja-web", Execucoes: []Execucao{{ID: 1, Nome: "servidor"}}}, {ID: 2, Nome: "api-pedidos"}},
+		Tarefas: []Tarefa{
+			{ID: 1, ProjetoID: 1, Titulo: "Cupom de desconto", Coluna: "concluido"},
+			{ID: 2, ProjetoID: 1, Titulo: "Ajustar   o cache", Coluna: "trabalhando"},
+			{ID: 3, ProjetoID: 2, Titulo: "Login com Google", Coluna: "revisao"},
+		},
+	}
+	v := Vocabulario("Zuzu", q)
+	for _, quer := range []string{"Zuzu, rodar o projeto na Colmeia.", "encerrar a tarefa", "Projetos: loja-web, servidor, api-pedidos.", "Tarefas: Ajustar o cache, Login com Google, Cupom de desconto."} {
+		if !strings.Contains(v, quer) {
+			t.Errorf("faltou %q em %q", quer, v)
+		}
+	}
+	if v := Vocabulario("", Quadro{}); !strings.HasPrefix(v, "Colmeia, rodar o projeto.") || strings.Contains(v, "Projetos") || strings.Contains(v, "na Colmeia") {
+		t.Errorf("sem nome e sem quadro: %q", v)
+	}
+}
+
+func TestVocabularioCabeNoLimiteSemCortarNome(t *testing.T) {
+	var q Quadro
+	for i := 0; i < 200; i++ {
+		q.Tarefas = append(q.Tarefas, Tarefa{ID: int64(i), Titulo: fmt.Sprintf("Tarefa de exemplo número %d", i), Coluna: "trabalhando"})
+	}
+	v := Vocabulario("Colmeia", q)
+	if len(v) > LimiteVocabulario {
+		t.Fatalf("passou do limite: %d", len(v))
+	}
+	if !strings.HasSuffix(v, ".") || strings.HasSuffix(v, ", .") {
+		t.Errorf("o fim ficou cortado: %q", v[len(v)-40:])
+	}
+	ultima := v[strings.LastIndex(v, ", ")+2 : len(v)-1]
+	if !strings.HasPrefix(ultima, "Tarefa de exemplo número ") {
+		t.Errorf("a última tarefa ficou pela metade: %q", ultima)
+	}
+}
+
+func TestMotivoDoAgenteSemOQueSobrando(t *testing.T) {
+	if s := comMotivo(Agente{Nome: "Claude Code", Motivo: "esperando resposta"}); s != "Claude Code, esperando resposta" {
+		t.Errorf("%q", s)
+	}
+	if s := comMotivo(Agente{Nome: "Claude Code", Motivo: "pede aprovação"}); s != "Claude Code, que pede aprovação" {
+		t.Errorf("%q", s)
 	}
 }

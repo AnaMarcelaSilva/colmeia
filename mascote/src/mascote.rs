@@ -5,6 +5,7 @@
 
 use eframe::egui::{Color32, Painter, Pos2, Rect, vec2};
 
+use crate::fone::{self, Fone};
 use crate::modelos;
 use crate::pincel::{Pincel, aleatorio};
 
@@ -114,13 +115,29 @@ pub(crate) const ROXO_CLARO: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
 pub(crate) const VERDE: Color32 = Color32::from_rgb(0x6f, 0xd4, 0x9b);
 pub(crate) const AMBAR: Color32 = Color32::from_rgb(0xf1, 0xb6, 0x5f);
 
+/// O que a abelha veste além dela: o fone com o microfone aberto e, onde
+/// quem desenha já mostra o aviso (a abelha fixa), sem o balão do "!".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Acessorios {
+    pub fone: Option<Fone>,
+    pub sem_aviso: bool,
+}
+
 /// Desenha a abelha `modelo` no estado `estado`, centrada em `centro`, num
 /// quadrado de lado `tamanho`.
 pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, estado: Estado, t: Tempo) {
+    desenhar_com(painter, centro, tamanho, modelo, estado, t, Acessorios::default());
+}
+
+/// Como `desenhar`, com os acessórios.
+pub fn desenhar_com(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, estado: Estado, t: Tempo, a: Acessorios) {
     let base = Pincel { p: painter, c: centro, u: tamanho / 100.0, tinta: None };
+    let corpo = |p: Pincel| corpo(p, modelo, estado, t, a.fone);
     if estado != Estado::Bugado {
-        corpo(base, modelo, estado, t);
-        extras(base, estado, t);
+        corpo(base);
+        if !(a.sem_aviso && estado == Estado::Aguardando) {
+            extras(base, estado, t);
+        }
         return;
     }
 
@@ -130,8 +147,8 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
     let forte = t.total % 0.9 < 0.3;
     let intensidade = if forte { 1.0 } else { 0.25 };
     let deslocamento = (2.0 + 3.0 * aleatorio(semente, 0)) * intensidade;
-    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(255, 60, 90, 120)), ..base.movido(-deslocamento, 0.0) }, modelo, estado, t);
-    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(60, 230, 255, 120)), ..base.movido(deslocamento, 0.0) }, modelo, estado, t);
+    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(255, 60, 90, 120)), ..base.movido(-deslocamento, 0.0) });
+    corpo(Pincel { tinta: Some(Color32::from_rgba_unmultiplied(60, 230, 255, 120)), ..base.movido(deslocamento, 0.0) });
 
     let area = Rect::from_center_size(centro, vec2(tamanho * 1.6, tamanho * 1.4));
     let faixas = 9;
@@ -140,7 +157,7 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
         let faixa = Rect::from_min_size(area.min + vec2(0.0, i as f32 * altura), vec2(area.width(), altura));
         let desvio = if aleatorio(semente, i + 10) > 0.55 { (aleatorio(semente, i + 30) - 0.5) * 18.0 * intensidade } else { 0.0 };
         let recorte = painter.with_clip_rect(faixa.intersect(painter.clip_rect()));
-        corpo(Pincel { p: &recorte, ..base.movido(desvio, 0.0) }, modelo, estado, t);
+        corpo(Pincel { p: &recorte, ..base.movido(desvio, 0.0) });
     }
 
     // Linhas de chiado atravessando o mascote.
@@ -153,7 +170,7 @@ pub fn desenhar(painter: &Painter, centro: Pos2, tamanho: f32, modelo: Modelo, e
     }
 }
 
-fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo) {
+fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo, fone: Option<Fone>) {
     let tt = t.total;
     let pulo = match estado {
         Estado::Dormindo => (tt * 1.2).sin() * 1.0,
@@ -174,6 +191,10 @@ fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo) {
         Modelo::Redonda => modelos::redonda::desenhar(p, estado, t),
         Modelo::Favo => modelos::favo::desenhar(p, estado, t),
         Modelo::Zangao => modelos::zangao::desenhar(p, estado, t),
+    }
+    // O fone vai junto com o corpo (no pulo e na quebra do bugado).
+    if let Some(f) = fone {
+        fone::desenhar(p, modelo, f);
     }
 }
 
@@ -337,11 +358,13 @@ mod testes {
     fn todo_modelo_desenha_todo_estado_dentro_do_quadro() {
         let ctx = Context::default();
         let limite = Rect::from_center_size(pos2(200.0, 200.0), vec2(172.0, 172.0));
-        for modelo in Modelo::TODOS {
+        let acessorios =
+            [Acessorios::default(), Acessorios { fone: Some(Fone::Ouvindo), sem_aviso: true }, Acessorios { fone: Some(Fone::Esperando), sem_aviso: false }];
+        for (modelo, a) in Modelo::TODOS.into_iter().flat_map(|m| acessorios.map(|a| (m, a))) {
             for estado in Estado::TODOS {
                 for total in [0.0, 0.4, 1.7, 3.3] {
                     let mut saida = ctx.run_ui(Default::default(), |ui| {
-                        desenhar(ui.painter(), pos2(200.0, 200.0), 100.0, modelo, estado, Tempo { total, no_estado: total });
+                        desenhar_com(ui.painter(), pos2(200.0, 200.0), 100.0, modelo, estado, Tempo { total, no_estado: total }, a);
                     });
                     saida.textures_delta.clear();
                     assert!(saida.shapes.len() > 10, "{modelo:?} {estado:?}: só {} formas", saida.shapes.len());

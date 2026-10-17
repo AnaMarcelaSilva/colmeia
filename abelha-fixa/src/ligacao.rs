@@ -21,6 +21,20 @@ pub enum Mensagem {
     Fora,
     /// O atalho global dos comandos falados foi apertado.
     Atalho,
+    /// Quantas janelas da Colmeia do perfil estão à vista (abertas e não
+    /// minimizadas): com alguma, a abelha se esconde.
+    Janelas(usize),
+}
+
+/// As janelas à vista, no olá e no aviso "tela.janelas".
+fn janelas_visiveis(texto: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(texto).ok()?;
+    let n = match v["tipo"].as_str()? {
+        "tela.janelas" => v["visiveis"].as_u64()?,
+        "ola" => v["janelas_visiveis"].as_u64().unwrap_or(0),
+        _ => return None,
+    };
+    Some(n as usize)
 }
 
 const ESPERA_MAXIMA: Duration = Duration::from_secs(30);
@@ -55,6 +69,12 @@ fn ouvir(perfil_id: i64, ctx: &egui::Context, envio: &Sender<Mensagem>) -> bool 
             Ok(Message::Close(_)) | Err(_) => return true,
             Ok(_) => continue,
         };
+        if let Some(n) = janelas_visiveis(&texto) {
+            if envio.send(Mensagem::Janelas(n)).is_err() {
+                return true;
+            }
+            ctx.request_repaint();
+        }
         let Ok(evento) = serde_json::from_str::<Evento>(&texto) else {
             continue;
         };
@@ -145,4 +165,19 @@ pub fn abrir_colmeia(perfil: i64, tarefa: i64, agente: Option<i64>) {
 /// desliga a opção na janela). Sem o núcleo, a abelha sai do mesmo jeito.
 pub fn desafixar(perfil: i64) -> bool {
     canal::pedir_com_corpo("PATCH", &format!("/v1/perfis/{perfil}"), Some(r#"{"abelha_fixa":false}"#)).is_ok_and(|(s, _)| s == 200)
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn janelas_a_vista_no_ola_e_no_aviso() {
+        assert_eq!(janelas_visiveis(r#"{"tipo":"ola","seq":3,"janelas_visiveis":2}"#), Some(2));
+        // Um núcleo antigo não manda: nenhuma (a abelha aparece).
+        assert_eq!(janelas_visiveis(r#"{"tipo":"ola","seq":3}"#), Some(0));
+        assert_eq!(janelas_visiveis(r#"{"tipo":"tela.janelas","seq":9,"visiveis":0}"#), Some(0));
+        assert_eq!(janelas_visiveis(r#"{"tipo":"tarefa.atualizada","seq":9}"#), None);
+        assert_eq!(janelas_visiveis("lixo"), None);
+    }
 }

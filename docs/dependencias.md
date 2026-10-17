@@ -40,7 +40,7 @@ O ditado, os comandos falados e a voz da abelha ficam num programa à parte ([de
 | dasp_sample, futures, num-derive, enum-primitive-derive, mio | | MIT OR Apache-2.0, MIT | Dependências do cpal e do pulseaudio |
 | bindgen, cmake, clang-sys, fs_extra (só na compilação) | | BSD-3-Clause, MIT OR Apache-2.0, Apache-2.0, MIT | Compilar o whisper.cpp e gerar a ligação |
 
-O Unlicense (whisper-rs) põe o código em domínio público, compatível com MIT e Apache-2.0. O modelo (`ggml-base.bin`, os pesos do Whisper da OpenAI convertidos pelo whisper.cpp) é MIT e não vai no binário nem no repositório: o núcleo baixa quando você liga o ditado (ou os comandos falados).
+O Unlicense (whisper-rs) põe o código em domínio público, compatível com MIT e Apache-2.0. Os modelos (`ggml-base.bin` e, se você escolher, `ggml-small.bin`, os pesos do Whisper da OpenAI convertidos pelo whisper.cpp) são MIT e não vão no binário nem no repositório: o núcleo baixa quando você liga o ditado (ou os comandos falados).
 
 ### A voz da abelha e o ouvir o nome
 

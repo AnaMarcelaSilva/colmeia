@@ -14,12 +14,16 @@ use std::time::{Duration, Instant};
 use crate::audio::{self, Microfone};
 use crate::fala::{self, Aviso, Voz};
 use crate::nome::{self, Detector, Referencias};
-use crate::pausa::{Pausa, Situacao};
-use crate::protocolo::{self, Comando, Evento};
+use crate::pausa::{Pausa, Situacao, Tempos};
+use crate::protocolo::{self, Comando, Contexto, Evento};
 use crate::transcrever::{self, Transcritor};
 
 /// Sem pedidos por este tempo, o processo sai e o modelo sai da memória.
 pub const PARADO_PADRAO: Duration = Duration::from_secs(120);
+/// O teste do nome em Ajustes não deixa o microfone aberto esquecido.
+const LIMITE_TESTE: Duration = Duration::from_secs(60);
+/// No teste, uma nota a cada 200 ms basta para a barra andar.
+const NOTA_A_CADA: Duration = Duration::from_millis(200);
 /// Depois da voz da abelha, um instante sem ouvir o nome (o eco dela).
 const SURDO_DEPOIS_DE_FALAR: Duration = Duration::from_millis(600);
 /// Ouvindo o nome, o último segundo fica guardado (na memória): o comando
@@ -109,6 +113,15 @@ enum Escuta {
     Comando(Vec<f32>, Pausa),
     /// Uma gravação do nome: até a pausa.
     Amostra(Vec<f32>, Pausa),
+    /// O teste do nome em Ajustes: só a nota, sem abrir comando.
+    Teste(Box<Teste>),
+}
+
+struct Teste {
+    detector: Detector,
+    limite: u8,
+    comecou: Instant,
+    ultima: Instant,
 }
 
 fn emitir(evento: &Evento) -> bool {
@@ -134,13 +147,12 @@ fn linhas() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get()).div_ceil(2).clamp(1, 4)
 }
 
-/// Um comando falado: 0,9 s de pausa encerra; sem fala em 5 s, desiste; 12 s no máximo.
-fn pausa_de_comando() -> Pausa {
-    Pausa::nova(900, 5000, 12_000)
-}
-
 struct Processo {
     opcoes: Opcoes,
+    /// O que vale para a próxima transcrição (veja `Contexto`).
+    modelo: PathBuf,
+    prompt: String,
+    pausa_ms: u32,
     envio: Sender<Entrada>,
     microfone: Option<Microfone>,
     escuta: Escuta,
@@ -165,6 +177,9 @@ pub fn rodar(opcoes: Opcoes) -> ExitCode {
     }
     let agora = Instant::now();
     let mut p = Processo {
+        modelo: opcoes.modelo.clone(),
+        prompt: String::new(),
+        pausa_ms: Tempos::PAUSA_PADRAO,
         opcoes,
         envio,
         microfone: None,
@@ -206,6 +221,15 @@ impl Processo {
             };
             if !continua {
                 return ExitCode::FAILURE;
+            }
+            // Ouvindo o nome, o microfone manda um bloco a cada 100 ms e a espera
+            // nunca chega ao fim: o tempo parado é conferido aqui também, senão o
+            // Whisper (e o processo) não saíam nunca da memória.
+            if !matches!(self.escuta, Escuta::Ditado(_))
+                && self.ultimo_uso.elapsed() >= self.opcoes.parado
+                && let Some(codigo) = self.parado()
+            {
+                return codigo;
             }
             if let Err(mensagem) = self.ajustar_microfone() {
                 self.escuta = Escuta::Nada;
@@ -265,8 +289,30 @@ impl Processo {
 
     fn garantir_whisper(&mut self) {
         if self.whisper.is_none() {
-            self.whisper = Some(Modelo::carregar(self.opcoes.modelo.clone()));
+            self.whisper = Some(Modelo::carregar(self.modelo.clone()));
         }
+    }
+
+    /// O que veio com o pedido: outro modelo tira o carregado da memória.
+    fn aplicar(&mut self, c: Contexto) {
+        if let Some(m) = c.modelo
+            && m != self.modelo
+        {
+            self.modelo = m;
+            if self.whisper.take().is_some() {
+                audio::devolver_memoria();
+            }
+        }
+        if let Some(p) = c.prompt {
+            self.prompt = p;
+        }
+        if let Some(ms) = c.pausa_ms {
+            self.pausa_ms = ms;
+        }
+    }
+
+    fn pausa_de_comando(&self) -> Pausa {
+        Pausa::nova(Tempos::de_comando(self.pausa_ms))
     }
 
     /// Abre o microfone na hora (para o "ouvindo" sair só com ele aberto).
@@ -283,15 +329,26 @@ impl Processo {
 
     fn atender(&mut self, c: Comando) -> bool {
         match c {
-            Comando::Ouvir { .. } | Comando::Amostra if !matches!(self.escuta, Escuta::Nada) => true,
-            Comando::Ouvir { ate_silencio } => {
+            Comando::Ouvir { .. } | Comando::Amostra | Comando::TestarNome { .. } if !matches!(self.escuta, Escuta::Nada) => true,
+            Comando::Ouvir { ate_silencio, contexto } => {
+                self.aplicar(contexto);
                 self.garantir_whisper();
                 if let Some(v) = &self.voz {
                     v.calar();
                 }
-                self.comecar(if ate_silencio { Escuta::Comando(Vec::new(), pausa_de_comando()) } else { Escuta::Ditado(Vec::new()) })
+                let escuta = if ate_silencio { Escuta::Comando(Vec::new(), self.pausa_de_comando()) } else { Escuta::Ditado(Vec::new()) };
+                self.comecar(escuta)
             }
-            Comando::Amostra => self.comecar(Escuta::Amostra(Vec::new(), Pausa::nova(500, 4000, 3000))),
+            Comando::Amostra => self.comecar(Escuta::Amostra(Vec::new(), Pausa::nova(Tempos::de_nome()))),
+            Comando::TestarNome { referencias, sensibilidade } => match ler_referencias(referencias) {
+                Ok(r) => {
+                    let agora = Instant::now();
+                    let detector = Detector::novo(&r, sensibilidade);
+                    let limite = nome::nota(nome::limiar(sensibilidade));
+                    self.comecar(Escuta::Teste(Box::new(Teste { detector, limite, comecou: agora, ultima: agora })))
+                }
+                Err(mensagem) => emitir(&Evento::Erro { mensagem }),
+            },
             // O áudio vai embora junto com a gravação.
             Comando::Cancelar => {
                 self.escuta = Escuta::Nada;
@@ -300,6 +357,7 @@ impl Processo {
             Comando::Parar => match std::mem::replace(&mut self.escuta, Escuta::Nada) {
                 Escuta::Ditado(audio) | Escuta::Comando(audio, _) => self.transcrever(audio),
                 Escuta::Amostra(audio, _) => self.guardar_amostra(audio),
+                Escuta::Teste(_) => true,
                 Escuta::Nada => emitir(&Evento::Erro { mensagem: "O microfone não estava aberto.".into() }),
             },
             Comando::Falar { texto, efeito } => {
@@ -323,12 +381,9 @@ impl Processo {
                 }
                 true
             }
-            Comando::Vigiar { referencias, sensibilidade } => {
-                let r = match referencias {
-                    Some(caminho) => Referencias::ler(&caminho),
-                    None => Ok(Referencias::padrao()),
-                };
-                match r {
+            Comando::Vigiar { referencias, sensibilidade, contexto } => {
+                self.aplicar(contexto);
+                match ler_referencias(referencias) {
                     Ok(r) => {
                         self.vigia = Some(Detector::novo(&r, sensibilidade));
                         match self.ajustar_microfone() {
@@ -394,6 +449,20 @@ impl Processo {
                     },
                 }
             }
+            Escuta::Teste(teste) => {
+                let ouviu = teste.detector.alimentar(&bloco).is_some();
+                let agora = Instant::now();
+                if agora.duration_since(teste.comecou) > LIMITE_TESTE {
+                    self.escuta = Escuta::Nada;
+                    return emitir(&Evento::Erro { mensagem: "O teste parou sozinho depois de 1 minuto.".into() });
+                }
+                if !ouviu && agora.duration_since(teste.ultima) < NOTA_A_CADA {
+                    return true;
+                }
+                teste.ultima = agora;
+                let nota = nome::nota(teste.detector.tirar_melhor());
+                emitir(&Evento::Nota { nota, limite: teste.limite, ouviu })
+            }
             Escuta::Nada => {
                 // Ouvindo o nome: nada enquanto a própria abelha fala.
                 if self.falando || Instant::now() < self.surdo_ate {
@@ -410,7 +479,7 @@ impl Processo {
                 // tira o nome do começo); a pausa conta só o que veio depois do nome.
                 let mut fala: Vec<f32> = self.antes.drain(..).collect();
                 fala.extend_from_slice(&bloco);
-                let mut pausa = pausa_de_comando();
+                let mut pausa = self.pausa_de_comando();
                 pausa.alimentar(&bloco[onde..]);
                 self.escuta = Escuta::Comando(fala, pausa);
                 emitir(&Evento::Chamado)
@@ -469,7 +538,7 @@ impl Processo {
         }
         self.garantir_whisper();
         let resultado = match self.whisper.as_mut() {
-            Some(m) => m.pronto().and_then(|t| t.transcrever(&audio)),
+            Some(m) => m.pronto().and_then(|t| t.transcrever(&audio, &self.prompt)),
             None => Err("O modelo de voz não abriu.".into()),
         };
         // Um modelo que falhou não fica: o próximo pedido tenta de novo.
@@ -481,6 +550,14 @@ impl Processo {
             Ok(texto) => Evento::Texto { texto },
             Err(mensagem) => Evento::Erro { mensagem },
         })
+    }
+}
+
+/// As referências do arquivo (com as sintéticas, se for o nome padrão) ou só as sintéticas.
+fn ler_referencias(caminho: Option<PathBuf>) -> Result<Referencias, String> {
+    match caminho {
+        Some(c) => Referencias::ler(&c).map(Referencias::com_padrao),
+        None => Ok(Referencias::padrao()),
     }
 }
 

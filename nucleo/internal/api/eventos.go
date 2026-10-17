@@ -535,6 +535,14 @@ func (s *Servidor) eventos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer assinatura.Cancelar()
+	// Uma janela que abre ou fecha muda o que a abelha fixa faz (ela se esconde
+	// com a janela à vista); a abelha não conta.
+	if r.URL.Query().Get("quem") != "abelha" {
+		assinatura.Nomear(limitar(r.URL.Query().Get("janela"), 64))
+		s.avisarJanelas(id)
+		defer s.avisarJanelas(id)
+		defer assinatura.Cancelar()
+	}
 	// Sem InsecureSkipVerify: uma conexão com Origin de outro site é recusada.
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
@@ -555,7 +563,7 @@ func (s *Servidor) eventos(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	ola := map[string]any{"tipo": "ola", "seq": s.Avisos.Seq(), "nucleo": s.Versao}
+	ola := map[string]any{"tipo": "ola", "seq": s.Avisos.Seq(), "nucleo": s.Versao, "janelas_visiveis": s.Avisos.Visiveis(id)}
 	if s.AvisoHistorico != "" {
 		ola["aviso"] = s.AvisoHistorico
 	}
@@ -572,6 +580,41 @@ func (s *Servidor) eventos(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// avisarJanelas conta às telas do perfil (a abelha fixa) quantas janelas
+// estão à vista.
+func (s *Servidor) avisarJanelas(perfil int64) {
+	s.Avisos.PublicarAbelha(perfil, map[string]any{"tipo": "tela.janelas", "visiveis": s.Avisos.Visiveis(perfil)})
+}
+
+// minimizarJanela: a tela diz que minimizou (ou voltou).
+func (s *Servidor) minimizarJanela(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		Janela     string `json:"janela"`
+		Minimizada bool   `json:"minimizada"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if s.Avisos.Minimizar(id, pedido.Janela, pedido.Minimizada) {
+		s.avisarJanelas(id)
+	}
+	responderJSON(w, map[string]any{"visiveis": s.Avisos.Visiveis(id)})
+}
+
+// limitar corta um texto vindo de fora num tamanho máximo (em bytes).
+func limitar(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // quadro é o retrato do perfil numa resposta só: projetos, tarefas e agentes,

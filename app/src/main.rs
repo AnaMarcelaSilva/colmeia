@@ -221,6 +221,8 @@ struct Colmeia {
     /// O destaque do resumo e o Concluído de hoje.
     quadro: quadro::Quadro,
     sem_abelha: bool,
+    /// A janela estava minimizada no último quadro (o núcleo avisa a abelha fixa).
+    minimizada: bool,
     tema: tema::Escolha,
     favo: tema::Favo,
     gradiente: tema::Gradiente,
@@ -353,6 +355,7 @@ impl Colmeia {
             lateral: lateral::Lateral::default(),
             quadro: quadro::Quadro::default(),
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
+            minimizada: false,
             tema: escolha,
             favo: tema::Favo::default(),
             gradiente: tema::Gradiente::default(),
@@ -647,11 +650,11 @@ impl Colmeia {
                             api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() },
                         );
                     }
-                    if let (dados::Evento::VozModelo { pacote, estado, baixados, tamanho, erro, .. }, Some(Dialogo::Ditado(d))) = (&e, &mut self.dialogo)
-                        && pacote == "whisper"
-                    {
-                        d.modelo =
-                            api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() };
+                    if let (dados::Evento::VozModelo { pacote, estado, baixados, tamanho, erro, .. }, Some(Dialogo::Ditado(d))) = (&e, &mut self.dialogo) {
+                        d.modelos.progresso(
+                            pacote,
+                            api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() },
+                        );
                     }
                     if let dados::Evento::TelaAbrir { tarefa_id, agente_id, .. } = &e {
                         self.atender_abertura(*tarefa_id, *agente_id, ctx);
@@ -1841,7 +1844,7 @@ impl Colmeia {
         if let Some(Dialogo::Ditado(d)) = &mut self.dialogo {
             d.ligado = ligado;
             if ligado && let Ok(m) = api::estado_voz() {
-                d.modelo = m;
+                d.modelos.base = m;
             }
         }
         if !ligado {
@@ -1883,7 +1886,9 @@ impl Colmeia {
     fn alternar_ditado(&mut self, tarefa: i64, pelo_atalho: bool, ctx: &egui::Context) {
         if self.ditado.estado().ouvindo() {
             self.ditado.parar();
-        } else if let Err(e) = self.ditado.ouvir(ctx, tarefa, pelo_atalho) {
+        } else if let Some(perfil) = self.perfil.as_ref().map(|p| p.id)
+            && let Err(e) = self.ditado.ouvir(ctx, perfil, tarefa, pelo_atalho)
+        {
             let agora = ctx.input(|i| i.time);
             self.avisar(TipoAviso::Erro, e, agora);
         }
@@ -1957,6 +1962,19 @@ impl Colmeia {
         });
     }
 
+    /// O fone da abelha: o microfone aberto para um comando ou para o
+    /// ditado; com a janela à vista a abelha fixa se esconde, então o "ouvir o
+    /// nome" dela aparece aqui (o microfone aberto fica sempre à vista).
+    fn fone_da_abelha(&self) -> Option<mascote::Fone> {
+        if self.falada.ouvindo_comando() || self.ditado.estado().ouvindo() {
+            Some(mascote::Fone::Ouvindo)
+        } else if self.falada.microfone_aberto() || self.perfil.as_ref().is_some_and(|p| p.abelha_fixa && p.voz.voz_nome) {
+            Some(mascote::Fone::Esperando)
+        } else {
+            None
+        }
+    }
+
     /// A barra lateral deste quadro: o trilho e o painel (em `lateral.rs`),
     /// com o que a tela sabe agora.
     fn mostrar_lateral(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str, rodando: bool) -> lateral::Saida {
@@ -1980,7 +1998,7 @@ impl Colmeia {
             pode: self.pode_mudar(),
             rodando,
             linha,
-            microfone: self.falada.microfone_aberto(),
+            fone: self.fone_da_abelha(),
             // COLMEIA_SEM_ABELHA=1 desliga a abelha, como a opção por perfil.
             com_abelha: !self.sem_abelha,
             agora,
@@ -2039,7 +2057,8 @@ impl Colmeia {
                 Acao::AbelhaFixa(ligar) => self.fixar_abelha(ligar, ctx.input(|i| i.time)),
                 Acao::Ditado => {
                     let ligado = self.perfil.as_ref().is_some_and(|p| p.ditado);
-                    self.dialogo = Some(Dialogo::Ditado(dialogos::AjustesDitado::new(ligado)));
+                    let preferido = self.perfil.as_ref().map_or("base", |p| p.voz.voz_modelo.as_str());
+                    self.dialogo = Some(Dialogo::Ditado(dialogos::AjustesDitado::new(ligado, preferido)));
                 }
                 Acao::Proximo => self.proximo_que_precisa(),
                 Acao::Linha => self.alternar_linha(),
@@ -2976,6 +2995,14 @@ impl eframe::App for Colmeia {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let agora = ui.input(|i| i.time);
         self.medir(agora);
+        // Minimizar ou voltar chega como evento da janela (há um quadro nessa hora).
+        let minimizada = ui.input(|i| i.viewport().minimized.unwrap_or(false));
+        if minimizada != self.minimizada {
+            self.minimizada = minimizada;
+            if let Some(p) = &self.perfil {
+                eventos::avisar_minimizada(p.id, minimizada);
+            }
+        }
         let p = cores();
         let ctx = ui.ctx().clone();
         // Mede o atlas das letras antes de qualquer texto do quadro (o cache da lousa depende dele).
@@ -3076,6 +3103,7 @@ impl eframe::App for Colmeia {
 
         // O conteúdo vai num cartão solto da janela, à direita da barra
         // lateral (o trilho e, aberto, o painel do workspace).
+        self.lateral.com_conteudo(!self.modelo.projetos.is_empty() || matches!(self.tela, Tela::Banco));
         let largura = self.lateral.largura(&ctx);
         let cartao = tema::rect_cartao_principal(janela, largura);
         tema::cartao_principal(ui.painter(), cartao);

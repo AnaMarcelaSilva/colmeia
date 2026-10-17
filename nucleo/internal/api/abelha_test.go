@@ -126,3 +126,47 @@ func TestAbrirATarefaPelaAbelha(t *testing.T) {
 		t.Errorf("perfil que não existe: %d", status)
 	}
 }
+
+// A abelha fixa sabe quantas janelas estão à vista (para se esconder): ao
+// ligar, quando uma janela abre, minimiza, volta e fecha.
+func TestAbelhaSabeDasJanelasAVista(t *testing.T) {
+	srv := servidorComDados(t)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	abelha := ouvirAbelha(t, srv.URL, "1")
+	visiveis := func(n float64) func(map[string]any) bool {
+		return func(m map[string]any) bool { return m["tipo"] == "tela.janelas" && m["visiveis"] == n }
+	}
+
+	ctx, cancelar := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelar()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/perfis/1/eventos?janela=a1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abelha.esperar("a janela abriu", visiveis(1))
+	// Outra abelha (a mesma, reconectando) vê a janela já no olá.
+	ctx2, cancelar2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelar2()
+	outra, _, err := websocket.Dial(ctx2, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/perfis/1/eventos?quem=abelha", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &ouvinte{t, outra, ctx2}
+	if m := o.proxima(); m["tipo"] != "ola" || m["janelas_visiveis"] != 1.0 {
+		t.Errorf("olá da abelha: %v", m)
+	}
+	outra.CloseNow()
+
+	if status, r := pedir(t, "POST", srv.URL+"/v1/perfis/1/janela", map[string]any{"janela": "a1", "minimizada": true}); status != http.StatusOK || r["visiveis"] != 0.0 {
+		t.Fatalf("minimizar: %d %v", status, r)
+	}
+	abelha.esperar("minimizou", visiveis(0))
+	// Nome de outra janela não muda nada.
+	if _, r := pedir(t, "POST", srv.URL+"/v1/perfis/1/janela", map[string]any{"janela": "b2", "minimizada": false}); r["visiveis"] != 0.0 {
+		t.Errorf("outra janela: %v", r)
+	}
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/janela", map[string]any{"janela": "a1", "minimizada": false})
+	abelha.esperar("voltou", visiveis(1))
+	conn.CloseNow()
+	abelha.esperar("fechou", visiveis(0))
+}

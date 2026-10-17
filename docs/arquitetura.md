@@ -46,6 +46,9 @@ Perfis não se enxergam. Os eventos são a fonte de verdade: quadro, daily, spri
 | `POST /v1/perfis/{id}/abrir` | `{tarefa_id?, agente_id?}`: pede às janelas abertas do perfil que mostrem a tarefa (o evento `tela.abrir`, fora da corrente); responde `{janelas}`, sem contar a abelha fixa. Com 0, quem pediu abre o app (`colmeia --perfil N --tarefa M`). A tarefa e o agente têm de ser do perfil |
 | `GET /v1/perfis/{id}/quadro` | Retrato do perfil numa resposta só: `{seq, projetos, tarefas, agentes, pedidos, navegadores, aprovacoes, uso, frases}`, com o estado e o último fim de cada agente e os pedidos de consulta ao banco esperando você |
 | `GET /v1/perfis/{id}/eventos` | WebSocket de eventos do perfil (só do núcleo para a tela; veja abaixo) |
+| `POST /v1/perfis/{id}/janela` | `{janela, minimizada}`: a janela (o nome que ela deu em `eventos?janela=`) minimizou ou voltou; a abelha fixa (`eventos?quem=abelha`) recebe `tela.janelas` com quantas estão à vista e se esconde com alguma |
+| `GET /v1/perfis/{id}/voz/contexto` | O que vai com o pedido de ouvir: `{modelo, nome_modelo, prompt, pausa_ms}` (o Whisper do perfil, o vocabulário dele e a pausa que encerra um comando); 400 sem Whisper no disco |
+| `GET /v1/voz/small` · `POST /v1/perfis/{id}/voz/small/baixar` · `POST /v1/voz/small/cancelar` · `DELETE /v1/voz/small` | O Whisper small, como o base: baixado e conferido; pronto, vira o preferido do perfil que pediu |
 | `GET /v1/perfis/{id}/linha-do-tempo` | Dias do perfil, do mais novo ao mais antigo; `projeto=` ou `workspace=` (nunca os dois: 400; de outro perfil: 404) ou `tarefa=` (só os eventos dela, a aba Linha do tempo), `de=`/`ate=` (AAAA-MM-DD), `antes=` (paginação) e `limite=` (1 a 500, padrão 200) |
 | `GET /v1/perfis/{id}/resumo?tipo=daily` | Daily: `{periodo, ontem, hoje, texto, tempo_agentes}`; aceita `projeto=` ou `workspace=`. Com mais de um projeto no recorte, os blocos citam o projeto e o texto sai separado por projeto |
 | `GET /v1/perfis/{id}/resumo?tipo=sprint` | Sprint de `de` a `ate` (até 92 dias), ou `ultimos=N`, ou `mes=atual`; `formato=markdown` devolve `text/markdown` |
@@ -129,6 +132,7 @@ Rotas dos agentes (`/v1/agente/*`): só aceitam o token de um agente, e o token 
 | `POST /v1/agente/anexos` | `{caminho, legenda?}`: PNG ou JPEG de dentro da pasta da tarefa, aberto por `os.Root` |
 | `POST /v1/agente/navegador` | `{url}`: http, https ou `file://` de dentro da pasta (sem os arquivos sensíveis); abre sem tomar o foco |
 | `POST /v1/agente/navegador/captura` | `{anexar?, legenda?}`: o PNG reduzido a 1568 px (base64) e o id do anexo |
+| `POST /v1/agente/coluna` | `{coluna: "revisao"\|"concluido"}`: a tarefa do token vai para Revisão ou Concluído (a ferramenta `mover_tarefa`, só a pedido do usuário); vale como movimento seu e entra no histórico como "movida pelo agente a pedido"; outra coluna ou outra tarefa: 400 |
 | `POST /v1/agente/pedidos/{id}/concluir` | `{resumo?}`: só um pedido da tarefa do token; o resumo, se houver, complementa a nota |
 | `GET /v1/agente/lousa` | A lousa da tarefa do token: cada item com id, tipo, posição, tamanho, cor, título, texto, pontas e autor |
 | `GET /v1/agente/bancos` | As conexões do perfil com "Agentes podem pedir consultas": `{conexoes: [{id, nome, tipo, banco}]}`, sem host nem usuário |

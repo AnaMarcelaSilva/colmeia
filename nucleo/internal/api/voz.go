@@ -18,6 +18,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/comandovoz"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/voz"
 )
@@ -32,6 +33,8 @@ const (
 	ligarDitado   = "ditado"
 	ligarComandos = "comandos"
 	ligarAbelha   = "abelha"
+	// O Whisper small pronto passa a ser o preferido do perfil que o baixou.
+	ligarSmall = "small"
 )
 
 // quemBaixa são os perfis que pediram o download em andamento e o que cada
@@ -76,12 +79,16 @@ func (s *Servidor) iniciarVoz(mux *http.ServeMux) {
 	if s.Voz == nil {
 		s.Voz = voz.Novo(s.DirDados, voz.Base)
 	}
+	if s.VozSmall == nil {
+		s.VozSmall = voz.Novo(s.DirDados, voz.Small)
+	}
 	if s.Fala == nil {
 		s.Fala = voz.Novo(s.DirDados, voz.Kokoro...)
 	}
 	s.whisper = &pacoteVoz{nome: "whisper", g: s.Voz, ligas: []string{ligarDitado, ligarComandos}}
+	s.small = &pacoteVoz{nome: "small", g: s.VozSmall, ligas: []string{ligarSmall}}
 	s.kokoro = &pacoteVoz{nome: "kokoro", g: s.Fala, ligas: []string{ligarAbelha}}
-	for _, p := range []*pacoteVoz{s.whisper, s.kokoro} {
+	for _, p := range []*pacoteVoz{s.whisper, s.small, s.kokoro} {
 		p.g.AoMudar = func(e voz.Estado) {
 			for perfil := range p.quem.lista(false) {
 				s.Avisos.Publicar(perfil, map[string]any{"tipo": "voz.modelo", "pacote": p.nome, "estado": e.Estado, "baixados": e.Baixados, "tamanho": e.Tamanho, "erro": e.Erro})
@@ -92,6 +99,11 @@ func (s *Servidor) iniciarVoz(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/perfis/{id}/voz/baixar", s.baixarVoz)
 	mux.HandleFunc("POST /v1/voz/cancelar", s.cancelarVoz)
 	mux.HandleFunc("DELETE /v1/voz/modelo", s.removerVoz)
+	mux.HandleFunc("GET /v1/voz/small", s.estadoSmall)
+	mux.HandleFunc("POST /v1/perfis/{id}/voz/small/baixar", s.baixarSmall)
+	mux.HandleFunc("POST /v1/voz/small/cancelar", s.cancelarSmall)
+	mux.HandleFunc("DELETE /v1/voz/small", s.removerSmall)
+	mux.HandleFunc("GET /v1/perfis/{id}/voz/contexto", s.contextoVoz)
 	mux.HandleFunc("GET /v1/voz/fala", s.estadoFala)
 	mux.HandleFunc("POST /v1/perfis/{id}/voz/fala/baixar", s.baixarFala)
 	mux.HandleFunc("POST /v1/voz/fala/cancelar", s.cancelarFala)
@@ -103,6 +115,75 @@ func (s *Servidor) iniciarVoz(mux *http.ServeMux) {
 
 func (s *Servidor) estadoVoz(w http.ResponseWriter, _ *http.Request) {
 	responderJSON(w, s.Voz.Estado())
+}
+
+func (s *Servidor) estadoSmall(w http.ResponseWriter, _ *http.Request) {
+	responderJSON(w, s.VozSmall.Estado())
+}
+
+// baixarSmall baixa o Whisper small; pronto, ele vira o preferido do perfil.
+func (s *Servidor) baixarSmall(w http.ResponseWriter, r *http.Request) {
+	s.baixar(w, r, s.small, ligarSmall)
+}
+
+func (s *Servidor) cancelarSmall(w http.ResponseWriter, _ *http.Request) {
+	responderJSON(w, map[string]any{"cancelado": s.VozSmall.Cancelar()})
+}
+
+// whisperPronto: o ditado e os comandos precisam de um dos dois modelos.
+func (s *Servidor) whisperPronto() bool {
+	return s.Voz.Pronto() || s.VozSmall.Pronto()
+}
+
+// modeloDoPerfil é o Whisper que o perfil usa: o preferido, se estiver
+// baixado, ou o outro (com só o small no disco, o small). Vazio sem nenhum.
+func (s *Servidor) modeloDoPerfil(v dados.OpcoesVoz) (nome, caminho string) {
+	base, small := s.Voz, s.VozSmall
+	ordem := []struct {
+		nome string
+		g    *voz.Gerente
+	}{{"base", base}, {"small", small}}
+	if v.Modelo == "small" {
+		ordem[0], ordem[1] = ordem[1], ordem[0]
+	}
+	for _, o := range ordem {
+		if o.g.Pronto() {
+			return o.nome, o.g.Caminho()
+		}
+	}
+	return "", ""
+}
+
+// contextoVoz é o que a tela (ou a abelha) passa ao colmeia-voz ao abrir o
+// microfone: o modelo do perfil, o vocabulário para o Whisper (o nome da
+// abelha, os projetos e as tarefas) e a pausa que encerra um comando.
+func (s *Servidor) contextoVoz(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	p, err := s.Banco.Perfil(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	nome, caminho := s.modeloDoPerfil(p.OpcoesVoz)
+	if caminho == "" {
+		responderErro(w, dados.ErrInvalido{Motivo: "O modelo de voz não está baixado. Ligue a voz em Ajustes."})
+		return
+	}
+	q, err := s.quadroFalado(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{
+		"modelo":      caminho,
+		"nome_modelo": nome,
+		"prompt":      comandovoz.Vocabulario(p.MascoteNome, q),
+		"pausa_ms":    p.PausaMs,
+	})
 }
 
 // estadoFala: no sistema sem pacote conferido, "indisponivel".
@@ -187,6 +268,15 @@ func (s *Servidor) ligarVoz(ctx context.Context, perfil int64, o string) error {
 	if o == ligarDitado {
 		return s.Banco.DefinirDitado(ctx, perfil, true)
 	}
+	if o == ligarSmall {
+		p, err := s.Banco.Perfil(ctx, perfil)
+		if err != nil {
+			return err
+		}
+		v := p.OpcoesVoz
+		v.Modelo = "small"
+		return s.Banco.DefinirVoz(ctx, perfil, v)
+	}
 	p, err := s.Banco.Perfil(ctx, perfil)
 	if err != nil {
 		return err
@@ -209,28 +299,51 @@ func (s *Servidor) cancelarFala(w http.ResponseWriter, _ *http.Request) {
 	responderJSON(w, map[string]any{"cancelado": s.Fala.Cancelar()})
 }
 
-// removerVoz apaga o Whisper e desliga, em todos os perfis, o que precisa
-// dele: o ditado, os comandos falados e o "ouvir o nome".
+// removerVoz apaga o Whisper base; sem nenhum Whisper no disco, desliga em
+// todos os perfis o que precisa dele.
 func (s *Servidor) removerVoz(w http.ResponseWriter, r *http.Request) {
 	if !s.remover(w, s.Voz) {
 		return
 	}
-	perfis, err := s.Banco.PerfisComDitado(r.Context())
-	if err != nil {
-		responderErro(w, err)
-		return
-	}
-	for _, perfil := range perfis {
-		if err := s.Banco.DefinirDitado(r.Context(), perfil, false); err != nil {
-			responderErro(w, err)
-			return
-		}
-	}
-	if err := s.desligarEmTodos(r.Context(), func(v *dados.OpcoesVoz) { v.Comandos, v.OuvirNome = false, false }); err != nil {
+	if err := s.semWhisper(r.Context()); err != nil {
 		responderErro(w, err)
 		return
 	}
 	responderJSON(w, s.Voz.Estado())
+}
+
+// removerSmall apaga o Whisper small: quem o preferia volta ao base.
+func (s *Servidor) removerSmall(w http.ResponseWriter, r *http.Request) {
+	if !s.remover(w, s.VozSmall) {
+		return
+	}
+	if err := s.desligarEmTodos(r.Context(), func(v *dados.OpcoesVoz) { v.Modelo = "base" }); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if err := s.semWhisper(r.Context()); err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, s.VozSmall.Estado())
+}
+
+// semWhisper: sem nenhum dos dois modelos, desliga o ditado, os comandos
+// falados e o "ouvir o nome" em todos os perfis.
+func (s *Servidor) semWhisper(ctx context.Context) error {
+	if s.whisperPronto() {
+		return nil
+	}
+	perfis, err := s.Banco.PerfisComDitado(ctx)
+	if err != nil {
+		return err
+	}
+	for _, perfil := range perfis {
+		if err := s.Banco.DefinirDitado(ctx, perfil, false); err != nil {
+			return err
+		}
+	}
+	return s.desligarEmTodos(ctx, func(v *dados.OpcoesVoz) { v.Comandos, v.OuvirNome = false, false })
 }
 
 // removerFala apaga a voz da abelha e a desliga em todos os perfis.
@@ -277,7 +390,7 @@ func (s *Servidor) desligarEmTodos(ctx context.Context, mudar func(*dados.Opcoes
 
 // definirDitado é a parte do PATCH do perfil: ligar exige o modelo no disco.
 func (s *Servidor) definirDitado(ctx context.Context, perfil int64, ligado bool) error {
-	if ligado && !s.Voz.Pronto() {
+	if ligado && !s.whisperPronto() {
 		return dados.ErrInvalido{Motivo: "Baixe o modelo de voz antes de ligar o ditado."}
 	}
 	return s.Banco.DefinirDitado(ctx, perfil, ligado)
@@ -285,16 +398,19 @@ func (s *Servidor) definirDitado(ctx context.Context, perfil int64, ligado bool)
 
 // mudancaVoz são os campos de voz do PATCH do perfil (só os enviados mudam).
 type mudancaVoz struct {
-	Comandos      *bool `json:"voz_comandos"`
-	Abelha        *bool `json:"voz_abelha"`
-	Efeito        *bool `json:"voz_efeito"`
-	OuvirNome     *bool `json:"voz_nome"`
-	Sensibilidade *int  `json:"voz_sensibilidade"`
-	PerguntaIA    *bool `json:"voz_ia"`
+	Comandos      *bool   `json:"voz_comandos"`
+	Abelha        *bool   `json:"voz_abelha"`
+	Efeito        *bool   `json:"voz_efeito"`
+	OuvirNome     *bool   `json:"voz_nome"`
+	Sensibilidade *int    `json:"voz_sensibilidade"`
+	PerguntaIA    *bool   `json:"voz_ia"`
+	Modelo        *string `json:"voz_modelo"`
+	PausaMs       *int    `json:"voz_pausa"`
 }
 
 func (m mudancaVoz) vazia() bool {
-	return m.Comandos == nil && m.Abelha == nil && m.Efeito == nil && m.OuvirNome == nil && m.Sensibilidade == nil && m.PerguntaIA == nil
+	return m.Comandos == nil && m.Abelha == nil && m.Efeito == nil && m.OuvirNome == nil && m.Sensibilidade == nil && m.PerguntaIA == nil && m.Modelo == nil &&
+		m.PausaMs == nil
 }
 
 // definirVoz confere o que cada item precisa antes de ligar: os comandos, o
@@ -321,10 +437,21 @@ func (s *Servidor) definirVoz(ctx context.Context, perfil int64, m mudancaVoz) e
 	if m.Sensibilidade != nil {
 		v.Sensibilidade = *m.Sensibilidade
 	}
+	if m.PausaMs != nil {
+		v.PausaMs = *m.PausaMs
+	}
+	if m.Modelo != nil {
+		v.Modelo = *m.Modelo
+		// Preferir um modelo que não está no disco não serve para nada.
+		g := map[string]*voz.Gerente{"base": s.Voz, "small": s.VozSmall}[v.Modelo]
+		if v.Modelo != antes.Modelo && g != nil && !g.Pronto() {
+			return dados.ErrInvalido{Motivo: "Baixe esse modelo de voz antes de escolher."}
+		}
+	}
 	if !v.Comandos {
 		v.OuvirNome = false
 	}
-	if v.Comandos && !antes.Comandos && !s.Voz.Pronto() {
+	if v.Comandos && !antes.Comandos && !s.whisperPronto() {
 		return dados.ErrInvalido{Motivo: "Baixe o modelo de voz antes de ligar os comandos falados."}
 	}
 	if v.Abelha && !antes.Abelha && (!voz.KokoroDisponivel() || !s.Fala.Pronto()) {

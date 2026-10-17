@@ -74,7 +74,8 @@ const (
 		"Quando um pedido da daily chegar no terminal, responda pela nota (complementar_nota com o número do pedido), " +
 		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide. " +
 		"Ao terminar o trabalho, antes de encerrar, grave com complementar_nota (daily) uma ou duas frases para a reunião: o que ficou pronto e para quem, sem termos técnicos. " +
-		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar)."
+		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar). " +
+		"Se o usuário pedir para concluir a tarefa ou mandá-la para revisão, use mover_tarefa; nunca por conta própria."
 )
 
 // Servir lê os pedidos até o fim da entrada.
@@ -379,6 +380,31 @@ var Ferramentas = []Ferramenta{
 		}, "texto"),
 		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
 			return gravarNota(ctx, n, args, "substituir")
+		},
+	},
+	{
+		Nome: "mover_tarefa", Titulo: "Mover a tarefa para Revisão ou Concluído",
+		Descricao: "Leva a tarefa em que você trabalha para Revisão ou Concluído no quadro da Colmeia. Use SOMENTE quando o usuário pedir " +
+			"explicitamente (\"pode concluir\", \"manda para revisão\"); nunca por conta própria, nem ao terminar o trabalho. " +
+			"Só esta tarefa e só estas duas colunas.",
+		Entrada: objeto(map[string]any{
+			"coluna": map[string]any{"type": "string", "enum": []string{"revisao", "concluido"}, "description": "revisao ou concluido."},
+		}, "coluna"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Coluna string `json:"coluna"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if a.Coluna != "revisao" && a.Coluna != "concluido" {
+				return nil, errors.New("a coluna é revisao ou concluido")
+			}
+			if _, err := pedirJSON(ctx, n, "POST", "/v1/agente/coluna", a); err != nil {
+				return nil, err
+			}
+			onde := map[string]string{"revisao": "Revisão", "concluido": "Concluído"}[a.Coluna]
+			return []any{texto("A tarefa foi para " + onde + ".")}, nil
 		},
 	},
 	{

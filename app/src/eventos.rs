@@ -139,6 +139,25 @@ fn descartar_pedidos(acordado: &Receiver<()>) {
     while acordado.try_recv().is_ok() {}
 }
 
+/// O nome desta janela para o núcleo: com ele, ela diz depois que minimizou
+/// (a abelha fixa se esconde só com uma janela à vista).
+pub fn nome_da_janela() -> &'static str {
+    static NOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NOME.get_or_init(|| {
+        let agora = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        format!("{}-{agora:x}", std::process::id())
+    })
+}
+
+/// A janela minimizou ou voltou: o núcleo avisa a abelha fixa. Numa thread
+/// (a tela não espera a rede); só quando muda.
+pub fn avisar_minimizada(perfil: i64, minimizada: bool) {
+    std::thread::spawn(move || {
+        let corpo = serde_json::json!({ "janela": nome_da_janela(), "minimizada": minimizada }).to_string();
+        let _ = canal::pedir_com_corpo("POST", &format!("/v1/perfis/{perfil}/janela"), Some(&corpo));
+    });
+}
+
 enum Resultado {
     Caiu,
     Recusado,
@@ -147,7 +166,7 @@ enum Resultado {
 }
 
 fn conectar(perfil: i64, ctx: &egui::Context, envio: &Sender<Mensagem>, estado: &Compartilhado) -> Resultado {
-    let mut ws = match canal::websocket(&format!("/v1/perfis/{perfil}/eventos")) {
+    let mut ws = match canal::websocket(&format!("/v1/perfis/{perfil}/eventos?janela={}", nome_da_janela())) {
         Ok(ws) => ws,
         // Um núcleo da entrega B não tem a rota: responde 404.
         Err(e) if e.contains("404") => return Resultado::Antigo,

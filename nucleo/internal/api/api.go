@@ -99,10 +99,13 @@ type Servidor struct {
 
 	// Os modelos de voz (veja voz.go): o Whisper do ditado e dos comandos
 	// falados e a voz da abelha (Kokoro); vazios, ficam em DirDados/voz.
-	Voz     *voz.Gerente
-	Fala    *voz.Gerente
-	whisper *pacoteVoz
-	kokoro  *pacoteVoz
+	// VozSmall é o Whisper small, opcional, no lugar do base para quem preferir.
+	Voz      *voz.Gerente
+	VozSmall *voz.Gerente
+	Fala     *voz.Gerente
+	whisper  *pacoteVoz
+	small    *pacoteVoz
+	kokoro   *pacoteVoz
 	// A pergunta de cada perfil esperando o "sim" (veja comandovoz.go).
 	confirmacoes confirmacoes
 	// A pergunta livre com IA de cada perfil em andamento (veja pergunta.go).

@@ -58,6 +58,16 @@ var Base = Modelo{
 	Tamanho: 147951465,
 }
 
+// Small é o Whisper small multilíngue, do mesmo repositório e revisão: mais
+// preciso em português que o base, três vezes maior e mais lento. Hash e
+// tamanho publicados pelo Hugging Face (o oid do LFS) e conferidos baixando-o.
+var Small = Modelo{
+	Nome:    "ggml-small.bin",
+	URL:     "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+	SHA256:  "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+	Tamanho: 487601967,
+}
+
 // Kokoro é a voz da abelha: o Kokoro-82M (v1.0, Apache-2.0) quantizado em
 // 8 bits pela comunidade ONNX, a voz feminina pt-BR pf_dora e o ONNX Runtime
 // (MIT) da Microsoft, que roda o modelo. Os dois primeiros presos a uma

@@ -11,3 +11,10 @@ pub mod nome;
 pub mod pausa;
 pub mod protocolo;
 pub mod transcrever;
+
+/// A mensagem para quem usa, em português e com o que fazer; o detalhe
+/// técnico (o erro da biblioteca) vai só para o log, a saída de erro.
+pub fn falha(mensagem: &str, detalhe: impl std::fmt::Display) -> String {
+    eprintln!("colmeia-voz: {mensagem} [{detalhe}]");
+    mensagem.to_string()
+}

@@ -308,6 +308,9 @@ func migrar(db *sql.DB) error {
 		{"perfis", "voz_sensibilidade", "INTEGER NOT NULL DEFAULT 5"},
 		// A pergunta livre com IA (usa tokens): desligada por padrão.
 		{"perfis", "voz_ia", "INTEGER NOT NULL DEFAULT 0"},
+		// O modelo do Whisper preferido (base ou small) e a pausa que encerra um comando falado.
+		{"perfis", "voz_modelo", "TEXT NOT NULL DEFAULT 'base'"},
+		{"perfis", "voz_pausa", "INTEGER NOT NULL DEFAULT 1200"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
@@ -447,11 +450,13 @@ func migrarPerfis(db *sql.DB) error {
 			voz_efeito INTEGER NOT NULL DEFAULT 0,
 			voz_nome INTEGER NOT NULL DEFAULT 0,
 			voz_sensibilidade INTEGER NOT NULL DEFAULT 5,
-			voz_ia INTEGER NOT NULL DEFAULT 0)`,
+			voz_ia INTEGER NOT NULL DEFAULT 0,
+			voz_modelo TEXT NOT NULL DEFAULT 'base',
+			voz_pausa INTEGER NOT NULL DEFAULT 1200)`,
 		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia)
+				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia, voz_modelo, voz_pausa)
 			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia FROM perfis`,
+				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia, voz_modelo, voz_pausa FROM perfis`,
 		`DROP TABLE perfis`,
 		`ALTER TABLE perfis_nova RENAME TO perfis`,
 	} {

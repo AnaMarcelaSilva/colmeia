@@ -32,7 +32,9 @@ func servidorComVoz(t *testing.T, servido []byte) *httptest.Server {
 	soma := sha256.Sum256(modeloDeTeste)
 	g := voz.Novo(dir, voz.Modelo{Nome: "ggml-teste.bin", URL: fonte.URL + "/m.bin", SHA256: hex.EncodeToString(soma[:]), Tamanho: int64(len(modeloDeTeste))})
 	g.Cliente = fonte.Client()
-	servidor := &Servidor{Bytes: new(atomic.Int64), Banco: banco, DirDados: dir, Versao: "teste", Tempos: temposDeTeste, Voz: g}
+	small := voz.Novo(dir, voz.Modelo{Nome: "ggml-small-teste.bin", URL: fonte.URL + "/s.bin", SHA256: hex.EncodeToString(soma[:]), Tamanho: int64(len(modeloDeTeste))})
+	small.Cliente = fonte.Client()
+	servidor := &Servidor{Bytes: new(atomic.Int64), Banco: banco, DirDados: dir, Versao: "teste", Tempos: temposDeTeste, Voz: g, VozSmall: small}
 	srv := httptest.NewServer(servidor.Rotas())
 	t.Cleanup(func() { servidor.Encerrar() })
 	t.Cleanup(srv.Close)
@@ -318,5 +320,87 @@ func TestOpcoesDaVozDaAbelha(t *testing.T) {
 	pedir(t, "DELETE", srv.URL+"/v1/voz/modelo", nil)
 	if p := perfilDe(t, srv.URL, 1); p["voz_comandos"] != false {
 		t.Errorf("comandos sem o modelo: %v", p)
+	}
+}
+
+func vozDoPerfil(t *testing.T, url string, id float64) map[string]any {
+	t.Helper()
+	_, perfis := pedirLista(t, url+"/v1/perfis")
+	for _, p := range perfis {
+		if p["id"] == id {
+			return p
+		}
+	}
+	t.Fatalf("perfil %v sumiu", id)
+	return nil
+}
+
+func TestModeloSmallEContextoDaVoz(t *testing.T) {
+	srv := servidorComVoz(t, modeloDeTeste)
+	pedir(t, "POST", srv.URL+"/v1/perfis", map[string]string{"nome": "Profissional"})
+	if p := vozDoPerfil(t, srv.URL, 1); p["voz_modelo"] != "base" || p["voz_pausa"] != 1200.0 {
+		t.Fatalf("o perfil nasce com o base e 1,2 s: %v", p)
+	}
+	if status, _ := pedir(t, "GET", srv.URL+"/v1/perfis/1/voz/contexto", nil); status != http.StatusBadRequest {
+		t.Fatalf("contexto sem modelo: %d", status)
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"voz_modelo": "small"}); status != http.StatusBadRequest {
+		t.Errorf("preferiu o small sem baixar: %d", status)
+	}
+
+	// Só o small baixado: ele vira o preferido e é o usado; o ditado já liga.
+	eventos := ouvir(t, srv.URL, "1")
+	if status, r := pedir(t, "POST", srv.URL+"/v1/perfis/1/voz/small/baixar", nil); status != http.StatusOK {
+		t.Fatalf("baixar o small: %d %v", status, r)
+	}
+	eventos.esperar("small pronto", func(m map[string]any) bool {
+		return m["tipo"] == "voz.modelo" && m["pacote"] == "small" && m["estado"] == "pronto"
+	})
+	eventos.esperar("perfil.voz", func(m map[string]any) bool { return m["tipo"] == "perfil.voz" })
+	if p := vozDoPerfil(t, srv.URL, 1); p["voz_modelo"] != "small" {
+		t.Errorf("o small pronto não ficou preferido: %v", p["voz_modelo"])
+	}
+	_, c := pedir(t, "GET", srv.URL+"/v1/perfis/1/voz/contexto", nil)
+	if c["nome_modelo"] != "small" || !strings.HasSuffix(c["modelo"].(string), "ggml-small-teste.bin") || c["pausa_ms"] != 1200.0 {
+		t.Fatalf("contexto com o small: %v", c)
+	}
+	if !strings.HasPrefix(c["prompt"].(string), "Colmeia, rodar o projeto.") {
+		t.Errorf("vocabulário: %v", c["prompt"])
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"ditado": true}); status != http.StatusOK {
+		t.Errorf("o ditado não ligou só com o small: %d", status)
+	}
+
+	// Com os dois, vale o preferido; a pausa muda dentro dos limites.
+	pedir(t, "POST", srv.URL+"/v1/perfis/1/voz/baixar", nil)
+	eventos.esperar("base pronto", func(m map[string]any) bool {
+		return m["tipo"] == "voz.modelo" && m["pacote"] == "whisper" && m["estado"] == "pronto"
+	})
+	if _, c := pedir(t, "GET", srv.URL+"/v1/perfis/1/voz/contexto", nil); c["nome_modelo"] != "small" {
+		t.Errorf("com os dois, o preferido: %v", c["nome_modelo"])
+	}
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"voz_modelo": "base", "voz_pausa": 2000}); status != http.StatusOK {
+		t.Fatalf("escolher o base: %d", status)
+	}
+	if _, c := pedir(t, "GET", srv.URL+"/v1/perfis/1/voz/contexto", nil); c["nome_modelo"] != "base" || c["pausa_ms"] != 2000.0 {
+		t.Errorf("depois de escolher o base: %v", c)
+	}
+	for _, ruim := range []map[string]any{{"voz_pausa": 100}, {"voz_modelo": "large"}} {
+		if status, _ := pedir(t, "PATCH", srv.URL+"/v1/perfis/1", ruim); status != http.StatusBadRequest {
+			t.Errorf("aceitou %v: %d", ruim, status)
+		}
+	}
+
+	// Apagar o small mantém o ditado (o base está lá); apagar o base também desliga.
+	pedir(t, "PATCH", srv.URL+"/v1/perfis/1", map[string]any{"voz_modelo": "small"})
+	if status, _ := pedir(t, "DELETE", srv.URL+"/v1/voz/small", nil); status != http.StatusOK {
+		t.Fatalf("apagar o small: %d", status)
+	}
+	if p := vozDoPerfil(t, srv.URL, 1); p["voz_modelo"] != "base" || p["ditado"] != true {
+		t.Errorf("sem o small: %v %v", p["voz_modelo"], p["ditado"])
+	}
+	pedir(t, "DELETE", srv.URL+"/v1/voz/modelo", nil)
+	if p := vozDoPerfil(t, srv.URL, 1); p["ditado"] != false {
+		t.Error("o ditado continuou ligado sem nenhum Whisper")
 	}
 }

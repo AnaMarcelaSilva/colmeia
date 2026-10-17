@@ -56,12 +56,35 @@ pub struct OpcoesVoz {
     /// A pergunta livre com IA: o que não é comando vai ao Claude Code (usa tokens).
     #[serde(default)]
     pub voz_ia: bool,
+    /// O Whisper preferido: "base" ou "small" (vale o outro se só ele estiver baixado).
+    #[serde(default = "modelo_padrao")]
+    pub voz_modelo: String,
+    /// O silêncio que encerra um comando falado, em ms (600 a 3000).
+    #[serde(default = "pausa_padrao")]
+    pub voz_pausa: u32,
 }
 
 impl Default for OpcoesVoz {
     fn default() -> Self {
-        OpcoesVoz { voz_comandos: false, voz_abelha: false, voz_efeito: false, voz_nome: false, voz_sensibilidade: sensibilidade_padrao(), voz_ia: false }
+        OpcoesVoz {
+            voz_comandos: false,
+            voz_abelha: false,
+            voz_efeito: false,
+            voz_nome: false,
+            voz_sensibilidade: sensibilidade_padrao(),
+            voz_ia: false,
+            voz_modelo: modelo_padrao(),
+            voz_pausa: pausa_padrao(),
+        }
     }
+}
+
+fn modelo_padrao() -> String {
+    "base".into()
+}
+
+fn pausa_padrao() -> u32 {
+    1200
 }
 
 fn sensibilidade_padrao() -> u8 {
@@ -1075,6 +1098,24 @@ pub fn cancelar_fala() -> Result<(), String> {
 /// Apaga a voz da abelha do disco (ela desliga em todos os perfis).
 pub fn remover_fala() -> Result<EstadoVoz, String> {
     chamar("DELETE", "/v1/voz/fala", None)
+}
+
+/// O Whisper small (opcional): o estado, baixar (pronto, vira o preferido do
+/// perfil), cancelar e apagar.
+pub fn estado_small() -> Result<EstadoVoz, String> {
+    chamar("GET", "/v1/voz/small", None)
+}
+
+pub fn baixar_small(perfil: i64) -> Result<EstadoVoz, String> {
+    chamar("POST", &format!("/v1/perfis/{perfil}/voz/small/baixar"), None)
+}
+
+pub fn cancelar_small() -> Result<(), String> {
+    chamar::<serde_json::Value>("POST", "/v1/voz/small/cancelar", None).map(|_| ())
+}
+
+pub fn remover_small() -> Result<EstadoVoz, String> {
+    chamar("DELETE", "/v1/voz/small", None)
 }
 
 pub fn cancelar_voz() -> Result<(), String> {

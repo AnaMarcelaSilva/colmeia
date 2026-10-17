@@ -39,6 +39,8 @@ use resumo::{Aviso, Efeito, OpcoesVoz, Resumo};
 const ABELHA: f32 = 76.0;
 /// Entre a abelha e o cartão.
 const VAO: f32 = 8.0;
+/// O arraste só começa depois disto (em pontos): o clique, mesmo o duplo, não move.
+const LIMIAR_ARRASTE: f32 = 6.0;
 /// Animação depois de uma troca de estado ou do mouse chegar; depois, parada.
 const ANIMACAO: f64 = 2.5;
 const COMEMORACAO: f64 = 3.0;
@@ -78,17 +80,19 @@ struct Fixa {
     animar_ate: f64,
     comemorar_ate: f64,
     em_cima: bool,
-    /// Começou a arrastar e espera o foco para pedir ao gerenciador.
-    arrastar: bool,
+    /// Arrastando: onde o botão apertou, dentro da abelha. O arraste é feito
+    /// aqui (a janela é uma "dock" no X11, que o gerenciador não move) e só
+    /// começa depois de alguns pixels: um clique duplo não move nada.
+    arraste: Option<egui::Vec2>,
+    /// Janelas da Colmeia à vista: com alguma, a abelha se esconde.
+    janelas: usize,
+    escondida: bool,
     aberto: bool,
     balao: Option<Balao>,
     /// O canto de cima à esquerda da abelha, na tela.
     posicao: Option<Pos2>,
     /// A janela como foi pedida por último (na tela).
     janela: Option<Rect>,
-    /// Depois de mover ou redimensionar, o gerenciador leva um tempo: até
-    /// lá, uma posição diferente não é você arrastando.
-    ajustando_ate: f64,
     ultimo_quadro: f64,
     quadros: u32,
     /// Sem compositor, a janela é opaca, no fundo escuro dos cartões.
@@ -160,7 +164,12 @@ impl Fixa {
                     self.resumo.carregar(q);
                     self.ligada = true;
                 }
-                Mensagem::Fora => self.ligada = false,
+                Mensagem::Fora => {
+                    self.ligada = false;
+                    // Sem núcleo, nenhuma janela conta: a abelha aparece.
+                    self.janelas = 0;
+                }
+                Mensagem::Janelas(n) => self.janelas = n,
                 Mensagem::Evento(e) => {
                     for efeito in self.resumo.aplicar(e) {
                         match efeito {
@@ -179,13 +188,13 @@ impl Fixa {
     }
 
     /// O cartão que aparece com a abelha (a voz, o resumo ou o balão) e a altura dele.
-    fn cartao(&self) -> Option<f32> {
+    fn cartao(&self, ctx: &egui::Context) -> Option<f32> {
         if self.com_voz() {
             Some(tela::altura_balao_voz(self.resposta.as_ref().map_or("", |r| r.texto.as_str())))
         } else if self.aberto {
             Some(tela::altura_resumo(self.resumo.destaque().is_some(), self.conversa.is_some()))
         } else {
-            self.balao.as_ref().map(|_| tela::ALTURA_BALAO)
+            self.balao.as_ref().map(|b| tela::altura_balao_medida(ctx, &b.aviso))
         }
     }
 
@@ -197,7 +206,7 @@ impl Fixa {
     /// Liga ou desliga os comandos falados, o atalho e o ouvir o nome (e a
     /// conversa escrita, que basta para a pergunta livre).
     fn ajustar_voz(&mut self, ctx: &egui::Context, voz: OpcoesVoz, agora: f64) {
-        let antes = std::mem::replace(&mut self.voz, voz.clone());
+        self.voz = voz.clone();
         if !voz.voz_comandos && !voz.voz_ia {
             if let Some(c) = self.conversa.as_mut() {
                 c.fechar();
@@ -233,16 +242,14 @@ impl Fixa {
             }
         }
         let Some(c) = self.conversa.as_mut() else { return };
-        let mudou_o_nome = antes.voz_nome != voz.voz_nome || antes.voz_sensibilidade != voz.voz_sensibilidade || !c.vigiando();
         if !voz.voz_nome {
             if c.vigiando() {
                 c.desvigiar();
             }
             return;
         }
-        if !mudou_o_nome {
-            return;
-        }
+        // Com o nome ligado, todo aviso da voz pede de novo (é raro): as
+        // gravações do nome podem ter mudado, e Ajustes avisa por um evento do perfil.
         let erro = match canal::voz::nome_ouvido(perfil).map(|n| (n.referencias(), n.nome)) {
             Ok((Some(r), _)) => c.vigiar(r, voz.voz_sensibilidade).err(),
             Ok((None, nome)) => Some(format!("Grave o nome {nome} em Ajustes › Comandos falados para a abelha ouvir.")),
@@ -253,14 +260,14 @@ impl Fixa {
         }
     }
 
-    /// O clique (ou o atalho): abre o microfone; clicado ouvindo, cancela.
+    /// O clique (ou o atalho): abre o microfone; clicado ouvindo, para e
+    /// transcreve o que ouviu (o clique manda, sem esperar a pausa).
     fn falar(&mut self, agora: f64) {
         let Some(c) = self.conversa.as_mut().filter(|_| self.voz.voz_comandos) else { return };
         self.aberto = false;
         self.balao = None;
         if matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo) {
-            c.cancelar();
-            self.resposta = None;
+            c.parar();
             return;
         }
         c.calar();
@@ -297,7 +304,7 @@ impl Fixa {
                     self.balao = None;
                     self.resposta = None;
                 }
-                Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido => {}
+                Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido | Saida::Nota { .. } => {}
             }
         }
         if self.resposta.as_ref().is_some_and(|r| agora >= r.ate) {
@@ -446,46 +453,57 @@ impl eframe::App for Fixa {
             }),
         };
         let p = self.posicao.unwrap_or_else(|| pos2(monitor.x - ABELHA - 24.0, monitor.y - ABELHA - 64.0));
-        let p = pos2(p.x.clamp(0.0, (monitor.x - ABELHA).max(0.0)), p.y.clamp(0.0, (monitor.y - ABELHA).max(0.0)));
+        let limitar = |p: Pos2| pos2(p.x.clamp(0.0, (monitor.x - ABELHA).max(0.0)), p.y.clamp(0.0, (monitor.y - ABELHA).max(0.0)));
+        let mut p = limitar(p);
 
-        // Você arrastou (o gerenciador moveu a janela): a abelha vai junto e fica lembrada.
-        let p = match (fora, self.janela) {
-            (Some(f), Some(j)) if agora > self.ajustando_ate && (f.min - j.min).length() > 1.0 => {
-                let nova = p + (f.min - j.min);
-                self.janela = Some(j.translate(f.min - j.min));
-                posicao::gravar(self.perfil, nova);
-                nova
+        // Com uma janela da Colmeia à vista, a abelha se esconde para não
+        // cobrir os botões dela; volta no mesmo lugar quando ela fecha ou
+        // minimiza. Falando com a abelha (ou com a resposta no balão), ela fica.
+        let esconder = self.janelas > 0 && !self.com_voz() && self.arraste.is_none();
+        if esconder != self.escondida {
+            self.escondida = esconder;
+            ctx.send_viewport_cmd(ViewportCommand::Visible(!esconder));
+            // Ao voltar, a posição vai de novo (o gerenciador pode ter esquecido).
+            self.janela = None;
+        }
+
+        // A abelha: clique abre ou fecha o resumo; arrastar (depois de 6 px) move a janela.
+        let local = Self::arranjo(p, self.cartao(&ctx), monitor).1;
+        let resposta = ui.interact(local, egui::Id::new("abelha"), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
+        let (apertado, origem, ponteiro) = ui.input(|i| (i.pointer.primary_down(), i.pointer.press_origin(), i.pointer.latest_pos()));
+        match (self.arraste, apertado, origem, ponteiro, fora) {
+            (None, true, Some(o), Some(atual), _) if local.contains(o) && (atual - o).length() > LIMIAR_ARRASTE => {
+                self.arraste = Some(o - local.min);
             }
-            _ => p,
-        };
+            (Some(pega), ..) => {
+                // O ponteiro na tela (pelo X11; sem ele, o da janela): a abelha
+                // segue, pega onde foi apertada, até soltar o botão.
+                let ppp = ctx.pixels_per_point();
+                let tela = fixar::ponteiro().map(|(x, y, b)| (pos2(x, y) / ppp, b)).or_else(|| Some((fora?.min + ponteiro?.to_vec2(), apertado)));
+                match tela {
+                    Some((global, true)) => {
+                        p = limitar(global - pega);
+                        // Fora da janela não chegam eventos: o próximo quadro vem daqui.
+                        ctx.request_repaint_after(Duration::from_millis(16));
+                    }
+                    _ => {
+                        self.arraste = None;
+                        posicao::gravar(self.perfil, p);
+                    }
+                }
+            }
+            _ => {}
+        }
         self.posicao = Some(p);
 
-        let (janela, abelha, cartao) = Self::arranjo(p, self.cartao(), monitor);
+        let (janela, abelha, cartao) = Self::arranjo(p, self.cartao(&ctx), monitor);
         if self.janela != Some(janela) {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(janela.min));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(janela.size()));
             self.janela = Some(janela);
-            self.ajustando_ate = agora + 0.6;
-        }
-
-        // A abelha: clique abre ou fecha o resumo; arrastar move a janela.
-        let resposta = ui.interact(abelha, egui::Id::new("abelha"), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
-        // O gerenciador só aceita arrastar a janela em foco: sem foco, pede
-        // o foco e arrasta no quadro seguinte, com o botão ainda apertado.
-        if resposta.drag_started() {
-            self.arrastar = true;
-        }
-        if self.arrastar && resposta.dragged() {
-            if ui.input(|i| i.viewport().focused.unwrap_or(false)) {
-                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-                self.arrastar = false;
-            } else {
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-            }
-        } else {
-            self.arrastar = false;
         }
         // Com os comandos falados, o clique é para falar e o resumo vai ao botão direito.
+        let resposta = if self.arraste.is_some() { resposta.on_hover_cursor(egui::CursorIcon::Grabbing) } else { resposta };
         if resposta.clicked() && self.conversa.is_some() && self.voz.voz_comandos {
             self.falar(agora);
         } else if resposta.clicked() || resposta.secondary_clicked() {
@@ -503,11 +521,17 @@ impl eframe::App for Fixa {
         let pintor = ui.painter();
         tela::brilho(pintor, abelha, brilho);
         let lado = ABELHA * 0.7;
-        mascote::desenhar(pintor, abelha.center() + vec2(0.0, 2.0), lado, self.modelo, self.estado, self.tempo(agora, animando));
-        tela::ponto(pintor, abelha, self.resumo.contagem());
-        if self.conversa.as_ref().is_some_and(Conversa::microfone_aberto) {
-            tela::microfone(pintor, abelha);
-        }
+        // O microfone aberto fica sempre à vista: a abelha põe o fone (o
+        // microfone grande e brilhando ouvindo um comando; discreto, mas
+        // aceso, esperando o nome). O "!" do estado vira o indicador do canto.
+        let fone = self.conversa.as_ref().and_then(|c| match c.fase() {
+            Fase::Abrindo | Fase::Ouvindo => Some(mascote::Fone::Ouvindo),
+            _ if c.vigiando() => Some(mascote::Fone::Esperando),
+            _ => None,
+        });
+        let acessorios = mascote::Acessorios { fone, sem_aviso: true };
+        mascote::desenhar_com(pintor, abelha.center() + vec2(0.0, 2.0), lado, self.modelo, self.estado, self.tempo(agora, animando), acessorios);
+        tela::indicador(pintor, abelha, self.resumo.contagem());
 
         let mut pedido = None;
         if let Some(rect) = cartao {
@@ -525,6 +549,8 @@ impl eframe::App for Fixa {
                 pedido = tela::balao(ui, rect, &self.nome, &b.aviso, (b.resta / BALAO) as f32);
                 if b.resta <= 0.0 {
                     self.balao = None;
+                    // Mais um quadro: sem ele a janela ficava com o balão vazio desenhado.
+                    ctx.request_repaint();
                 }
             }
         }
@@ -575,6 +601,14 @@ fn main() -> eframe::Result {
         .with_resizable(false)
         .with_taskbar(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
+    // No X11, uma "dock": o "mostrar a área de trabalho" (Super+D) não a
+    // esconde, ela não vai para a barra de tarefas nem para o Alt+Tab, e fica
+    // em todas as áreas de trabalho. O tipo precisa estar na janela antes de
+    // ela aparecer (depois, o gerenciador não relê).
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        viewport = viewport.with_window_type(egui::X11WindowType::Dock);
+    }
     if let Some(p) = posicao {
         viewport = viewport.with_position(p);
     }
@@ -598,12 +632,13 @@ fn main() -> eframe::Result {
                 animar_ate: ANIMACAO,
                 comemorar_ate: 0.0,
                 em_cima: false,
-                arrastar: false,
+                arraste: None,
+                janelas: 0,
+                escondida: false,
                 aberto: false,
                 balao: None,
                 posicao,
                 janela: None,
-                ajustando_ate: 0.0,
                 ultimo_quadro: 0.0,
                 quadros: 0,
                 tela: None,

@@ -38,6 +38,8 @@ pub struct Referencias {
 
 const VERSAO: u32 = 1;
 
+const GUARDAR: &str = "Não consegui guardar as gravações do nome. Confira o espaço em disco e grave de novo.";
+
 /// O pedaço da gravação com fala: tira o silêncio do começo e do fim.
 fn aparar(quadros: &[(Quadro, f32)]) -> &[(Quadro, f32)] {
     let pico = quadros.iter().map(|q| q.1).fold(0.0f32, f32::max);
@@ -84,6 +86,16 @@ impl Referencias {
         serde_json::from_str(PADRAO).expect("as referências do nome padrão vêm com o programa")
     }
 
+    /// Gravações do nome padrão somam às referências sintéticas: a voz de
+    /// quem usa entra sem perder o que já reconhecia.
+    pub fn com_padrao(mut self) -> Referencias {
+        let padrao = Referencias::padrao();
+        if chave(&self.nome) == chave(&padrao.nome) {
+            self.referencias.extend(padrao.referencias);
+        }
+        self
+    }
+
     pub fn ler(caminho: &Path) -> Result<Referencias, String> {
         let erro = "As gravações do nome não abriram. Grave o nome de novo em Ajustes › Voz.";
         let tamanho = std::fs::metadata(caminho).map_err(|_| erro.to_string())?.len();
@@ -99,7 +111,7 @@ impl Referencias {
 
     /// Grava num temporário 0600 ao lado e troca de nome: nunca um arquivo pela metade.
     pub fn gravar(&self, destino: &Path) -> Result<(), String> {
-        let erro = |e: std::io::Error| format!("Não consegui guardar as gravações do nome ({e}).");
+        let erro = |e: std::io::Error| crate::falha(GUARDAR, e);
         let nome = destino.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Só o arquivo do perfil, na pasta que já existe (a do núcleo).
         let valido = nome.starts_with("nome-") && nome.ends_with(".json") && nome[5..nome.len() - 5].chars().all(|c| c.is_ascii_digit()) && nome.len() > 10;
@@ -108,7 +120,7 @@ impl Referencias {
             return Err("Lugar inválido para as gravações do nome.".into());
         };
         let tmp = pasta.join(format!(".{nome}.{}", std::process::id()));
-        let texto = serde_json::to_vec(self).map_err(|e| format!("Não consegui guardar as gravações do nome ({e})."))?;
+        let texto = serde_json::to_vec(self).map_err(|e| crate::falha(GUARDAR, e))?;
         let mut abrir = std::fs::OpenOptions::new();
         abrir.write(true).create_new(true);
         #[cfg(unix)]
@@ -125,6 +137,24 @@ impl Referencias {
         }
         resultado.map_err(erro)
     }
+}
+
+/// O nome como soa: sem caixa, acento nem espaço (os acentos do português
+/// bastam para comparar com o nome padrão).
+fn chave(nome: &str) -> String {
+    nome.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'ê' | 'è' | 'ë' => 'e',
+            'í' | 'î' | 'ì' | 'ï' => 'i',
+            'ó' | 'ô' | 'õ' | 'ò' | 'ö' => 'o',
+            'ú' | 'û' | 'ù' | 'ü' => 'u',
+            'ç' => 'c',
+            outra => outra,
+        })
+        .collect()
 }
 
 fn distancia(a: &Quadro, b: &Quadro) -> f32 {
@@ -159,7 +189,16 @@ pub fn custo(referencia: &[Quadro], janela: &[Quadro]) -> f32 {
 /// mais fácil, e erra mais.
 pub fn limiar(sensibilidade: u8) -> f32 {
     let s = sensibilidade.clamp(1, 9) as f32;
-    LIMIAR_MEIO * (1.0 + (s - 5.0) * 0.03)
+    LIMIAR_MEIO * (1.0 + (s - 5.0) * 0.05)
+}
+
+/// O custo em nota de 0 a 100 (maior é mais parecido; o meio da escala, 50,
+/// é o limiar da sensibilidade 5), para o teste em Ajustes.
+pub fn nota(custo: f32) -> u8 {
+    if !custo.is_finite() {
+        return 0;
+    }
+    (100.0 * (1.0 - custo / (2.0 * LIMIAR_MEIO))).round().clamp(0.0, 100.0) as u8
 }
 
 /// O custo do meio da escala, medido com as vozes sintéticas (veja
@@ -183,8 +222,9 @@ pub struct Detector {
     amostras: usize,
 }
 
-/// Comparar a cada 3 quadros (30 ms); depois de reconhecer, 1,5 s sem ouvir.
-const A_CADA: usize = 3;
+/// Comparar a cada 5 quadros (50 ms; eram 30 ms, com o mesmo acerto e 40%
+/// menos alinhamentos); depois de reconhecer, 1,5 s sem ouvir.
+const A_CADA: usize = 5;
 const DESCANSO: usize = 150;
 
 impl Detector {
@@ -220,13 +260,15 @@ impl Detector {
     /// Recebe um bloco do microfone. Ouvindo o nome, diz onde (no bloco) ele
     /// acabou: o que vem depois já é o comando.
     pub fn alimentar(&mut self, bloco: &[f32]) -> Option<usize> {
+        // Em silêncio, nem a FFT: abaixo de 2 vezes o ruído o quadro repete o último silêncio.
+        self.extrator.porta = (self.ruido * 2.0).max(0.0008);
         let inicio = self.amostras;
         self.amostras += bloco.len();
         let mut ouviu = None;
         for (q, energia) in self.extrator.alimentar(bloco) {
             self.quadros += 1;
             self.ruido = if self.quadros == 1 {
-                energia.min(0.004)
+                energia.min(0.002)
             } else if energia < self.ruido {
                 self.ruido * 0.9 + energia * 0.1
             } else {
@@ -253,9 +295,15 @@ impl Detector {
         ouviu
     }
 
-    /// Só compara com fala recente na janela (e o fim dela parecendo fim de palavra).
+    /// O melhor custo desde a última pergunta (e começa de novo).
+    pub fn tirar_melhor(&mut self) -> f32 {
+        std::mem::replace(&mut self.melhor, f32::INFINITY)
+    }
+
+    /// Só compara com fala recente na janela. O piso é baixo: num microfone
+    /// baixo a voz também é baixa, e o piso antigo (0,006) a ignorava.
     fn tem_fala(&self) -> bool {
-        let limiar = (self.ruido * 3.0).max(0.006);
+        let limiar = (self.ruido * 3.0).max(0.0015);
         let com_fala = self.energias.iter().filter(|e| **e > limiar).count();
         com_fala >= 20
     }
@@ -363,6 +411,38 @@ mod testes {
         let r = Referencias::padrao();
         assert_eq!(r.nome, "Colmeia");
         assert!(r.referencias.len() >= 4, "{}", r.referencias.len());
+    }
+
+    #[test]
+    fn gravacoes_do_nome_padrao_somam_as_sinteticas() {
+        let gravacoes: Vec<Vec<f32>> = [140, 150, 165].iter().map(|ms| palavra(&[500.0, 1100.0, 1900.0], *ms)).collect();
+        let sinteticas = Referencias::padrao().referencias.len();
+        let r = Referencias::de_gravacoes("Colmeia", &gravacoes).unwrap().com_padrao();
+        assert_eq!(r.referencias.len(), 3 + sinteticas);
+        let r = Referencias::de_gravacoes(" colméia ", &gravacoes).unwrap().com_padrao();
+        assert_eq!(r.referencias.len(), 3 + sinteticas);
+        let r = Referencias::de_gravacoes("Zuzu", &gravacoes).unwrap().com_padrao();
+        assert_eq!(r.referencias.len(), 3);
+    }
+
+    #[test]
+    fn nota_do_teste() {
+        assert_eq!(nota(f32::INFINITY), 0);
+        assert_eq!(nota(LIMIAR_MEIO), 50);
+        assert_eq!(nota(0.0), 100);
+        assert_eq!(nota(100.0), 0);
+        assert!(nota(limiar(9)) < nota(limiar(1)));
+    }
+
+    #[test]
+    fn microfone_baixo_ainda_compara() {
+        // A mesma palavra a um décimo do volume (pico 0,03): também reconhece.
+        let gravacoes: Vec<Vec<f32>> = [140, 150, 165].iter().map(|ms| palavra(&[500.0, 1100.0, 1900.0], *ms)).collect();
+        let r = Referencias::de_gravacoes("Zuzu", &gravacoes).unwrap();
+        let mut d = Detector::novo(&r, 5);
+        d.limiar = 6.0;
+        let baixa: Vec<f32> = palavra(&[500.0, 1100.0, 1900.0], 155).iter().map(|s| s * 0.1).collect();
+        assert!(baixa.chunks(1600).any(|b| d.alimentar(b).is_some()));
     }
 
     #[test]

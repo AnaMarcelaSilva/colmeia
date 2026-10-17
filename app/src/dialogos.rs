@@ -371,19 +371,16 @@ fn escolher_mascote(ui: &mut egui::Ui, d: &mut EscolhaMascote, perfil: i64) -> R
 }
 
 pub struct AjustesDitado {
-    pub modelo: api::EstadoVoz,
+    /// O base e o small (o estado vem do núcleo ao abrir; depois, pelos eventos).
+    pub modelos: crate::ajustes_voz::ModeloWhisper,
     pub ligado: bool,
     erro: Option<String>,
 }
 
 impl AjustesDitado {
-    /// O estado do modelo vem do núcleo ao abrir; depois, pelos eventos.
-    pub fn new(ligado: bool) -> Self {
-        let (modelo, erro) = match api::estado_voz() {
-            Ok(m) => (m, None),
-            Err(e) => (api::EstadoVoz::default(), Some(format!("Não consegui falar com o núcleo: {e}"))),
-        };
-        AjustesDitado { modelo, ligado, erro }
+    pub fn new(ligado: bool, preferido: &str) -> Self {
+        let (modelos, erro) = crate::ajustes_voz::ModeloWhisper::novo(preferido);
+        AjustesDitado { modelos, ligado, erro }
     }
 }
 
@@ -402,13 +399,13 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
     );
     ui.add_space(14.0);
     let p = cores();
-    let tamanho = megabytes(d.modelo.tamanho.max(1));
-    let pronto = d.modelo.estado == "pronto";
-    let baixando = d.modelo.estado == "baixando";
+    let tamanho = megabytes(d.modelos.base.tamanho.max(1));
+    let pronto = d.modelos.pronto();
+    let baixando = !pronto && d.modelos.base.estado == "baixando";
     let texto = match (d.ligado, pronto, baixando) {
         (true, true, _) => format!("Ligado. Clique no microfone da caixa de mensagem ou segure {} enquanto fala.", crate::voz::ATALHO),
         (_, _, true) => "Baixando o modelo. Pode fechar esta janela: o ditado liga sozinho quando o download terminar.".to_string(),
-        (_, true, _) => format!("O modelo de voz ({tamanho}) já está neste computador."),
+        (_, true, _) => "O modelo de voz já está neste computador.".to_string(),
         _ => format!(
             "Para ligar, a Colmeia baixa uma vez o modelo de voz Whisper base (multilíngue), com {tamanho}, do repositório oficial do whisper.cpp, e confere o arquivo antes de usar. Depois disso, o ditado funciona sem internet."
         ),
@@ -416,14 +413,17 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
     ui.label(RichText::new(texto).color(p.texto).size(13.0));
     if baixando {
         ui.add_space(12.0);
-        let fracao = d.modelo.baixados as f32 / d.modelo.tamanho.max(1) as f32;
+        let fracao = d.modelos.base.baixados as f32 / d.modelos.base.tamanho.max(1) as f32;
         ui.add(egui::ProgressBar::new(fracao).fill(p.destaque).desired_height(8.0));
         ui.add_space(4.0);
-        ui.label(RichText::new(format!("{} de {tamanho}", megabytes(d.modelo.baixados))).color(p.suave).size(12.0));
+        ui.label(RichText::new(format!("{} de {tamanho}", megabytes(d.modelos.base.baixados))).color(p.suave).size(12.0));
     }
-    if d.modelo.estado == "erro" && !d.modelo.erro.is_empty() {
+    if d.modelos.base.estado == "erro" && !d.modelos.base.erro.is_empty() {
         ui.add_space(10.0);
-        ui.label(RichText::new(&d.modelo.erro).color(p.erro).size(12.5));
+        ui.label(RichText::new(&d.modelos.base.erro).color(p.erro).size(12.5));
+    }
+    if pronto && let Some(e) = d.modelos.mostrar(ui, perfil) {
+        d.erro = Some(e);
     }
     mostrar_erro(ui, &d.erro);
 
@@ -431,8 +431,8 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
     ui.add_space(20.0);
     ui.horizontal(|ui| {
         fechar = tema::botao_secundario(ui, if baixando || d.ligado { "Fechar" } else { "Cancelar" }).clicked();
-        if pronto && !baixando {
-            apagar = tema::botao_secundario(ui, &format!("Apagar o modelo ({tamanho})"))
+        if d.modelos.base.estado == "pronto" {
+            apagar = tema::botao_secundario(ui, &format!("Apagar o base ({tamanho})"))
                 .on_hover_text("Libera o espaço; o ditado desliga em todos os perfis.")
                 .clicked();
         }
@@ -456,9 +456,15 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
     if apagar {
         return match api::remover_voz() {
             Ok(m) => {
-                d.modelo = m;
-                let estava = std::mem::replace(&mut d.ligado, false);
-                if estava { Resultado::Ditado(false) } else { Resultado::Continua }
+                d.modelos.base = m;
+                // Com o small no disco, o ditado continua ligado.
+                let estava = d.ligado && !d.modelos.pronto();
+                if estava {
+                    d.ligado = false;
+                    Resultado::Ditado(false)
+                } else {
+                    Resultado::Continua
+                }
             }
             Err(e) => falhou(d, "apagar o modelo", e),
         };
@@ -481,7 +487,7 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
         },
         _ => match api::baixar_voz(perfil) {
             Ok(m) => {
-                d.modelo = m;
+                d.modelos.base = m;
                 Resultado::Continua
             }
             Err(e) => falhou(d, "começar o download", e),

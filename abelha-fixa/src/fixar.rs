@@ -48,6 +48,24 @@ pub fn em_todas_as_areas(_: &Frame) -> Result<(), String> {
     Err("só no X11: aqui a abelha fica por cima, mas na área de trabalho atual".into())
 }
 
+/// Onde está o ponteiro na tela (em pixels) e se o botão esquerdo está
+/// apertado, pelo X11: arrastando a abelha, o ponteiro sai da janela antes
+/// de ela chegar, e a janela deixa de receber o movimento e o soltar.
+#[cfg(target_os = "linux")]
+pub fn ponteiro() -> Option<(f32, f32, bool)> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt, KeyButMask};
+    let (conexao, tela) = x11rb::connect(None).ok()?;
+    let raiz = conexao.setup().roots[tela].root;
+    let r = conexao.query_pointer(raiz).ok()?.reply().ok()?;
+    Some((r.root_x as f32, r.root_y as f32, r.mask.contains(KeyButMask::BUTTON1)))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ponteiro() -> Option<(f32, f32, bool)> {
+    None
+}
+
 /// O tamanho da tela em pixels, pelo X11: o egui às vezes não sabe o
 /// monitor (um servidor sem RandR, como o Xephyr, diz 1 x 1).
 #[cfg(target_os = "linux")]

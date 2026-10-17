@@ -104,17 +104,21 @@ impl Falada {
         }
     }
 
+    /// Ouvindo um comando (não só o nome).
+    pub fn ouvindo_comando(&self) -> bool {
+        self.conversa.as_ref().is_some_and(|c| matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo))
+    }
+
     pub fn microfone_aberto(&self) -> bool {
         self.conversa.as_ref().is_some_and(Conversa::microfone_aberto)
     }
 
     /// Clique na abelha (ou o atalho): abre o microfone; clicado de novo
-    /// ouvindo, cancela.
+    /// ouvindo, para e transcreve o que ouviu (o clique manda, sem esperar a pausa).
     pub fn alternar(&mut self, agora: f64) {
         let Some(c) = self.conversa.as_mut().filter(|_| self.comandos) else { return };
-        if c.microfone_aberto() {
-            c.cancelar();
-            self.balao = None;
+        if matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo) {
+            c.parar();
             return;
         }
         c.calar();
@@ -161,7 +165,7 @@ impl Falada {
                 Saida::Erro(e) => {
                     self.balao = Some(Balao { texto: e, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA_SEGUNDOS });
                 }
-                Saida::Chamado | Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido => {}
+                Saida::Chamado | Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido | Saida::Nota { .. } => {}
             }
         }
         pedidos

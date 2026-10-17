@@ -106,3 +106,49 @@ fn a_voz_pela_metade_nem_abre() {
         .unwrap();
     assert_eq!(s.code(), Some(2));
 }
+
+/// O ONNX Runtime aceita um ambiente só por processo: falar, soltar o modelo
+/// parado e falar de novo (e duas falas seguidas) não pode dar erro. Pede os
+/// arquivos da voz baixados (COLMEIA_TESTE_KOKORO=<pasta voz>), toca o som e
+/// ouve o nome (é o que deixa o processo vivo com o modelo solto): rode com
+/// uma saída de som virtual e o monitor dela no lugar do microfone
+/// (PULSE_SINK=x PULSE_SOURCE=x.monitor) e `-- --ignored`.
+#[test]
+#[ignore]
+fn a_voz_fala_de_novo_depois_de_soltar_o_modelo() {
+    let pasta = std::path::PathBuf::from(std::env::var("COLMEIA_TESTE_KOKORO").expect("COLMEIA_TESTE_KOKORO"));
+    let mut filho = Command::new(env!("CARGO_BIN_EXE_colmeia-voz"))
+        .arg("--modelo")
+        .arg(pasta.join("ggml-base.bin"))
+        .args(["--parado-ms", "1500"])
+        .arg("--fala-modelo")
+        .arg(pasta.join("kokoro-v1.0-q8.onnx"))
+        .arg("--fala-voz")
+        .arg(pasta.join("pf_dora.bin"))
+        .arg("--fala-runtime")
+        .arg(pasta.join("libonnxruntime.so.1.31.0"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("abrir o colmeia-voz");
+    let mut saida = BufReader::new(filho.stdout.take().unwrap());
+    let mut entrada = filho.stdin.take().unwrap();
+    assert_eq!(linha(&mut saida), r#"{"evento":"iniciado"}"#);
+    writeln!(entrada, r#"{{"comando":"vigiar"}}"#).unwrap();
+    assert_eq!(linha(&mut saida), r#"{"evento":"vigiando","ligado":true}"#);
+    let mut falar = |texto: &str| writeln!(entrada, r#"{{"comando":"falar","texto":"{texto}"}}"#).unwrap();
+    falar("Primeira.");
+    falar("Segunda, logo em seguida.");
+    for _ in 0..2 {
+        assert_eq!(linha(&mut saida), r#"{"evento":"falando"}"#);
+        assert_eq!(linha(&mut saida), r#"{"evento":"falou"}"#);
+    }
+    // Parado mais que 1,5 s, o modelo sai da memória; ouvindo o nome, o processo fica.
+    std::thread::sleep(Duration::from_millis(3500));
+    falar("Depois de soltar o modelo.");
+    assert_eq!(linha(&mut saida), r#"{"evento":"falando"}"#);
+    assert_eq!(linha(&mut saida), r#"{"evento":"falou"}"#);
+    drop(entrada);
+    assert!(esperar_saida(&mut filho, Duration::from_secs(5)).success());
+}

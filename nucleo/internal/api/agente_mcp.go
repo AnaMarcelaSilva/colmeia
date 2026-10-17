@@ -39,6 +39,7 @@ func (s *Servidor) rotasAgente(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agente/navegador", s.doAgente(s.agenteAbrirNavegador))
 	mux.HandleFunc("POST /v1/agente/navegador/captura", s.doAgente(s.agenteCapturar))
 	mux.HandleFunc("POST /v1/agente/pedidos/{id}/concluir", s.doAgente(s.agenteConcluirPedido))
+	mux.HandleFunc("POST /v1/agente/coluna", s.doAgente(s.agenteMoverTarefa))
 	mux.HandleFunc("GET /v1/agente/lousa", s.doAgente(s.agenteLerLousa))
 	mux.HandleFunc("POST /v1/agente/lousa/elementos", s.doAgente(s.agenteAcrescentarALousa))
 	mux.HandleFunc("POST /v1/agente/uso", s.agenteUso)
@@ -74,6 +75,35 @@ func (s *Servidor) doAgente(f func(http.ResponseWriter, *http.Request, quemAgent
 		}
 		f(w, r, quemAgente{ctx: c, tarefa: t, projeto: p, perfil: perfil, pasta: t.Pasta(p)})
 	}
+}
+
+// agenteMoverTarefa: a pedido da usuária, o agente leva a própria tarefa
+// para Revisão ou Concluído. Vale como movimento dela (não é desfeito pela
+// regra automática) e entra na linha do tempo como "movida pelo agente a
+// pedido"; a frase da reunião é pedida como em qualquer ida a essas colunas.
+func (s *Servidor) agenteMoverTarefa(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	var pedido struct {
+		Coluna string `json:"coluna"`
+		Tarefa int64  `json:"tarefa"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.Tarefa != 0 && pedido.Tarefa != q.tarefa.ID {
+		responderErro(w, dados.ErrInvalido{Motivo: "Só dá para mover a tarefa em que você trabalha."})
+		return
+	}
+	if pedido.Coluna != "revisao" && pedido.Coluna != "concluido" {
+		responderErro(w, dados.ErrInvalido{Motivo: "Só dá para mover para revisao ou concluido."})
+		return
+	}
+	t, err := s.Banco.AtualizarTarefa(r.Context(), q.tarefa.ID, dados.Mudanca{Coluna: &pedido.Coluna}, dados.OrigemAgente)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{"tarefa": t.ID, "coluna": t.Coluna})
 }
 
 func hoje() string { return time.Now().Format("2006-01-02") }

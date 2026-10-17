@@ -4,7 +4,9 @@
 //! (quantizado em 8 bits, ~92 MB) sai da memória quando a fala fica parada.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
@@ -160,23 +162,33 @@ pub struct Kokoro {
     estilos: Vec<f32>,
 }
 
-/// Abre o runtime uma vez por processo (ele não sai mais da memória até o
-/// colmeia-voz sair) e o modelo, que sai junto com o Kokoro.
+/// O ambiente do ONNX Runtime: um só por processo (o runtime recusa um
+/// segundo, mesmo depois de soltar o primeiro). Fica até o colmeia-voz sair;
+/// só a sessão do modelo sai da memória quando a voz fica parada.
+static AMBIENTE: OnceLock<Environment> = OnceLock::new();
+
+const AJUDA: &str = "Desligue e ligue a voz da abelha em Ajustes para baixá-la de novo.";
+const NAO_ABRIU: &str = "A voz da abelha não abriu agora. Tente de novo; se continuar, desligue e ligue a voz da abelha em Ajustes.";
+
+fn ambiente(runtime: &Path) -> Result<&'static Environment, String> {
+    if let Some(a) = AMBIENTE.get() {
+        return Ok(a);
+    }
+    let a = ort::init_from(runtime).map_err(|e| crate::falha(NAO_ABRIU, e))?.with_name("colmeia-voz").build().map_err(|e| crate::falha(NAO_ABRIU, e))?;
+    Ok(AMBIENTE.get_or_init(|| a))
+}
+
+/// Abre o modelo (que sai junto com o Kokoro) no ambiente do processo.
 pub fn carregar(modelo: &Path, voz: &Path, runtime: &Path, linhas: usize) -> Result<Kokoro, String> {
-    let ajuda = "Desligue e ligue a voz da abelha em Ajustes › Voz para baixá-la de novo.";
     for arquivo in [modelo, voz, runtime] {
         if !arquivo.is_file() {
-            return Err(format!("A voz da abelha não está completa neste computador. {ajuda}"));
+            return Err(format!("A voz da abelha não está completa neste computador. {AJUDA}"));
         }
     }
-    let estilos = ler_voz(voz).map_err(|e| format!("{e} {ajuda}"))?;
-    let ambiente = ort::init_from(runtime)
-        .map_err(|e| format!("O ONNX Runtime não abriu ({e}). {ajuda}"))?
-        .with_name("colmeia-voz")
-        .build()
-        .map_err(|e| format!("O ONNX Runtime não abriu ({e})."))?;
-    let falhou = |e: ort::Error| format!("O modelo da voz não abriu ({e}). {ajuda}");
-    let sessao = Session::builder(&ambiente)
+    let estilos = ler_voz(voz).map_err(|e| format!("{e} {AJUDA}"))?;
+    let ambiente = ambiente(runtime)?;
+    let falhou = |e: ort::Error| crate::falha(&format!("O modelo da voz da abelha não abriu. {AJUDA}"), e);
+    let sessao = Session::builder(ambiente)
         .map_err(falhou)?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| falhou(e.into()))?
@@ -196,7 +208,7 @@ pub fn carregar(modelo: &Path, voz: &Path, runtime: &Path, linhas: usize) -> Res
 
 /// Os estilos de uma voz: 510 linhas de 256 números (float32, little-endian).
 fn ler_voz(voz: &Path) -> Result<Vec<f32>, String> {
-    let bytes = std::fs::read(voz).map_err(|e| format!("Não consegui ler a voz ({e})."))?;
+    let bytes = std::fs::read(voz).map_err(|e| crate::falha("Não consegui ler o arquivo da voz da abelha.", e))?;
     if bytes.len() % (ESTILO * 4) != 0 || bytes.is_empty() {
         return Err("O arquivo da voz não é o esperado.".into());
     }
@@ -217,7 +229,7 @@ impl Kokoro {
         let total = self.estilos.len() / ESTILO;
         let linha = (ids.len() - 2).min(total - 1);
         let estilo = self.estilos[linha * ESTILO..(linha + 1) * ESTILO].to_vec();
-        let falhou = |e: ort::Error| format!("Não consegui falar ({e}).");
+        let falhou = |e: ort::Error| crate::falha("A voz da abelha não conseguiu falar agora. Tente de novo.", e);
         let entradas = ort::inputs![
             "input_ids" => Tensor::from_array(([1usize, ids.len()], ids)).map_err(falhou)?,
             "style" => Tensor::from_array(([1usize, ESTILO], estilo)).map_err(falhou)?,

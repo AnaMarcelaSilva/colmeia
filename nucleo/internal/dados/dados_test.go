@@ -703,10 +703,10 @@ func TestOpcoesDeVozDoPerfil(t *testing.T) {
 	ctx := context.Background()
 	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
 	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
-	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != (OpcoesVoz{Sensibilidade: SensibilidadePadrao}) {
+	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != OpcoesVozPadrao() {
 		t.Fatalf("a voz nasce toda desligada: %+v", p.OpcoesVoz)
 	}
-	o := OpcoesVoz{Comandos: true, Abelha: true, Efeito: true, OuvirNome: true, Sensibilidade: 7, PerguntaIA: true}
+	o := OpcoesVoz{Comandos: true, Abelha: true, Efeito: true, OuvirNome: true, Sensibilidade: 7, PerguntaIA: true, Modelo: "small", PausaMs: 1800}
 	if err := b.DefinirVoz(ctx, perfil.ID, o); err != nil {
 		t.Fatal(err)
 	}
@@ -721,16 +721,21 @@ func TestOpcoesDeVozDoPerfil(t *testing.T) {
 			t.Errorf("sensibilidade %d aceita", s)
 		}
 	}
+	for _, ruim := range []OpcoesVoz{{Sensibilidade: 5, Modelo: "large"}, {Sensibilidade: 5, PausaMs: 500}, {Sensibilidade: 5, PausaMs: 3100}} {
+		if err := b.DefinirVoz(ctx, perfil.ID, ruim); err == nil {
+			t.Errorf("aceitou %+v", ruim)
+		}
+	}
 	if err := b.DefinirVoz(ctx, 99, OpcoesVoz{Sensibilidade: 5}); !errors.Is(err, ErrNaoEncontrado) {
 		t.Errorf("perfil que não existe: %v", err)
 	}
 	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.voz"}})
-	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"voz_sensibilidade":7`) {
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"voz_sensibilidade":7`) || !strings.Contains(string(eventos[0].Dados), `"voz_modelo":"small"`) {
 		t.Errorf("evento da voz: %+v", eventos)
 	}
 
 	// Um banco de antes da voz (sem as colunas) abre com tudo desligado.
-	for _, c := range []string{"voz_comandos", "voz_abelha", "voz_efeito", "voz_nome", "voz_sensibilidade", "voz_ia"} {
+	for _, c := range []string{"voz_comandos", "voz_abelha", "voz_efeito", "voz_nome", "voz_sensibilidade", "voz_ia", "voz_modelo", "voz_pausa"} {
 		if _, err := b.db.Exec(`ALTER TABLE perfis DROP COLUMN ` + c); err != nil {
 			t.Fatal(err)
 		}
@@ -741,7 +746,7 @@ func TestOpcoesDeVozDoPerfil(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b2.Fechar()
-	if p, err := b2.Perfil(ctx, perfil.ID); err != nil || p.OpcoesVoz != (OpcoesVoz{Sensibilidade: SensibilidadePadrao}) {
+	if p, err := b2.Perfil(ctx, perfil.ID); err != nil || p.OpcoesVoz != OpcoesVozPadrao() {
 		t.Errorf("depois da migração: %+v %v", p.OpcoesVoz, err)
 	}
 }

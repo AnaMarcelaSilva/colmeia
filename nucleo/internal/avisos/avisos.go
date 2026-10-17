@@ -36,6 +36,27 @@ func Novo() *Barramento { return &Barramento{assinaturas: map[*Assinatura]struct
 // número: a tela aplica por cima dele só o que veio depois.
 func (b *Barramento) Seq() uint64 { return b.seq.Load() }
 
+// PublicarAbelha entrega só à abelha fixa do perfil, sem número: é um
+// aviso sobre as janelas, que nada muda no retrato do quadro.
+func (b *Barramento) PublicarAbelha(perfil int64, mensagem map[string]any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	bruto, err := json.Marshal(mensagem)
+	if err != nil {
+		return
+	}
+	for a := range b.assinaturas {
+		if a.perfil != perfil || !a.abelha {
+			continue
+		}
+		select {
+		case a.fila <- bruto:
+		default:
+			a.atrasada.Store(true)
+		}
+	}
+}
+
 // Publicar numera a mensagem, acrescenta "seq" e entrega às telas do perfil.
 // Nunca bloqueia: é chamado de dentro dos pedidos e da leitura dos terminais.
 func (b *Barramento) Publicar(perfil int64, mensagem map[string]any) {
@@ -62,11 +83,14 @@ func (b *Barramento) Publicar(perfil int64, mensagem map[string]any) {
 // Assinatura é uma tela recebendo os avisos de um perfil. A abelha fixa
 // recebe os mesmos avisos, mas não conta como janela aberta (Janelas).
 type Assinatura struct {
-	perfil   int64
-	abelha   bool
-	fila     chan []byte
-	atrasada atomic.Bool
-	b        *Barramento
+	perfil int64
+	abelha bool
+	// janela é o nome que a tela se dá (para dizer depois que minimizou).
+	janela     string
+	minimizada bool
+	fila       chan []byte
+	atrasada   atomic.Bool
+	b          *Barramento
 }
 
 func (b *Barramento) Assinar(perfil int64) (*Assinatura, error) { return b.assinar(perfil, false) }
@@ -85,6 +109,34 @@ func (b *Barramento) assinar(perfil int64, abelha bool) (*Assinatura, error) {
 	return a, nil
 }
 
+// Visiveis conta as janelas do perfil abertas e não minimizadas (sem a
+// abelha fixa): com alguma, a abelha fixa se esconde para não cobrir a janela.
+func (b *Barramento) Visiveis(perfil int64) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for a := range b.assinaturas {
+		if a.perfil == perfil && !a.abelha && !a.minimizada {
+			n++
+		}
+	}
+	return n
+}
+
+// Minimizar marca a janela `janela` do perfil como minimizada (ou não);
+// diz se mudou algo.
+func (b *Barramento) Minimizar(perfil int64, janela string, minimizada bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	mudou := false
+	for a := range b.assinaturas {
+		if a.perfil == perfil && !a.abelha && janela != "" && a.janela == janela && a.minimizada != minimizada {
+			a.minimizada, mudou = minimizada, true
+		}
+	}
+	return mudou
+}
+
 // Janelas conta as janelas da Colmeia ligadas aos avisos do perfil, sem a
 // abelha fixa: diz se um pedido de abrir uma tarefa tem quem atenda.
 func (b *Barramento) Janelas(perfil int64) int {
@@ -97,6 +149,13 @@ func (b *Barramento) Janelas(perfil int64) int {
 		}
 	}
 	return n
+}
+
+// Nomear guarda o nome que a janela se deu.
+func (a *Assinatura) Nomear(janela string) {
+	a.b.mu.Lock()
+	defer a.b.mu.Unlock()
+	a.janela = janela
 }
 
 func (a *Assinatura) Cancelar() {

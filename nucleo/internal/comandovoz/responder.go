@@ -211,6 +211,10 @@ func comMotivo(a Agente) string {
 	if a.Motivo == "" {
 		return a.Nome
 	}
+	// "esperando resposta" já é uma descrição; "pede aprovação" pede o "que".
+	if strings.HasPrefix(a.Motivo, "esperando") {
+		return a.Nome + ", " + a.Motivo
+	}
 	return a.Nome + ", que " + a.Motivo
 }
 

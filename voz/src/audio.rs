@@ -15,6 +15,8 @@ pub const LIMITE_SEGUNDOS: u32 = 120;
 
 pub const SEM_MICROFONE: &str = "Não achei um microfone. Confira se ele está ligado e liberado para a Colmeia nas configurações de som.";
 pub const SEM_SAIDA: &str = "Não achei uma saída de som para a voz da abelha.";
+const ABRIR_MICROFONE: &str = "Não consegui abrir o microfone. Confira se ele está ligado e livre e tente de novo.";
+const ABRIR_SAIDA: &str = "Não consegui abrir a saída de som para a voz da abelha. Confira o som do computador e tente de novo.";
 
 /// O microfone aberto: a cada ~100 ms, o callback recebe um bloco a 16 kHz
 /// em um canal. Fechar é soltar o `Microfone`.
@@ -27,7 +29,7 @@ impl Microfone {
     /// dispositivo (desligado no meio, por exemplo).
     pub fn abrir(bloco: impl FnMut(Vec<f32>) + Send + 'static, falha: impl FnMut(String) + Send + 'static) -> Result<Microfone, String> {
         let dispositivo = microfone().ok_or(SEM_MICROFONE)?;
-        let config = dispositivo.default_input_config().map_err(|e| format!("{SEM_MICROFONE} ({e})"))?;
+        let config = dispositivo.default_input_config().map_err(|e| crate::falha(SEM_MICROFONE, e))?;
         let (canais, taxa, formato) = (config.channels(), config.sample_rate(), config.sample_format());
         let quadros = quadros_por_vez(config.buffer_size(), taxa);
         let mut config: cpal::StreamConfig = config.into();
@@ -43,10 +45,12 @@ impl Microfone {
             SampleFormat::I32 => abrir_entrada::<i32, _>(&dispositivo, config, conversor, falha),
             SampleFormat::U16 => abrir_entrada::<u16, _>(&dispositivo, config, conversor, falha),
             SampleFormat::F32 => abrir_entrada::<f32, _>(&dispositivo, config, conversor, falha),
-            outro => return Err(format!("O microfone usa um formato que a Colmeia não lê ({outro}).")),
+            outro => {
+                return Err(crate::falha("O microfone usa um formato de som que a Colmeia não lê. Escolha outro microfone nas configurações de som.", outro));
+            }
         }
-        .map_err(|e| format!("Não consegui abrir o microfone: {e}"))?;
-        fluxo.play().map_err(|e| format!("Não consegui abrir o microfone: {e}"))?;
+        .map_err(|e| crate::falha(ABRIR_MICROFONE, e))?;
+        fluxo.play().map_err(|e| crate::falha(ABRIR_MICROFONE, e))?;
         Ok(Microfone { _fluxo: fluxo })
     }
 }
@@ -111,7 +115,7 @@ where
                 (conversor.bloco)(saida);
             }
         },
-        move |e| falha(format!("O microfone parou: {e}")),
+        move |e| falha(crate::falha("O microfone parou no meio. Confira se ele continua ligado e tente de novo.", e)),
         None,
     )
 }
@@ -246,7 +250,7 @@ struct Saida {
 impl Tocador {
     pub fn abrir(taxa_entrada: u32) -> Result<Tocador, String> {
         let dispositivo = saida().ok_or(SEM_SAIDA)?;
-        let config = dispositivo.default_output_config().map_err(|e| format!("{SEM_SAIDA} ({e})"))?;
+        let config = dispositivo.default_output_config().map_err(|e| crate::falha(SEM_SAIDA, e))?;
         let (canais, taxa, formato) = (config.channels(), config.sample_rate(), config.sample_format());
         let quadros = quadros_por_vez(config.buffer_size(), taxa / 2);
         let saida = Arc::new(Mutex::new(Saida::default()));
@@ -261,10 +265,10 @@ impl Tocador {
             SampleFormat::I32 => abrir_saida::<i32>(&dispositivo, config, canais, &saida),
             SampleFormat::U16 => abrir_saida::<u16>(&dispositivo, config, canais, &saida),
             SampleFormat::F32 => abrir_saida::<f32>(&dispositivo, config, canais, &saida),
-            outro => return Err(format!("A saída de som usa um formato que a Colmeia não toca ({outro}).")),
+            outro => return Err(crate::falha("A saída de som usa um formato que a Colmeia não toca. Escolha outra saída nas configurações de som.", outro)),
         }
-        .map_err(|e| format!("Não consegui abrir a saída de som: {e}"))?;
-        fluxo.play().map_err(|e| format!("Não consegui abrir a saída de som: {e}"))?;
+        .map_err(|e| crate::falha(ABRIR_SAIDA, e))?;
+        fluxo.play().map_err(|e| crate::falha(ABRIR_SAIDA, e))?;
         Ok(Tocador { _fluxo: fluxo, saida, taxa, reamostrador: Reamostrador::novo(taxa_entrada, taxa) })
     }
 

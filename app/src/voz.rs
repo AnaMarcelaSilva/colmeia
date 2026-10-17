@@ -61,8 +61,8 @@ pub struct Ditado {
     /// O que chega das threads de leitura, marcado com o processo que mandou.
     respostas: (Sender<Marcada>, Receiver<Marcada>),
     geracao: u64,
-    /// Os arquivos do modelo, perguntados ao núcleo na primeira vez.
-    arquivos: Option<Arquivos>,
+    /// Os arquivos do modelo, perguntados ao núcleo na primeira vez (e o perfil deles).
+    arquivos: Option<(i64, Arquivos)>,
     /// A tarefa em que o microfone abriu: saindo dela, ele fecha.
     pub tarefa: i64,
     /// O microfone foi aberto pelo atalho (soltar a tecla para).
@@ -80,15 +80,20 @@ impl Ditado {
         self.estado
     }
 
-    /// Abre o microfone (e o programa, se ainda não está aberto).
-    pub fn ouvir(&mut self, ctx: &egui::Context, tarefa: i64, pelo_atalho: bool) -> Result<(), String> {
+    /// Abre o microfone (e o programa, se ainda não está aberto), com o
+    /// modelo e o vocabulário do perfil.
+    pub fn ouvir(&mut self, ctx: &egui::Context, perfil: i64, tarefa: i64, pelo_atalho: bool) -> Result<(), String> {
         if self.estado != Estado::Parado {
             return Ok(());
         }
         if self.processo.is_none() {
-            self.abrir(ctx)?;
+            self.abrir(ctx, perfil)?;
         }
-        self.mandar("ouvir")?;
+        let pedido = canal::voz::pedido_de_ouvir(perfil, false);
+        if self.processo.as_mut().is_none_or(|p| p.mandar(&pedido).is_err()) {
+            self.fechar();
+            return Err("O ditado fechou sem responder. Tente de novo.".into());
+        }
         self.estado = Estado::Abrindo;
         self.tarefa = tarefa;
         self.pelo_atalho = pelo_atalho;
@@ -120,12 +125,12 @@ impl Ditado {
         Ok(())
     }
 
-    fn abrir(&mut self, ctx: &egui::Context) -> Result<(), String> {
+    fn abrir(&mut self, ctx: &egui::Context, perfil: i64) -> Result<(), String> {
         let arquivos = match &self.arquivos {
-            Some(a) => a.clone(),
-            None => {
-                let a = Arquivos::do_nucleo()?;
-                self.arquivos = Some(a.clone());
+            Some((de, a)) if *de == perfil => a.clone(),
+            _ => {
+                let a = Arquivos::do_nucleo(perfil)?;
+                self.arquivos = Some((perfil, a.clone()));
                 a
             }
         };
@@ -163,6 +168,7 @@ impl Ditado {
             | Resposta::Falando
             | Resposta::Falou
             | Resposta::Amostra { .. }
+            | Resposta::Nota { .. }
             | Resposta::Aprendido => None,
             Resposta::Ouvindo => {
                 // Um "parar" já pode ter saído: o estado só avança.

@@ -162,8 +162,10 @@ fn mostra_motivo(t: &Tarefa) -> bool {
 }
 
 /// O rodapé do cartão: a marca "sozinha" e o "Responder" ou "Ver o erro".
+/// O rodapé: a marca "sozinha" e o que fazer (responder, ver o erro ou, em
+/// Revisão, concluir sem precisar de revisor).
 fn tem_rodape(t: &Tarefa, grupo: Option<Grupo>) -> bool {
-    anda_sozinha(t).is_some() || matches!(grupo, Some(Grupo::Espera | Grupo::Erro))
+    anda_sozinha(t).is_some() || matches!(grupo, Some(Grupo::Espera | Grupo::Erro)) || t.coluna == Coluna::Revisao
 }
 
 fn altura_cartao(t: &Tarefa, com_projeto: bool, frase: bool, rodape: bool) -> f32 {
@@ -573,6 +575,7 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, grupo: Option<Grupo>, v: &V
     let resposta = if v.pode_mudar { resposta.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resposta };
 
     // O rodapé: a marca "sozinha" (a dica explica o caminho) e o que fazer.
+    let mut concluir = false;
     if tem_rodape(t, grupo) {
         let meio = y + 2.0 + RODAPE / 2.0 - 4.0;
         if let Some(etapa) = anda_sozinha(t) {
@@ -596,13 +599,28 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, grupo: Option<Grupo>, v: &V
         let acao = match grupo {
             Some(Grupo::Espera) => Some(("Responder", p.alerta)),
             Some(Grupo::Erro) => Some(("Ver o erro", p.erro)),
+            _ if t.coluna == Coluna::Revisao && v.pode_mudar => Some(("Concluir", p.ok)),
             _ => None,
         };
         if let Some((texto, cor)) = acao {
             let galeria = ui.painter().layout_no_wrap(texto.into(), forte(12.0), cor);
             let direita = rect.right() - 14.0 - 10.0;
-            ui.painter().galley(pos2(direita - galeria.size().x - 4.0, meio - galeria.size().y / 2.0), galeria, cor);
-            tema::desenhar_icone(ui.painter(), pos2(direita + 2.0, meio), Icone::Proximo, cor);
+            let largura = galeria.size().x;
+            if texto == "Concluir" {
+                // Clicável à parte do cartão: leva para Concluído sem revisor.
+                let zona = Rect::from_min_max(pos2(direita - largura - 10.0, meio - 11.0), pos2(direita + 10.0, meio + 11.0));
+                let botao = ui.interact(zona, Id::new(("concluir-cartao", t.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if botao.hovered() {
+                    ui.painter().rect_filled(zona, CornerRadius::same(6), cor.gamma_multiply(0.14));
+                }
+                if botao.on_hover_text("Levar para Concluído (sem precisar de revisor)").clicked() {
+                    concluir = true;
+                }
+            }
+            let vao = if texto == "Concluir" { 7.0 } else { 4.0 };
+            ui.painter().galley(pos2(direita - largura - vao, meio - galeria.size().y / 2.0), galeria, cor);
+            let icone = if texto == "Concluir" { Icone::Check } else { Icone::Proximo };
+            tema::desenhar_icone(ui.painter(), pos2(direita + 2.0, meio), icone, cor);
         }
     }
 
@@ -622,12 +640,19 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, grupo: Option<Grupo>, v: &V
         linha_cortada(&pintor, fantasma.left_center() + vec2(14.0, -9.0), &t.titulo, forte(13.5), p.texto, fantasma.width() - 28.0);
     }
 
-    let mut acao = resposta.clicked().then_some(Acao::AbrirTarefa(t.id));
+    let mut acao = if concluir { Some(Acao::Moveu(t.id, Coluna::Concluido)) } else { resposta.clicked().then_some(Acao::AbrirTarefa(t.id)) };
     let pode_mudar = v.pode_mudar;
+    let passo = crate::tarefa::proximo_passo(t.coluna);
     let menu = |ui: &mut egui::Ui, acao: &mut Option<Acao>| {
         ui.set_min_width(200.0);
         if tema::opcao_menu(ui, "Abrir tarefa", false) {
             *acao = Some(Acao::AbrirTarefa(t.id));
+            ui.close();
+        }
+        if let Some((rotulo, _, coluna)) = passo
+            && tema::opcao_menu_com(ui, rotulo, None, pode_mudar)
+        {
+            *acao = Some(Acao::Moveu(t.id, coluna));
             ui.close();
         }
         if tema::opcao_menu_com(ui, "Remover tarefa…", None, pode_mudar) {

@@ -40,14 +40,33 @@ type Perfil struct {
 // brilho e um eco curto nela. OuvirNome: a abelha fixa fica ouvindo o nome dela
 // para abrir o microfone sozinha, com a Sensibilidade (1 a 9) escolhida.
 // PerguntaIA: o que não é um comando fixo vai, como pergunta livre, num
-// pedido ao Claude Code (usa tokens da conta).
+// pedido ao Claude Code (usa tokens da conta). Modelo é o Whisper preferido
+// (base ou small; vale o outro se só ele estiver baixado) e PausaMs o
+// silêncio que encerra um comando falado.
 type OpcoesVoz struct {
-	Comandos      bool `json:"voz_comandos"`
-	Abelha        bool `json:"voz_abelha"`
-	Efeito        bool `json:"voz_efeito"`
-	OuvirNome     bool `json:"voz_nome"`
-	Sensibilidade int  `json:"voz_sensibilidade"`
-	PerguntaIA    bool `json:"voz_ia"`
+	Comandos      bool   `json:"voz_comandos"`
+	Abelha        bool   `json:"voz_abelha"`
+	Efeito        bool   `json:"voz_efeito"`
+	OuvirNome     bool   `json:"voz_nome"`
+	Sensibilidade int    `json:"voz_sensibilidade"`
+	PerguntaIA    bool   `json:"voz_ia"`
+	Modelo        string `json:"voz_modelo"`
+	PausaMs       int    `json:"voz_pausa"`
+}
+
+// Os modelos do Whisper que o perfil pode preferir; o primeiro é o padrão.
+var ModelosWhisper = []string{"base", "small"}
+
+// A pausa que encerra um comando falado: padrão e limites, em milissegundos.
+const (
+	PausaPadrao = 1200
+	PausaMinima = 600
+	PausaMaxima = 3000
+)
+
+// OpcoesVozPadrao: tudo desligado, a sensibilidade do meio, o Whisper base e a pausa padrão.
+func OpcoesVozPadrao() OpcoesVoz {
+	return OpcoesVoz{Sensibilidade: SensibilidadePadrao, Modelo: ModelosWhisper[0], PausaMs: PausaPadrao}
 }
 
 // SensibilidadePadrao é o meio da escala: nem ouve por engano, nem precisa gritar.
@@ -60,11 +79,11 @@ var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zan
 const NomeMascotePadrao = "Colmeia"
 
 const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia`
+	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia, voz_modelo, voz_pausa`
 
 func (p *Perfil) campos() []any {
 	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado,
-		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade, &p.PerguntaIA}
+		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade, &p.PerguntaIA, &p.Modelo, &p.PausaMs}
 }
 
 type Conta struct {
@@ -117,10 +136,12 @@ func escanearTarefa(l escaneavel, t *Tarefa) error {
 	return l.Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm, &t.ColunaAuto)
 }
 
-// Origens de uma mudança: sua (pela tela) ou automática (regra do núcleo).
+// Origens de uma mudança: sua (pela tela), automática (regra do núcleo) ou
+// do agente a seu pedido (a ferramenta mover_tarefa), que vale como sua.
 const (
 	OrigemVoce       = "voce"
 	OrigemAutomatica = "automatico"
+	OrigemAgente     = "agente"
 )
 
 // donoDoProjeto devolve o perfil e o nome do projeto, para o escopo e o texto dos eventos.
@@ -165,7 +186,7 @@ func (b *Banco) CriarPerfil(ctx context.Context, nome, tema string) (Perfil, err
 		return Perfil{}, err
 	}
 	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true, MascoteModelo: ModelosMascote[0], MascoteNome: NomeMascotePadrao,
-		OpcoesVoz: OpcoesVoz{Sensibilidade: SensibilidadePadrao}}
+		OpcoesVoz: OpcoesVozPadrao()}
 	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO perfis (nome, tema, criado_em) VALUES (?, ?, ?)`, p.Nome, p.Tema, p.CriadoEm)
 		if err != nil {
@@ -301,14 +322,27 @@ func (b *Banco) DefinirDitado(ctx context.Context, perfil int64, ligado bool) er
 
 // DefinirVoz grava as opções dos comandos falados do perfil. Quem confere
 // se os modelos estão baixados (e se o nome da abelha já tem gravações) é a
-// API; aqui só a sensibilidade, de 1 a 9.
+// API; aqui a sensibilidade (1 a 9), o modelo (da lista) e a pausa (0,6 a 3 s).
 func (b *Banco) DefinirVoz(ctx context.Context, perfil int64, o OpcoesVoz) error {
 	if o.Sensibilidade < 1 || o.Sensibilidade > 9 {
 		return ErrInvalido{Motivo: "A sensibilidade vai de 1 a 9."}
 	}
+	if o.Modelo == "" {
+		o.Modelo = ModelosWhisper[0]
+	}
+	if err := umDe("modelo de voz", o.Modelo, ModelosWhisper); err != nil {
+		return err
+	}
+	if o.PausaMs == 0 {
+		o.PausaMs = PausaPadrao
+	}
+	if o.PausaMs < PausaMinima || o.PausaMs > PausaMaxima {
+		return ErrInvalido{Motivo: "A pausa que encerra o comando vai de 0,6 a 3 segundos."}
+	}
 	return b.emTransacao(ctx, func(tx *transacao) error {
-		r, err := tx.ExecContext(ctx, `UPDATE perfis SET voz_comandos = ?, voz_abelha = ?, voz_efeito = ?, voz_nome = ?, voz_sensibilidade = ?, voz_ia = ? WHERE id = ?`,
-			o.Comandos, o.Abelha, o.Efeito, o.OuvirNome, o.Sensibilidade, o.PerguntaIA, perfil)
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET voz_comandos = ?, voz_abelha = ?, voz_efeito = ?, voz_nome = ?, voz_sensibilidade = ?, voz_ia = ?,
+			voz_modelo = ?, voz_pausa = ? WHERE id = ?`,
+			o.Comandos, o.Abelha, o.Efeito, o.OuvirNome, o.Sensibilidade, o.PerguntaIA, o.Modelo, o.PausaMs, perfil)
 		if err != nil {
 			return err
 		}
@@ -667,7 +701,7 @@ func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca, origem
 			return Tarefa{}, err
 		}
 	}
-	if err := umDe("origem", origem, []string{OrigemVoce, OrigemAutomatica}); err != nil {
+	if err := umDe("origem", origem, []string{OrigemVoce, OrigemAutomatica, OrigemAgente}); err != nil {
 		return Tarefa{}, err
 	}
 	var t Tarefa

@@ -15,7 +15,7 @@ use eframe::egui::{self, CornerRadius, FontId, Key, Rect, RichText, Sense, Strok
 
 use super::{CLARAO, Colmeia, Pedido, RespostaNavegador, TITULO_MINIMO, Tela, cartao_de_fim};
 use crate::compositor::Compositor;
-use crate::dados::AgenteTela;
+use crate::dados::{AgenteTela, Coluna};
 use crate::tema::{self, EstadoVisual, cores, texto_forte};
 use crate::{api, arquivos, descricao, gaveta, sistema, terminal};
 
@@ -163,7 +163,10 @@ impl Colmeia {
         let agentes = tarefa.agentes.clone();
         let pasta = tarefa.pasta.clone();
         let projeto = tarefa.projeto_id;
-        let (voltar, novo_agente, abrir_editor) = self.cabecalho_tarefa(ui, id);
+        let (voltar, novo_agente, abrir_editor, mover) = self.cabecalho_tarefa(ui, id);
+        if let Some(coluna) = mover {
+            self.mover(id, coluna, ui.ctx(), agora);
+        }
         ui.add_space(4.0);
         if let Some(aba) = self.barra_de_abas(ui, id, projeto, &agentes) {
             self.mudar_aba(id, aba, ui.ctx());
@@ -219,8 +222,11 @@ impl Colmeia {
 
     /// O cabeçalho: voltar, título, número, branch e estado; à direita
     /// "Abrir no IntelliJ" e "+ Agente". Devolve (voltar, novo agente, abrir no editor).
-    fn cabecalho_tarefa(&mut self, ui: &mut egui::Ui, id: i64) -> (bool, bool, bool) {
-        let Some(tarefa) = self.modelo.tarefas.iter().find(|t| t.id == id) else { return (false, false, false) };
+    fn cabecalho_tarefa(&mut self, ui: &mut egui::Ui, id: i64) -> (bool, bool, bool, Option<Coluna>) {
+        let Some(tarefa) = self.modelo.tarefas.iter().find(|t| t.id == id) else { return (false, false, false, None) };
+        let mut mover = None;
+        // Concluir sem revisor, ou mandar para revisão, num clique.
+        let passo = proximo_passo(tarefa.coluna);
         let p = cores();
         let pode = self.pode_mudar();
         let (mut voltar, mut novo_agente, mut abrir_editor) = (false, false, false);
@@ -244,6 +250,9 @@ impl Colmeia {
             let mut reservado_editor = 0.0;
             if !demo {
                 reservado += medir("+ Agente", tema::forte(13.5)) + 32.0 + 6.0 + espaco;
+                if let Some((rotulo, _, _)) = passo {
+                    reservado += medir(rotulo, egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
+                }
                 if let Some((nome, _)) = editor {
                     reservado_editor = medir(&format!("Abrir no {nome}"), egui::FontId::proportional(13.0)) + 28.0 + 6.0 + espaco;
                 }
@@ -288,6 +297,12 @@ impl Colmeia {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 novo_agente = tema::botao_principal(ui, "+ Agente", pode).on_hover_text("Abrir um agente (Claude Code, Codex…) nesta tarefa").clicked();
+                if let Some((rotulo, dica, coluna)) = passo {
+                    ui.add_space(6.0);
+                    if tema::botao_secundario(ui, rotulo).on_hover_text(dica).clicked() && pode {
+                        mover = Some(coluna);
+                    }
+                }
                 if let Some((nome, _)) = editor {
                     ui.add_space(6.0);
                     let rotulo = if editor_curto { nome.to_string() } else { format!("Abrir no {nome}") };
@@ -295,7 +310,7 @@ impl Colmeia {
                 }
             });
         });
-        (voltar, novo_agente, abrir_editor)
+        (voltar, novo_agente, abrir_editor, mover)
     }
 
     /// As abas, com o número de agentes (âmbar quando um espera você), o
@@ -773,6 +788,16 @@ impl Colmeia {
             }
             _ => {}
         }
+    }
+}
+
+/// O próximo passo à mão, sem esperar o revisor: em Revisão, concluir; com
+/// agente trabalhando ou esperando você, mandar para a revisão.
+pub fn proximo_passo(coluna: Coluna) -> Option<(&'static str, &'static str, Coluna)> {
+    match coluna {
+        Coluna::Revisao => Some(("Concluir", "Levar a tarefa para Concluído (sem precisar de revisor)", Coluna::Concluido)),
+        Coluna::Trabalhando | Coluna::AguardandoVoce => Some(("Enviar para revisão", "Levar a tarefa para Revisão", Coluna::Revisao)),
+        Coluna::Backlog | Coluna::Concluido => None,
     }
 }
 

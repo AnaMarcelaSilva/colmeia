@@ -137,13 +137,23 @@ pub struct Extrator {
     mfcc: Mfcc,
     guardado: Vec<f32>,
     anterior: f32,
+    /// Abaixo desta energia, longe de fala, o quadro é o último silêncio
+    /// calculado, sem FFT (0 = calcula todos, como numa gravação).
+    pub porta: f32,
+    /// Quadros desde o último acima da porta.
+    desde_som: usize,
+    silencio: Option<Quadro>,
 }
 
 impl Default for Extrator {
     fn default() -> Self {
-        Extrator { mfcc: Mfcc::novo(), guardado: Vec::new(), anterior: 0.0 }
+        Extrator { mfcc: Mfcc::novo(), guardado: Vec::new(), anterior: 0.0, porta: 0.0, desde_som: usize::MAX, silencio: None }
     }
 }
+
+/// Perto de som (300 ms antes e depois), todo quadro é calculado: o começo e
+/// o fim das palavras ficam iguais aos das referências.
+const EM_VOLTA: usize = 30;
 
 impl Extrator {
     pub fn alimentar(&mut self, bloco: &[f32]) -> Vec<(Quadro, f32)> {
@@ -157,7 +167,18 @@ impl Extrator {
         while inicio + JANELA <= self.guardado.len() {
             let trecho = &self.guardado[inicio..inicio + JANELA];
             let energia = crate::pausa::rms(trecho);
-            saida.push((self.mfcc.quadro(trecho), energia));
+            self.desde_som = if energia >= self.porta { 0 } else { self.desde_som.saturating_add(1) };
+            let quadro = match self.silencio {
+                Some(q) if self.desde_som > EM_VOLTA => q,
+                _ => {
+                    let q = self.mfcc.quadro(trecho);
+                    if energia < self.porta {
+                        self.silencio = Some(q);
+                    }
+                    q
+                }
+            };
+            saida.push((quadro, energia));
             inicio += PASSO;
         }
         self.guardado.drain(..inicio);

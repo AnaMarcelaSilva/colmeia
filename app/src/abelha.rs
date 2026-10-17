@@ -34,6 +34,8 @@ pub struct Abelha {
     /// Até quando a abelha anima (troca de estado ou mouse em cima).
     animar_ate: f64,
     em_cima: bool,
+    /// O microfone aberto: a abelha põe o fone (sempre à vista).
+    pub fone: Option<mascote::Fone>,
 }
 
 /// Quadros por segundo da animação: suave o bastante para uma abelha pequena
@@ -71,6 +73,7 @@ impl Abelha {
             mudou_em: 0.0,
             animar_ate: 0.0,
             em_cima: false,
+            fone: None,
         }
     }
 
@@ -132,7 +135,8 @@ impl Abelha {
             self.tempo_parado()
         };
         let tempo = Tempo { total: t_visual as f32, no_estado: (t_visual - self.mudou_em) as f32 };
-        mascote::desenhar(ui.painter(), rect.center(), rect.height(), self.modelo, self.estado, tempo);
+        let acessorios = mascote::Acessorios { fone: self.fone, sem_aviso: false };
+        mascote::desenhar_com(ui.painter(), rect.center(), rect.height(), self.modelo, self.estado, tempo, acessorios);
         resposta
     }
 

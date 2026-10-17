@@ -39,6 +39,13 @@ pub enum Resposta {
         segundos: f32,
     },
     Aprendido,
+    /// O teste do nome: a nota do que se ouviu, o limite e se foi ouvido.
+    Nota {
+        nota: u8,
+        limite: u8,
+        #[serde(default)]
+        ouviu: bool,
+    },
     Saindo {
         #[serde(default)]
         motivo: String,
@@ -64,8 +71,6 @@ pub struct Arquivos {
 struct EstadoModelo {
     estado: String,
     #[serde(default)]
-    caminho: String,
-    #[serde(default)]
     caminhos: Vec<String>,
 }
 
@@ -75,18 +80,71 @@ fn estado(caminho: &str) -> Result<EstadoModelo, String> {
 }
 
 impl Arquivos {
-    /// Pergunta ao núcleo. Sem o Whisper, não há o que abrir.
-    pub fn do_nucleo() -> Result<Arquivos, String> {
-        let w = estado("/v1/voz")?;
-        if w.estado != "pronto" || w.caminho.is_empty() {
-            return Err("O modelo de voz não está baixado. Ligue a voz em Ajustes.".into());
-        }
+    /// Pergunta ao núcleo. Sem um Whisper, não há o que abrir.
+    pub fn do_nucleo(perfil: i64) -> Result<Arquivos, String> {
+        let c = Contexto::do_nucleo(perfil)?;
         let fala = estado("/v1/voz/fala")
             .ok()
             .filter(|f| f.estado == "pronto" && f.caminhos.len() == 3)
             .map(|f| [f.caminhos[0].clone(), f.caminhos[1].clone(), f.caminhos[2].clone()]);
-        Ok(Arquivos { whisper: w.caminho, fala })
+        Ok(Arquivos { whisper: c.modelo, fala })
     }
+}
+
+/// O que vai junto com o pedido de ouvir: o Whisper do perfil (o base ou o
+/// small), o vocabulário dele para o Whisper e a pausa que encerra um comando.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Contexto {
+    pub modelo: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub pausa_ms: u32,
+}
+
+impl Contexto {
+    pub fn do_nucleo(perfil: i64) -> Result<Contexto, String> {
+        let (status, corpo) =
+            crate::pedir_com_corpo("GET", &format!("/v1/perfis/{perfil}/voz/contexto"), None).map_err(|e| format!("Não consegui falar com o núcleo: {e}"))?;
+        if status != 200 {
+            let erro = serde_json::from_str::<serde_json::Value>(&corpo).ok().and_then(|v| v["erro"].as_str().map(String::from));
+            return Err(erro.unwrap_or_else(|| "O modelo de voz não está baixado. Ligue a voz em Ajustes.".into()));
+        }
+        serde_json::from_str(&corpo).map_err(|e| format!("Resposta estranha do núcleo: {e}"))
+    }
+
+    /// Os campos do pedido de ouvir (ou de ouvir o nome).
+    pub fn no_pedido(&self, pedido: &mut serde_json::Value) {
+        pedido["modelo"] = self.modelo.clone().into();
+        pedido["prompt"] = self.prompt.clone().into();
+        if self.pausa_ms > 0 {
+            pedido["pausa_ms"] = self.pausa_ms.into();
+        }
+    }
+}
+
+/// O pedido de ouvir com o contexto do perfil (sem ele, se o núcleo não respondeu).
+pub fn pedido_de_ouvir(perfil: i64, ate_silencio: bool) -> serde_json::Value {
+    let mut p = serde_json::json!({ "comando": "ouvir", "ate_silencio": ate_silencio });
+    if let Ok(c) = Contexto::do_nucleo(perfil) {
+        c.no_pedido(&mut p);
+    }
+    p
+}
+
+/// Para onde vai a saída de erro do colmeia-voz: os detalhes técnicos dos
+/// erros (o que aparece para quem usa é só a mensagem em português). Começa
+/// de novo quando passa de 1 MB.
+fn log_da_voz() -> Stdio {
+    let caminho = crate::diretorio().join("colmeia-voz.log");
+    if std::fs::metadata(&caminho).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::remove_file(&caminho);
+    }
+    let mut abrir = std::fs::OpenOptions::new();
+    abrir.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut abrir, 0o600);
+    abrir.open(caminho).map_or_else(|_| Stdio::null(), Stdio::from)
 }
 
 /// Uma resposta com o número do processo que a mandou.
@@ -109,7 +167,7 @@ impl Processo {
         if let Some([modelo, voz, runtime]) = &arquivos.fala {
             comando.arg("--fala-modelo").arg(modelo).arg("--fala-voz").arg(voz).arg("--fala-runtime").arg(runtime);
         }
-        comando.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        comando.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log_da_voz());
         // No Windows, sem abrir uma janela de console.
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut comando, 0x0800_0000);
@@ -202,11 +260,13 @@ pub struct NomeOuvido {
 impl NomeOuvido {
     /// As referências a passar ao "vigiar": nenhuma (as do nome padrão) ou o
     /// arquivo das gravações. Sem nenhuma das duas, não dá para ouvir.
+    /// Gravado vem antes: o nome padrão gravado com a voz de quem usa leva o
+    /// arquivo, e o colmeia-voz soma as referências sintéticas.
     pub fn referencias(&self) -> Option<Option<String>> {
-        if self.padrao {
-            Some(None)
-        } else if self.gravado {
+        if self.gravado {
             Some(Some(self.arquivo.clone()))
+        } else if self.padrao {
+            Some(None)
         } else {
             None
         }
@@ -258,6 +318,12 @@ pub enum Saida {
     /// Uma gravação do nome guardada (na memória do programa).
     Amostra(usize),
     Aprendido,
+    /// O teste do nome: a nota, o limite e se ouviu agora.
+    Nota {
+        nota: u8,
+        limite: u8,
+        ouviu: bool,
+    },
 }
 
 /// A conversa dos comandos falados de um perfil, com um `colmeia-voz` só.
@@ -318,7 +384,7 @@ impl Conversa {
 
     fn garantir(&mut self) -> Result<&mut Processo, String> {
         if self.processo.is_none() {
-            let arquivos = Arquivos::do_nucleo()?;
+            let arquivos = Arquivos::do_nucleo(self.perfil)?;
             self.geracao += 1;
             self.processo = Some(Processo::abrir(&arquivos, self.geracao, self.respostas.0.clone(), Arc::clone(&self.acordar))?);
         }
@@ -338,7 +404,31 @@ impl Conversa {
         if !matches!(self.fase, Fase::Parada) {
             return Ok(());
         }
-        self.mandar(serde_json::json!({ "comando": "ouvir", "ate_silencio": true }))?;
+        self.mandar(pedido_de_ouvir(self.perfil, true))?;
+        self.fase = Fase::Abrindo;
+        Ok(())
+    }
+
+    /// O clique de parar manda: fecha o microfone e transcreve o que ouviu,
+    /// sem esperar a pausa.
+    pub fn parar(&mut self) {
+        if matches!(self.fase, Fase::Abrindo | Fase::Ouvindo) {
+            if self.mandar(pedido("parar")).is_ok() {
+                self.fase = Fase::Transcrevendo;
+            } else {
+                self.fase = Fase::Parada;
+            }
+        }
+    }
+
+    /// Testa o nome em Ajustes: o microfone abre e a nota vai chegando
+    /// (`Saida::Nota`) até `cancelar` (ou 1 minuto).
+    pub fn testar_nome(&mut self, referencias: Option<String>, sensibilidade: u8) -> Result<(), String> {
+        let mut p = serde_json::json!({ "comando": "testar_nome", "sensibilidade": sensibilidade });
+        if let Some(r) = referencias {
+            p["referencias"] = r.into();
+        }
+        self.mandar(p)?;
         self.fase = Fase::Abrindo;
         Ok(())
     }
@@ -364,6 +454,10 @@ impl Conversa {
         let mut p = serde_json::json!({ "comando": "vigiar", "sensibilidade": sensibilidade });
         if let Some(r) = referencias {
             p["referencias"] = r.into();
+        }
+        // O comando que vem depois do nome usa o modelo e o vocabulário do perfil.
+        if let Ok(c) = Contexto::do_nucleo(self.perfil) {
+            c.no_pedido(&mut p);
         }
         self.mandar(p)
     }
@@ -517,6 +611,7 @@ impl Conversa {
                 Some(Saida::Amostra(numero))
             }
             Resposta::Aprendido => Some(Saida::Aprendido),
+            Resposta::Nota { nota, limite, ouviu } => Some(Saida::Nota { nota, limite, ouviu }),
             // Parado por muito tempo: sai sozinho e leva os modelos junto.
             Resposta::Saindo { .. } => {
                 self.processo = None;
@@ -558,6 +653,7 @@ mod testes {
         assert_eq!(ler_resposta(r#"{"evento":"vigiando","ligado":true}"#), Some(Resposta::Vigiando { ligado: true }));
         assert_eq!(ler_resposta(r#"{"evento":"amostra","numero":2,"segundos":0.6}"#), Some(Resposta::Amostra { numero: 2, segundos: 0.6 }));
         assert_eq!(ler_resposta(r#"{"evento":"chamado"}"#), Some(Resposta::Chamado));
+        assert_eq!(ler_resposta(r#"{"evento":"nota","nota":61,"limite":50,"ouviu":true}"#), Some(Resposta::Nota { nota: 61, limite: 50, ouviu: true }));
         assert_eq!(ler_resposta("ruído do whisper.cpp"), None);
         assert_eq!(ler_resposta(r#"{"evento":"fim"}"#), None);
     }
@@ -631,6 +727,9 @@ mod testes {
         assert_eq!(padrao.referencias(), Some(None));
         let gravado = NomeOuvido { nome: "Zuzu".into(), padrao: false, arquivo: "/d/voz/nome-1.json".into(), gravado: true };
         assert_eq!(gravado.referencias(), Some(Some("/d/voz/nome-1.json".into())));
+        // O nome padrão gravado com a voz de quem usa: o arquivo (que soma as sintéticas).
+        let padrao_gravado = NomeOuvido { padrao: true, gravado: true, ..gravado.clone() };
+        assert_eq!(padrao_gravado.referencias(), Some(Some("/d/voz/nome-1.json".into())));
         let sem = NomeOuvido { gravado: false, ..gravado };
         assert_eq!(sem.referencias(), None);
     }

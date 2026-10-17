@@ -59,8 +59,9 @@ pub struct Vista<'a> {
     pub rodando: bool,
     /// A linha de resumo embaixo do estado da abelha.
     pub linha: &'a str,
-    /// O microfone dos comandos falados está aberto: um ponto vermelho na abelha.
-    pub microfone: bool,
+    /// O microfone aberto (o comando, o ditado ou a abelha fixa ouvindo o
+    /// nome): a abelha põe o fone.
+    pub fone: Option<mascote::Fone>,
     pub com_abelha: bool,
     pub agora: f64,
     /// O uso dos agentes e da conta (pela statusLine do Claude Code).
@@ -181,6 +182,10 @@ enum No {
 
 pub struct Lateral {
     aberto: bool,
+    /// Sem projeto nenhum (e fora dos bancos) o painel não tem o que mostrar:
+    /// fica recolhido, sem mexer no `aberto` escolhido, e o convite para o
+    /// primeiro projeto fica no cartão do conteúdo.
+    vazio: bool,
     /// O workspace do painel.
     workspace: Option<i64>,
     /// O workspace do que estava na tela no quadro anterior: quando ele
@@ -196,7 +201,7 @@ pub struct Lateral {
 
 impl Default for Lateral {
     fn default() -> Self {
-        Lateral { aberto: true, workspace: None, foco_anterior: None, trocados: HashSet::new(), uso: Uso::default(), uso_de: None }
+        Lateral { aberto: true, vazio: false, workspace: None, foco_anterior: None, trocados: HashSet::new(), uso: Uso::default(), uso_de: None }
     }
 }
 
@@ -219,6 +224,16 @@ fn grupos(projetos: &[Projeto]) -> Vec<Grupo<'_>> {
 }
 
 impl Lateral {
+    /// Diz se há o que mostrar no painel (antes de pedir a largura).
+    pub fn com_conteudo(&mut self, ha: bool) {
+        self.vazio = !ha;
+    }
+
+    /// O painel está (ou vai ficar) aberto.
+    fn mostra_painel(&self) -> bool {
+        self.aberto && !self.vazio
+    }
+
     /// A largura de agora: o painel entra e sai aos poucos.
     pub fn largura(&self, ctx: &egui::Context) -> f32 {
         TRILHO + self.abertura(ctx) * (PAINEL + VAO)
@@ -230,11 +245,12 @@ impl Lateral {
     }
 
     fn abertura(&self, ctx: &egui::Context) -> f32 {
-        ctx.animate_bool_with_time(Id::new("lateral-painel"), self.aberto, ANIMACAO_PAINEL)
+        ctx.animate_bool_with_time(Id::new("lateral-painel"), self.mostra_painel(), ANIMACAO_PAINEL)
     }
 
     pub fn mostrar(&mut self, ui: &mut Ui, abelha: &mut Abelha, v: &Vista) -> Saida {
         let mut saida = Saida::default();
+        abelha.fone = v.fone;
         self.atualizar_uso(v);
         let grupos = grupos(v.projetos);
         self.seguir_foco(v, &grupos);
@@ -295,8 +311,8 @@ impl Lateral {
 
         // O pé, de baixo para cima: perfil, tema, ajustes, recolher e, com o
         // painel recolhido, a abelha.
-        let com_abelha_aqui = v.com_abelha && !self.aberto;
-        let altura_pe = 12.0 + 34.0 + 3.0 * 48.0 + if com_abelha_aqui { 48.0 } else { 0.0 } + 18.0;
+        let com_abelha_aqui = v.com_abelha && !self.mostra_painel();
+        let altura_pe = 12.0 + 34.0 + (if self.vazio { 2.0 } else { 3.0 }) * 48.0 + if com_abelha_aqui { 48.0 } else { 0.0 } + 18.0;
         let pe = Rect::from_min_max(pos2(rect.left(), rect.bottom() - altura_pe), rect.max);
         let mut baixo = ui.new_child(UiBuilder::new().id_salt("trilho-pe").max_rect(pe.shrink2(vec2(0.0, 12.0))).layout(Layout::bottom_up(Align::Center)));
         baixo.spacing_mut().item_spacing = vec2(0.0, 8.0);
@@ -319,7 +335,7 @@ impl Lateral {
             .show(&mut ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
                 for g in grupos {
-                    let ativo = self.aberto && self.workspace == Some(g.id);
+                    let ativo = self.mostra_painel() && self.workspace == Some(g.id);
                     let espera = abelha::esperando(v.tarefas.iter().filter(|t| g.projetos.iter().any(|p| p.id == t.projeto_id)));
                     if quadrado_do_workspace(ui, g, ativo, espera).clicked() {
                         if ativo {
@@ -476,9 +492,12 @@ impl Lateral {
             }
         });
 
-        let dica = if self.aberto { "Recolher o painel" } else { "Abrir o painel" };
-        if botao_do_trilho(ui, Icone::Painel, !self.aberto, 0).on_hover_text(dica).clicked() {
-            self.aberto = !self.aberto;
+        // Sem nada para o painel mostrar, o botão de abrir não aparece.
+        if !self.vazio {
+            let dica = if self.aberto { "Recolher o painel" } else { "Abrir o painel" };
+            if botao_do_trilho(ui, Icone::Painel, !self.aberto, 0).on_hover_text(dica).clicked() {
+                self.aberto = !self.aberto;
+            }
         }
 
         if com_abelha {
@@ -497,9 +516,6 @@ impl Lateral {
             }
             if resposta.secondary_clicked() {
                 saida.acoes.push(Acao::ResumoDaAbelha);
-            }
-            if v.microfone {
-                ponto_do_microfone(ui, caixa);
             }
             saida.abelha = Some(caixa);
         }
@@ -862,7 +878,7 @@ fn quadrado_do_workspace(ui: &mut Ui, g: &Grupo, ativo: bool, espera: usize) -> 
         pintor.rect_filled(r, CornerRadius { nw: 0, sw: 0, ne: 4, se: 4 }, cor);
     }
     if espera > 0 {
-        tema::contador(pintor, pos2(rect.right() + 5.0, rect.top() + 4.0), espera, Some(p.trilho));
+        tema::contador(pintor, canto_do_contador(linha), espera, Some(p.trilho));
     }
     let dica = match espera {
         0 => g.nome.to_string(),
@@ -910,9 +926,16 @@ fn botao_do_trilho(ui: &mut Ui, icone: Icone, ativo: bool, selo: usize) -> Respo
     let cor = p.suave.lerp_to_gamma(p.texto, mouse).lerp_to_gamma(p.destaque, escolhido);
     tema::desenhar_icone(pintor, rect.center(), icone, cor);
     if selo > 0 {
-        tema::contador(pintor, pos2(rect.right() + 3.0, rect.top() + 5.0), selo, Some(p.trilho));
+        tema::contador(pintor, canto_do_contador(linha), selo, Some(p.trilho));
     }
     resposta
+}
+
+/// Onde fica o contador de uma linha do trilho: inteiro dentro dela (com o
+/// anel), no canto de cima à direita do quadrado. Fora da linha, a rolagem
+/// dos workspaces e a borda do trilho o cortavam.
+fn canto_do_contador(linha: Rect) -> egui::Pos2 {
+    pos2(linha.right() - 5.0, linha.top() + 11.0)
 }
 
 /// Item simples do painel (a lousa, o novo projeto).
@@ -1109,9 +1132,6 @@ fn bloco_do_uso(ui: &mut Ui, rect: Rect, abelha: &mut Abelha, uso: &Uso, v: &Vis
     if resposta.secondary_clicked() {
         saida.acoes.push(Acao::ResumoDaAbelha);
     }
-    if v.microfone {
-        ponto_do_microfone(ui, caixa);
-    }
     saida.abelha = Some(linha);
     let x = caixa.right() + 8.0;
     let largura = linha.right() - 8.0 - x;
@@ -1156,15 +1176,6 @@ fn barras_de_uso(ui: &Ui, rect: Rect, uso: &Uso) {
         };
         ui.interact(coluna, Id::new(("uso", i)), Sense::hover()).on_hover_text(dica);
     }
-}
-
-/// O microfone aberto fica sempre à vista: um ponto vermelho com o
-/// microfone no canto de cima da abelha.
-fn ponto_do_microfone(ui: &Ui, caixa: Rect) {
-    let c = caixa.right_top() + vec2(-6.0, 6.0);
-    ui.painter().circle_filled(c, 7.5, cores().superficie_alta);
-    ui.painter().circle_filled(c, 6.0, cores().erro);
-    ui.painter().circle_filled(c, 2.2, egui::Color32::WHITE);
 }
 
 #[cfg(test)]
