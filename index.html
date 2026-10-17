@@ -188,8 +188,9 @@ section { scroll-margin-top: 84px; }
 .temas .captura { aspect-ratio: 16 / 10; }
 .temas figcaption, .mascotes figcaption { margin-top: 8px; font-size: .875rem; color: var(--texto-2); text-align: center; }
 .mascotes { display: flex; flex-wrap: wrap; gap: 18px; }
-.mascotes figure { margin: 0; width: 92px; }
-.mascotes img { width: 92px; height: 90px; object-fit: cover; border-radius: 22px; background: #1e2232; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06); }
+.mascotes figure { margin: 0; width: 100px; text-align: center; }
+.mascotes img { width: 100px; height: 100px; object-fit: contain; transition: transform .25s; }
+.mascotes figure:hover img { transform: translateY(-3px); }
 .mascotes small { display: block; color: var(--texto-3); font-size: .75rem; }
 .jeito-partes { display: grid; grid-template-columns: 1fr; gap: 32px; }
 .jeito-partes h4 { margin: 0 0 12px; font-size: .875rem; font-weight: 600; color: var(--texto-2); }
@@ -302,7 +303,7 @@ section { scroll-margin-top: 84px; }
   .temas { grid-template-columns: 1fr 1fr; }
   .mascotes { gap: 10px; justify-content: space-between; }
   .mascotes figure { width: calc((100% - 40px) / 5); }
-  .mascotes img { width: 100%; height: auto; aspect-ratio: 1; border-radius: 16px; }
+  .mascotes img { width: 100%; height: auto; aspect-ratio: 1; }
   .mascotes figcaption { font-size: .75rem; }
   .principios { grid-template-columns: 1fr; gap: 22px; padding: 24px; margin-top: 32px; }
   .instalar { text-align: left; }
@@ -406,7 +407,7 @@ section { scroll-margin-top: 84px; }
     else if (r.medidores) { var cores = ['var(--ok)', 'var(--mel)', 'var(--acento)']; extra = '<div class="barras" role="img" aria-label="' + esc(r.medidores.map(function (m) { return m.rotulo + ' ' + m.valor + '%'; }).join(', ')) + '">' + r.medidores.map(function (m, k) { return '<div><span>' + esc(m.rotulo) + '</span><i style="--v:' + m.valor + '%;--c:' + cores[k] + '"></i><b>' + m.valor + '%</b></div>'; }).join('') + '</div>'; }
     else if (r.temas) {
       extra = '<div class="jeito-partes"><div><h4>Temas</h4><div class="temas">' + r.temas.map(function (t) { return '<figure>' + captura(t.img, 'O quadro no tema ' + t.nome.toLowerCase() + '.', [.5, .5, 1], 'inteira') + '<figcaption>' + esc(t.nome) + '</figcaption></figure>'; }).join('') + '</div></div>' +
-        '<div><h4>Abelhas</h4><div class="mascotes">' + r.mascotes.map(function (m) { return '<figure><img src="img/' + esc(m.img) + '" alt="A abelha ' + esc(m.nome) + '" width="160" height="156" loading="lazy" decoding="async"><figcaption>' + esc(m.nome) + (m.nota ? '<small>' + esc(m.nota) + '</small>' : '') + '</figcaption></figure>'; }).join('') + '</div></div></div>';
+        '<div><h4>Abelhas</h4><div class="mascotes">' + r.mascotes.map(function (m) { return '<figure><img src="img/' + esc(m.img) + '" alt="A abelha ' + esc(m.nome) + '" width="240" height="240" loading="lazy" decoding="async"><figcaption>' + esc(m.nome) + (m.nota ? '<small>' + esc(m.nota) + '</small>' : '') + '</figcaption></figure>'; }).join('') + '</div></div></div>';
     }
     return '<article class="' + cls + '" aria-labelledby="r-' + r.id + '">' + txt.replace('<h3>', '<h3 id="r-' + r.id + '">') + extra + '</article>';
   }

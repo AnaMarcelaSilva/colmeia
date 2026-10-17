@@ -106,14 +106,14 @@ window.COLMEIA = {
     sistemas: [
       { id: 'linux', nome: 'Linux', detalhe: 'x86_64', arquivo: 'colmeia-linux-x86_64.tar.gz',
         passos: [
-          { titulo: 'Baixe', texto: 'O pacote e o SHA256SUMS da última versão.' },
-          { titulo: 'Confira', texto: 'O SHA256SUMS garante que o arquivo é o publicado.', cmd: 'sha256sum -c SHA256SUMS --ignore-missing' },
-          { titulo: 'Instale', texto: 'Vai para ~/.local/bin, com atalho e ícone no menu.', cmd: 'mkdir colmeia && tar -xzf colmeia-linux-x86_64.tar.gz -C colmeia\n./colmeia/instalar.sh' }
+          { titulo: 'Baixe', texto: 'Pelo botão acima. O arquivo vai para a pasta Downloads.' },
+          { titulo: 'Confira', texto: 'Na pasta Downloads, baixe a lista de verificação e confira. Deve aparecer OK.', cmd: 'cd ~/Downloads\ncurl -LO https://github.com/AnaMarcelaSilva/colmeia/releases/latest/download/SHA256SUMS\nsha256sum -c SHA256SUMS --ignore-missing' },
+          { titulo: 'Instale', texto: 'Vai para ~/.local/bin, com atalho e ícone no menu. Se a Colmeia estiver aberta, feche e rode colmeia-nucleo --encerrar antes de abrir de novo.', cmd: 'mkdir -p colmeia && tar -xzf colmeia-linux-x86_64.tar.gz -C colmeia\n./colmeia/instalar.sh' }
         ] },
       { id: 'windows', nome: 'Windows', detalhe: '10 (1803 ou mais novo) e 11', arquivo: 'colmeia-windows-x86_64.zip',
         passos: [
-          { titulo: 'Baixe', texto: 'O .zip e o SHA256SUMS da última versão.' },
-          { titulo: 'Extraia', texto: 'Abra o PowerShell dentro da pasta extraída.' },
+          { titulo: 'Baixe e confira', texto: 'Pelo botão acima. No PowerShell, na pasta Downloads, compare o código com o da lista SHA256SUMS da versão.', cmd: 'Get-FileHash .\\colmeia-windows-x86_64.zip' },
+          { titulo: 'Extraia', texto: 'Extraia o .zip e abra o PowerShell dentro da pasta extraída.' },
           { titulo: 'Instale', texto: 'Vai para a pasta de programas do usuário, com atalho no menu Iniciar.', cmd: 'powershell -ExecutionPolicy Bypass -File .\\instalar.ps1' }
         ] }
     ],
