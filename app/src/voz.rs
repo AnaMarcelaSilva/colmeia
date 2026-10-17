@@ -4,12 +4,11 @@
 //! deixa que ele saia sozinho depois de um tempo parado. A tela nunca toca no
 //! áudio: recebe só o texto, que entra na caixa para revisar.
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use canal::voz::{Arquivos, Marcada, Processo, Resposta};
 use eframe::egui;
-use serde::Deserialize;
 
 /// O atalho de segurar para falar: Ctrl+Shift+M.
 pub const ATALHO: &str = "Ctrl+Shift+M";
@@ -49,50 +48,11 @@ pub fn tirar_atalho(eventos: &mut Vec<egui::Event>, segurado: bool) -> (bool, bo
     (apertou, soltou)
 }
 
-/// O que o `colmeia-voz` responde (veja voz/src/protocolo.rs).
-#[derive(Deserialize, Debug, PartialEq)]
-#[serde(tag = "evento", rename_all = "snake_case")]
-pub enum Resposta {
-    Iniciado,
-    Ouvindo,
-    Transcrevendo {
-        #[serde(default)]
-        segundos: f32,
-    },
-    Texto {
-        texto: String,
-    },
-    Erro {
-        mensagem: String,
-    },
-    Saindo {
-        #[serde(default)]
-        motivo: String,
-    },
-    /// A saída do programa fechou (ele saiu).
-    #[serde(skip)]
-    Fim,
-}
-
-pub fn ler_resposta(linha: &str) -> Option<Resposta> {
-    serde_json::from_str(linha.trim()).ok()
-}
-
 /// O que a tela faz com uma resposta.
 #[derive(Debug, PartialEq)]
 pub enum Saida {
     Texto(String),
     Erro(String),
-}
-
-/// Uma resposta com o número do processo que a mandou.
-type Marcada = (u64, Resposta);
-
-/// Fechar a Colmeia fecha a entrada do programa, e ele sai sozinho.
-struct Processo {
-    filho: Child,
-    entrada: ChildStdin,
-    geracao: u64,
 }
 
 pub struct Ditado {
@@ -101,8 +61,8 @@ pub struct Ditado {
     /// O que chega das threads de leitura, marcado com o processo que mandou.
     respostas: (Sender<Marcada>, Receiver<Marcada>),
     geracao: u64,
-    /// O arquivo do modelo, perguntado ao núcleo na primeira vez.
-    modelo: Option<String>,
+    /// Os arquivos do modelo, perguntados ao núcleo na primeira vez.
+    arquivos: Option<Arquivos>,
     /// A tarefa em que o microfone abriu: saindo dela, ele fecha.
     pub tarefa: i64,
     /// O microfone foi aberto pelo atalho (soltar a tecla para).
@@ -111,7 +71,7 @@ pub struct Ditado {
 
 impl Default for Ditado {
     fn default() -> Self {
-        Ditado { processo: None, estado: Estado::Parado, respostas: mpsc::channel(), geracao: 0, modelo: None, tarefa: 0, pelo_atalho: false }
+        Ditado { processo: None, estado: Estado::Parado, respostas: mpsc::channel(), geracao: 0, arquivos: None, tarefa: 0, pelo_atalho: false }
     }
 }
 
@@ -153,8 +113,7 @@ impl Ditado {
 
     fn mandar(&mut self, comando: &str) -> Result<(), String> {
         let Some(p) = self.processo.as_mut() else { return Err("O ditado não está aberto.".into()) };
-        let linha = format!("{{\"comando\":\"{comando}\"}}\n");
-        if p.entrada.write_all(linha.as_bytes()).and_then(|_| p.entrada.flush()).is_err() {
+        if p.mandar(&canal::voz::pedido(comando)).is_err() {
             self.fechar();
             return Err("O ditado fechou sem responder. Tente de novo.".into());
         }
@@ -162,55 +121,23 @@ impl Ditado {
     }
 
     fn abrir(&mut self, ctx: &egui::Context) -> Result<(), String> {
-        let modelo = match &self.modelo {
-            Some(m) => m.clone(),
+        let arquivos = match &self.arquivos {
+            Some(a) => a.clone(),
             None => {
-                let estado = crate::api::estado_voz().map_err(|e| format!("Não consegui falar com o núcleo: {e}"))?;
-                if estado.estado != "pronto" || estado.caminho.is_empty() {
-                    return Err("O modelo de voz não está baixado. Ligue o ditado em Ajustes.".into());
-                }
-                self.modelo = Some(estado.caminho.clone());
-                estado.caminho
+                let a = Arquivos::do_nucleo()?;
+                self.arquivos = Some(a.clone());
+                a
             }
-        };
-        let programa = canal::executavel("colmeia-voz", "COLMEIA_VOZ").ok_or("Não encontrei o programa colmeia-voz ao lado da Colmeia.")?;
-        let mut comando = Command::new(programa);
-        comando.arg("--modelo").arg(&modelo).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        // No Windows, sem abrir uma janela de console.
-        #[cfg(windows)]
-        std::os::windows::process::CommandExt::creation_flags(&mut comando, 0x0800_0000);
-        let mut filho = comando.spawn().map_err(|e| format!("Não consegui abrir o ditado: {e}"))?;
-        let (Some(entrada), Some(saida)) = (filho.stdin.take(), filho.stdout.take()) else {
-            let _ = filho.kill();
-            let _ = filho.wait();
-            return Err("Não consegui abrir o ditado.".into());
         };
         self.geracao += 1;
-        let (geracao, envio, ctx) = (self.geracao, self.respostas.0.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            for linha in BufReader::new(saida).lines() {
-                let Ok(linha) = linha else { break };
-                if let Some(r) = ler_resposta(&linha) {
-                    let _ = envio.send((geracao, r));
-                    ctx.request_repaint();
-                }
-            }
-            let _ = envio.send((geracao, Resposta::Fim));
-            ctx.request_repaint();
-        });
-        self.processo = Some(Processo { filho, entrada, geracao });
+        let ctx = ctx.clone();
+        self.processo = Some(Processo::abrir(&arquivos, self.geracao, self.respostas.0.clone(), Arc::new(move || ctx.request_repaint()))?);
         Ok(())
     }
 
     /// Fecha a entrada (o programa sai) e recolhe o processo.
     fn fechar(&mut self) {
-        if let Some(Processo { mut filho, entrada, .. }) = self.processo.take() {
-            drop(entrada);
-            // Já saiu ou sai em seguida: recolhe numa thread para não travar a tela.
-            std::thread::spawn(move || {
-                let _ = filho.wait();
-            });
-        }
+        self.processo = None;
         self.estado = Estado::Parado;
     }
 
@@ -230,7 +157,13 @@ impl Ditado {
 
     fn aplicar(&mut self, r: Resposta) -> Option<Saida> {
         match r {
-            Resposta::Iniciado => None,
+            Resposta::Iniciado
+            | Resposta::Vigiando { .. }
+            | Resposta::Chamado
+            | Resposta::Falando
+            | Resposta::Falou
+            | Resposta::Amostra { .. }
+            | Resposta::Aprendido => None,
             Resposta::Ouvindo => {
                 // Um "parar" já pode ter saído: o estado só avança.
                 if self.estado == Estado::Abrindo {
@@ -271,7 +204,7 @@ impl Ditado {
     pub fn desligar(&mut self) {
         self.cancelar();
         self.fechar();
-        self.modelo = None;
+        self.arquivos = None;
     }
 }
 
@@ -298,16 +231,6 @@ mod testes {
         let mut eventos = vec![tecla(false, false, egui::Modifiers::NONE), tecla(true, false, egui::Modifiers::SHIFT)];
         assert_eq!(tirar_atalho(&mut eventos, false), (false, false));
         assert_eq!(eventos.len(), 2);
-    }
-
-    #[test]
-    fn le_as_respostas_do_programa() {
-        assert_eq!(ler_resposta(r#"{"evento":"iniciado"}"#), Some(Resposta::Iniciado));
-        assert_eq!(ler_resposta(r#"{"evento":"texto","texto":"Rode os testes."}"#), Some(Resposta::Texto { texto: "Rode os testes.".into() }));
-        assert_eq!(ler_resposta(r#"{"evento":"transcrevendo","segundos":2.5}"#), Some(Resposta::Transcrevendo { segundos: 2.5 }));
-        assert_eq!(ler_resposta(r#"{"evento":"saindo","motivo":"parado"}"#), Some(Resposta::Saindo { motivo: "parado".into() }));
-        assert_eq!(ler_resposta("ruído do whisper.cpp"), None);
-        assert_eq!(ler_resposta(r#"{"evento":"fim"}"#), None);
     }
 
     #[test]

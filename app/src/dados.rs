@@ -94,6 +94,10 @@ pub const PEDE_APROVACAO: &str = "pede aprovação";
 /// Motivo fixo enquanto um pedido de consulta ao banco do agente espera a sua aprovação.
 pub const APROVAR_CONSULTA: &str = "aprovar consulta";
 
+fn pacote_whisper() -> String {
+    "whisper".into()
+}
+
 /// O que o agente espera de você, dito do jeito do cartão e da abelha.
 pub fn acao_de_espera(motivo: &str) -> &'static str {
     match motivo {
@@ -570,10 +574,23 @@ pub enum Evento {
         #[serde(default)]
         ligado: bool,
     },
-    /// O download do modelo de voz andou, terminou ou deu erro.
+    /// As opções dos comandos falados do perfil mudaram (aqui, em outra tela
+    /// ou no fim de um download).
+    #[serde(rename = "perfil.voz")]
+    PerfilVoz {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        voz: api::OpcoesVoz,
+    },
+    /// O download de um modelo de voz andou, terminou ou deu erro: o Whisper
+    /// ("whisper") ou a voz da abelha ("kokoro").
     #[serde(rename = "voz.modelo")]
     VozModelo {
         seq: u64,
+        #[serde(default = "pacote_whisper")]
+        pacote: String,
         #[serde(default)]
         estado: String,
         #[serde(default)]
@@ -650,6 +667,7 @@ impl Evento {
             | Evento::PerfilMascote { seq, .. }
             | Evento::PerfilAbelhaFixa { seq, .. }
             | Evento::PerfilDitado { seq, .. }
+            | Evento::PerfilVoz { seq, .. }
             | Evento::VozModelo { seq, .. }
             | Evento::TelaAbrir { seq, .. }
             | Evento::WorkspaceRecolhido { seq, .. }
@@ -669,7 +687,7 @@ impl Evento {
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
             Evento::PerfilMascote { .. } | Evento::PerfilAbelhaFixa { .. } | Evento::TelaAbrir { .. } => false,
-            Evento::PerfilDitado { .. } | Evento::VozModelo { .. } => false,
+            Evento::PerfilDitado { .. } | Evento::PerfilVoz { .. } | Evento::VozModelo { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
             _ => !matches!(
                 self,
@@ -756,6 +774,7 @@ impl Modelo {
             | Evento::PerfilMascote { .. }
             | Evento::PerfilAbelhaFixa { .. }
             | Evento::PerfilDitado { .. }
+            | Evento::PerfilVoz { .. }
             | Evento::VozModelo { .. }
             | Evento::TelaAbrir { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).

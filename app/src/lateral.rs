@@ -59,6 +59,8 @@ pub struct Vista<'a> {
     pub rodando: bool,
     /// A linha de resumo embaixo do estado da abelha.
     pub linha: &'a str,
+    /// O microfone dos comandos falados está aberto: um ponto vermelho na abelha.
+    pub microfone: bool,
     pub com_abelha: bool,
     pub agora: f64,
     /// O uso dos agentes e da conta (pela statusLine do Claude Code).
@@ -98,8 +100,13 @@ pub enum Acao {
     Proximo,
     Linha,
     Daily,
-    /// A abelha foi clicada: abre ou fecha o resumo.
+    /// A abelha foi clicada: abre ou fecha o resumo (ou, com os comandos
+    /// falados, abre o microfone).
     Abelha,
+    /// O botão direito na abelha: o resumo, mesmo com os comandos falados.
+    ResumoDaAbelha,
+    /// Abrir os ajustes dos comandos falados e da voz da abelha.
+    Voz,
 }
 
 #[derive(Default)]
@@ -455,6 +462,11 @@ impl Lateral {
                 saida.acoes.push(Acao::Ditado);
                 ui.close();
             }
+            let comandos = if v.perfil.is_some_and(|p| p.voz.voz_comandos) { "ligados" } else { "desligados" };
+            if tema::opcao_menu_com(ui, "Comandos falados e voz da abelha", Some(comandos), pode) {
+                saida.acoes.push(Acao::Voz);
+                ui.close();
+            }
         });
 
         let dica = if self.aberto { "Recolher o painel" } else { "Abrir o painel" };
@@ -475,6 +487,12 @@ impl Lateral {
                 if abelha.resumo_aberto { resposta } else { resposta.on_hover_text(format!("{} · {} · {}", abelha.nome, abelha.nome_do_estado(), v.linha)) };
             if resposta.clicked() {
                 saida.acoes.push(Acao::Abelha);
+            }
+            if resposta.secondary_clicked() {
+                saida.acoes.push(Acao::ResumoDaAbelha);
+            }
+            if v.microfone {
+                ponto_do_microfone(ui, caixa);
             }
             saida.abelha = Some(caixa);
         }
@@ -1081,6 +1099,12 @@ fn bloco_do_uso(ui: &mut Ui, rect: Rect, abelha: &mut Abelha, uso: &Uso, v: &Vis
     if resposta.clicked() {
         saida.acoes.push(Acao::Abelha);
     }
+    if resposta.secondary_clicked() {
+        saida.acoes.push(Acao::ResumoDaAbelha);
+    }
+    if v.microfone {
+        ponto_do_microfone(ui, caixa);
+    }
     saida.abelha = Some(linha);
     let x = caixa.right() + 8.0;
     let largura = linha.right() - 8.0 - x;
@@ -1125,6 +1149,15 @@ fn barras_de_uso(ui: &Ui, rect: Rect, uso: &Uso) {
         };
         ui.interact(coluna, Id::new(("uso", i)), Sense::hover()).on_hover_text(dica);
     }
+}
+
+/// O microfone aberto fica sempre à vista: um ponto vermelho com o
+/// microfone no canto de cima da abelha.
+fn ponto_do_microfone(ui: &Ui, caixa: Rect) {
+    let c = caixa.right_top() + vec2(-6.0, 6.0);
+    ui.painter().circle_filled(c, 7.5, cores().superficie_alta);
+    ui.painter().circle_filled(c, 6.0, cores().erro);
+    ui.painter().circle_filled(c, 2.2, egui::Color32::WHITE);
 }
 
 #[cfg(test)]

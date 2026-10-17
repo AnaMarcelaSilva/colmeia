@@ -209,3 +209,76 @@ pub fn balao(ui: &mut Ui, rect: Rect, nome: &str, aviso: &Aviso, resta: f32) -> 
     ui.painter().rect_filled(fio, CornerRadius::same(1), DESTAQUE.gamma_multiply(0.7));
     pedido
 }
+
+/// O microfone aberto fica sempre à vista: um ponto vermelho no canto de
+/// cima da abelha (ouvindo o nome, o tempo todo).
+pub fn microfone(pintor: &egui::Painter, abelha: Rect) {
+    let c = abelha.left_top() + vec2(14.0, 14.0);
+    pintor.circle_filled(c, 9.0, Color32::from_rgb(0x0d, 0x0c, 0x14));
+    pintor.circle_filled(c, 6.5, ERRO);
+    pintor.circle_filled(c, 2.4, Color32::WHITE);
+}
+
+pub const ALTURA_BALAO_VOZ: f32 = 128.0;
+
+/// O que o balão da voz pede.
+pub enum PedidoVoz {
+    Fechar,
+    Sim,
+    Nao,
+    Abrir(i64),
+}
+
+/// O que a abelha está fazendo com o comando falado, ou a resposta.
+pub struct Fala<'a> {
+    pub texto: &'a str,
+    pub ouvido: &'a str,
+    pub erro: bool,
+    pub pergunta: bool,
+    pub abrir: Option<i64>,
+    pub microfone: bool,
+}
+
+/// O balão da voz: a resposta (ou "Ouvindo…"), o que foi ouvido e, se a
+/// resposta pergunta, Sim e Não.
+pub fn balao_voz(ui: &mut Ui, rect: Rect, nome: &str, f: &Fala) -> Option<PedidoVoz> {
+    let mut pedido = None;
+    cartao(ui.painter(), rect, if f.erro { ERRO.gamma_multiply(0.6) } else { DESTAQUE.gamma_multiply(0.6) });
+    let dentro = rect.shrink2(vec2(13.0, 12.0));
+    let largura = dentro.width();
+    let mut x = dentro.left();
+    if f.microfone {
+        ui.painter().circle_filled(pos2(x + 5.0, dentro.top() + 9.0), 4.5, ERRO);
+        x += 16.0;
+    }
+    linha(ui, pos2(x, dentro.top()), nome, FontId::proportional(13.0), SUAVE, largura - 40.0);
+    if fechar(ui, pos2(dentro.right() - 8.0, dentro.top() + 9.0), egui::Id::new("fechar-voz")) {
+        pedido = Some(PedidoVoz::Fechar);
+    }
+    // A resposta em até duas linhas.
+    let mut job = egui::text::LayoutJob::simple(f.texto.to_owned(), FontId::proportional(13.5), if f.erro { ERRO } else { TEXTO }, largura);
+    job.wrap.max_rows = 2;
+    let g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(dentro.left(), dentro.top() + 22.0), g, TEXTO);
+    if !f.ouvido.is_empty() {
+        linha(ui, pos2(dentro.left(), dentro.top() + 62.0), &format!("Você disse: \u{201c}{}\u{201d}", f.ouvido), FontId::proportional(11.5), SUAVE, largura);
+    }
+    if f.pergunta || f.abrir.is_some() {
+        let botoes = Rect::from_min_size(pos2(dentro.left(), dentro.bottom() - 30.0), vec2(largura, 30.0));
+        ui.scope_builder(UiBuilder::new().max_rect(botoes).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            if f.pergunta {
+                if botao(ui, "Sim", true).clicked() {
+                    pedido = Some(PedidoVoz::Sim);
+                }
+                if botao(ui, "Não", false).clicked() {
+                    pedido = Some(PedidoVoz::Nao);
+                }
+            } else if let Some(t) = f.abrir
+                && botao(ui, "Abrir", true).clicked()
+            {
+                pedido = Some(PedidoVoz::Abrir(t));
+            }
+        });
+    }
+    pedido
+}

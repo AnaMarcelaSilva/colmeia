@@ -33,6 +33,36 @@ pub struct Perfil {
     /// O microfone na caixa de mensagem das tarefas (desligado por padrão).
     #[serde(default)]
     pub ditado: bool,
+    /// Os comandos falados à abelha, cada item ligado à parte.
+    #[serde(flatten)]
+    pub voz: OpcoesVoz,
+}
+
+/// Os comandos falados (tudo desligado por padrão): clicar na abelha para
+/// falar, a resposta falada (com ou sem o efeito leve) e a abelha fixa
+/// ouvindo o nome, com a sensibilidade de 1 a 9.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpcoesVoz {
+    #[serde(default)]
+    pub voz_comandos: bool,
+    #[serde(default)]
+    pub voz_abelha: bool,
+    #[serde(default)]
+    pub voz_efeito: bool,
+    #[serde(default)]
+    pub voz_nome: bool,
+    #[serde(default = "sensibilidade_padrao")]
+    pub voz_sensibilidade: u8,
+}
+
+impl Default for OpcoesVoz {
+    fn default() -> Self {
+        OpcoesVoz { voz_comandos: false, voz_abelha: false, voz_efeito: false, voz_nome: false, voz_sensibilidade: sensibilidade_padrao() }
+    }
+}
+
+fn sensibilidade_padrao() -> u8 {
+    5
 }
 
 fn verdadeiro() -> bool {
@@ -1013,6 +1043,35 @@ pub fn estado_voz() -> Result<EstadoVoz, String> {
 /// Começa a baixar o modelo; quando ele fica pronto, o núcleo liga o ditado do perfil.
 pub fn baixar_voz(perfil: i64) -> Result<EstadoVoz, String> {
     chamar("POST", &format!("/v1/perfis/{perfil}/voz/baixar"), None)
+}
+
+/// Baixa o Whisper e, pronto, liga o que foi pedido ("ditado" ou "comandos").
+pub fn baixar_voz_e_ligar(perfil: i64, ligar: &str) -> Result<EstadoVoz, String> {
+    chamar("POST", &format!("/v1/perfis/{perfil}/voz/baixar"), Some(json!({ "ligar": ligar })))
+}
+
+/// Muda opções dos comandos falados (só os campos dados).
+pub fn definir_voz(perfil: i64, campos: serde_json::Value) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(campos)).map(|_| ())
+}
+
+/// A voz da abelha (Kokoro) no núcleo; "indisponivel" num sistema sem pacote.
+pub fn estado_fala() -> Result<EstadoVoz, String> {
+    chamar("GET", "/v1/voz/fala", None)
+}
+
+/// Baixa a voz da abelha; pronta, ela liga no perfil.
+pub fn baixar_fala(perfil: i64) -> Result<EstadoVoz, String> {
+    chamar("POST", &format!("/v1/perfis/{perfil}/voz/fala/baixar"), None)
+}
+
+pub fn cancelar_fala() -> Result<(), String> {
+    chamar::<serde_json::Value>("POST", "/v1/voz/fala/cancelar", None).map(|_| ())
+}
+
+/// Apaga a voz da abelha do disco (ela desliga em todos os perfis).
+pub fn remover_fala() -> Result<EstadoVoz, String> {
+    chamar("DELETE", "/v1/voz/fala", None)
 }
 
 pub fn cancelar_voz() -> Result<(), String> {

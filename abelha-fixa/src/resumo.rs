@@ -44,6 +44,31 @@ pub struct Agente {
     pub motivo: String,
 }
 
+/// Os comandos falados do perfil (veja o núcleo: dados.OpcoesVoz).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct OpcoesVoz {
+    #[serde(default)]
+    pub voz_comandos: bool,
+    #[serde(default)]
+    pub voz_abelha: bool,
+    #[serde(default)]
+    pub voz_efeito: bool,
+    #[serde(default)]
+    pub voz_nome: bool,
+    #[serde(default = "sensibilidade_padrao")]
+    pub voz_sensibilidade: u8,
+}
+
+fn sensibilidade_padrao() -> u8 {
+    5
+}
+
+impl Default for OpcoesVoz {
+    fn default() -> Self {
+        OpcoesVoz { voz_comandos: false, voz_abelha: false, voz_efeito: false, voz_nome: false, voz_sensibilidade: sensibilidade_padrao() }
+    }
+}
+
 /// O retrato do perfil (`GET /v1/perfis/{id}/quadro`), só com o que a abelha usa.
 #[derive(Debug, Deserialize)]
 pub struct Quadro {
@@ -92,6 +117,8 @@ pub enum Evento {
     PerfilMascote { modelo: String, nome: String },
     #[serde(rename = "perfil.abelha_fixa")]
     PerfilAbelhaFixa { ligada: bool },
+    #[serde(rename = "perfil.voz")]
+    PerfilVoz { voz: OpcoesVoz },
     #[serde(other)]
     Outro,
 }
@@ -163,6 +190,8 @@ pub enum Efeito {
     Sair,
     /// Ficou para trás: pedir o retrato de novo.
     Recarregar,
+    /// Os comandos falados mudaram.
+    Voz(OpcoesVoz),
 }
 
 fn nome_da_ferramenta(ferramenta: &str) -> &str {
@@ -295,6 +324,7 @@ impl Resumo {
             }
             Evento::PerfilMascote { modelo, nome } => efeitos.push(Efeito::Vestir { modelo, nome }),
             Evento::PerfilAbelhaFixa { ligada: false } => efeitos.push(Efeito::Sair),
+            Evento::PerfilVoz { voz } => efeitos.push(Efeito::Voz(voz)),
             Evento::PerfilAbelhaFixa { ligada: true } | Evento::Outro => {}
         }
         // Um agente que voltou a rodar ou saiu leva o erro dele.
@@ -460,6 +490,8 @@ mod testes {
         );
         assert!(r.aplicar(evento(r#"{"tipo":"lousa.mudou","seq":15,"lousa_id":1}"#)).is_empty());
         assert_eq!(r.aplicar(evento(r#"{"tipo":"recarregar"}"#)), vec![Efeito::Recarregar]);
+        let voz = r.aplicar(evento(r#"{"tipo":"perfil.voz","seq":13,"perfil_id":1,"voz":{"voz_comandos":true,"voz_abelha":false,"voz_efeito":false,"voz_nome":true,"voz_sensibilidade":7}}"#));
+        assert_eq!(voz, vec![Efeito::Voz(OpcoesVoz { voz_comandos: true, voz_nome: true, voz_sensibilidade: 7, ..Default::default() })]);
         assert_eq!(r.aplicar(evento(r#"{"tipo":"ola","seq":3,"nucleo":"0.4.0"}"#)), vec![Efeito::Recarregar]);
     }
 

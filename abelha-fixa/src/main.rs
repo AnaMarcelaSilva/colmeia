@@ -5,9 +5,15 @@
 //! da cor do que mais pede você; um clique abre o resumo, que fica até ser
 //! fechado; os avisos saem dela em balões. Só redesenha quando algo muda.
 //!
+//! Com os comandos falados ligados no perfil, o clique (ou Ctrl+Alt+Espaço,
+//! de qualquer programa, no X11) abre o microfone para um comando e o resumo
+//! passa ao botão direito; com o "ouvir o nome", ela fica ouvindo o nome dela,
+//! com o ponto vermelho do microfone sempre à vista.
+//!
 //! Uso: colmeia-abelha --perfil N (a janela abre com a opção "Fixar a
 //! abelha na área de trabalho").
 
+mod atalho;
 mod fixar;
 mod ligacao;
 mod posicao;
@@ -16,14 +22,17 @@ mod tela;
 
 #[cfg(any(unix, windows))]
 use std::fs::File;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
+
+use canal::voz::{Conversa, Fase, Saida};
 
 use eframe::egui::{self, Pos2, Rect, Sense, ViewportCommand, pos2, vec2};
 use mascote::{Estado, Modelo, Tempo};
 
 use ligacao::Mensagem;
-use resumo::{Aviso, Efeito, Resumo};
+use resumo::{Aviso, Efeito, OpcoesVoz, Resumo};
 
 /// O quadrado da abelha na tela (com folga para o ponto e o pulo).
 const ABELHA: f32 = 76.0;
@@ -40,6 +49,19 @@ const QUADROS_BALAO: f64 = 10.0;
 struct Balao {
     aviso: Aviso,
     resta: f64,
+}
+
+/// Quanto a resposta falada fica no balão (com pergunta, até responder).
+const RESPOSTA: f64 = 10.0;
+const PERGUNTA: f64 = 60.0;
+
+/// A resposta de um comando falado, no balão.
+struct Resposta {
+    texto: String,
+    ouvido: String,
+    erro: bool,
+    abrir: Option<i64>,
+    ate: f64,
 }
 
 struct Fixa {
@@ -71,6 +93,12 @@ struct Fixa {
     transparente: bool,
     /// O tamanho da tela quando o egui não sabe o do monitor (lido uma vez).
     tela: Option<egui::Vec2>,
+    /// Os comandos falados do perfil e a conversa (com eles ligados).
+    voz: OpcoesVoz,
+    conversa: Option<Conversa>,
+    resposta: Option<Resposta>,
+    atalho: Option<atalho::Atalho>,
+    envio: Sender<Mensagem>,
     _trava: Trava,
 }
 
@@ -117,7 +145,11 @@ impl Fixa {
     fn receber(&mut self, ctx: &egui::Context, agora: f64) {
         while let Ok(m) = self.recebe.try_recv() {
             match m {
-                Mensagem::Perfil(Some(p)) => self.vestir(ctx, &p.mascote_modelo, &p.mascote_nome),
+                Mensagem::Perfil(Some(p)) => {
+                    self.vestir(ctx, &p.mascote_modelo, &p.mascote_nome);
+                    self.ajustar_voz(ctx, p.voz, agora);
+                }
+                Mensagem::Atalho => self.falar(agora),
                 // O perfil foi apagado: não há mais o que mostrar.
                 Mensagem::Perfil(None) => ctx.send_viewport_cmd(ViewportCommand::Close),
                 Mensagem::Quadro(q) => {
@@ -134,6 +166,7 @@ impl Fixa {
                             Efeito::Comemorar => self.comemorar_ate = agora + COMEMORACAO,
                             Efeito::Vestir { modelo, nome } => self.vestir(ctx, &modelo, &nome),
                             Efeito::Sair => ctx.send_viewport_cmd(ViewportCommand::Close),
+                            Efeito::Voz(v) => self.ajustar_voz(ctx, v, agora),
                         }
                     }
                 }
@@ -141,9 +174,160 @@ impl Fixa {
         }
     }
 
-    /// O cartão que aparece com a abelha (o resumo ou o balão) e a altura dele.
+    /// O cartão que aparece com a abelha (a voz, o resumo ou o balão) e a altura dele.
     fn cartao(&self) -> Option<f32> {
-        if self.aberto { Some(tela::altura_resumo(self.resumo.destaque().is_some())) } else { self.balao.as_ref().map(|_| tela::ALTURA_BALAO) }
+        if self.com_voz() {
+            Some(tela::ALTURA_BALAO_VOZ)
+        } else if self.aberto {
+            Some(tela::altura_resumo(self.resumo.destaque().is_some()))
+        } else {
+            self.balao.as_ref().map(|_| tela::ALTURA_BALAO)
+        }
+    }
+
+    /// O balão da voz está na tela: ouvindo, entendendo ou a resposta.
+    fn com_voz(&self) -> bool {
+        self.resposta.is_some() || self.conversa.as_ref().is_some_and(|c| !matches!(c.fase(), Fase::Parada))
+    }
+
+    /// Liga ou desliga os comandos falados, o atalho e o ouvir o nome.
+    fn ajustar_voz(&mut self, ctx: &egui::Context, voz: OpcoesVoz, agora: f64) {
+        let antes = std::mem::replace(&mut self.voz, voz.clone());
+        if !voz.voz_comandos {
+            if let Some(c) = self.conversa.as_mut() {
+                c.fechar();
+            }
+            self.conversa = None;
+            self.resposta = None;
+            self.atalho = None;
+            return;
+        }
+        if self.atalho.is_none() {
+            let (envio, ctx) = (self.envio.clone(), ctx.clone());
+            match atalho::ouvir(move || {
+                let _ = envio.send(Mensagem::Atalho);
+                ctx.request_repaint();
+            }) {
+                Ok(a) => self.atalho = Some(a),
+                Err(e) => eprintln!("abelha fixa: {e}"),
+            }
+        }
+        let perfil = self.perfil;
+        let acordar = ctx.clone();
+        let c = self.conversa.get_or_insert_with(|| Conversa::nova(perfil, Arc::new(move || acordar.request_repaint())));
+        c.falar = voz.voz_abelha;
+        c.efeito = voz.voz_efeito;
+        let mudou_o_nome = antes.voz_nome != voz.voz_nome || antes.voz_sensibilidade != voz.voz_sensibilidade || !c.vigiando();
+        if !voz.voz_nome {
+            if c.vigiando() {
+                c.desvigiar();
+            }
+            return;
+        }
+        if !mudou_o_nome {
+            return;
+        }
+        let erro = match canal::voz::nome_ouvido(perfil).map(|n| (n.referencias(), n.nome)) {
+            Ok((Some(r), _)) => c.vigiar(r, voz.voz_sensibilidade).err(),
+            Ok((None, nome)) => Some(format!("Grave o nome {nome} em Ajustes › Comandos falados para a abelha ouvir.")),
+            Err(e) => Some(e),
+        };
+        if let Some(texto) = erro {
+            self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA });
+        }
+    }
+
+    /// O clique (ou o atalho): abre o microfone; clicado ouvindo, cancela.
+    fn falar(&mut self, agora: f64) {
+        let Some(c) = self.conversa.as_mut() else { return };
+        self.aberto = false;
+        self.balao = None;
+        if matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo) {
+            c.cancelar();
+            self.resposta = None;
+            return;
+        }
+        c.calar();
+        self.resposta = None;
+        if let Err(texto) = c.ouvir() {
+            self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA });
+        }
+    }
+
+    /// O que chegou da voz e do núcleo.
+    fn receber_voz(&mut self, agora: f64) {
+        let Some(c) = self.conversa.as_mut() else { return };
+        for s in c.receber() {
+            match s {
+                Saida::Ouvido(ouvido) => {
+                    self.resposta = Some(Resposta { texto: String::new(), ouvido, erro: false, abrir: None, ate: agora + PERGUNTA });
+                }
+                Saida::Resposta(r) => {
+                    let ouvido = self.resposta.take().map(|r| r.ouvido).unwrap_or_default();
+                    let abrir = (r.abrir > 0).then_some(r.abrir);
+                    // "Abrir a tarefa": a abelha leva até ela (como o Abrir dos balões).
+                    if let Some(t) = abrir {
+                        ligacao::abrir_colmeia(self.perfil, t, None);
+                    }
+                    let ate = agora + if r.confirmar.is_empty() { RESPOSTA } else { PERGUNTA };
+                    self.resposta = Some(Resposta { texto: r.texto, ouvido, erro: false, abrir, ate });
+                }
+                Saida::Erro(texto) => self.resposta = Some(Resposta { texto, ouvido: String::new(), erro: true, abrir: None, ate: agora + RESPOSTA }),
+                Saida::Chamado => {
+                    self.aberto = false;
+                    self.balao = None;
+                    self.resposta = None;
+                }
+                Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido => {}
+            }
+        }
+        if self.resposta.as_ref().is_some_and(|r| agora >= r.ate) {
+            self.resposta = None;
+            if let Some(c) = self.conversa.as_mut() {
+                c.pergunta = None;
+            }
+        }
+    }
+
+    /// O balão da voz: ouvindo, entendendo ou a resposta.
+    fn balao_voz(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let Some(c) = self.conversa.as_mut() else { return };
+        let andamento = match c.fase() {
+            Fase::Abrindo | Fase::Ouvindo => Some("Ouvindo… diga o comando."),
+            Fase::Transcrevendo => Some("Entendendo…"),
+            Fase::Pensando => Some("Um instante…"),
+            Fase::Parada => None,
+        };
+        let r = self.resposta.as_ref();
+        let fala = tela::Fala {
+            texto: andamento.unwrap_or_else(|| r.map_or("", |r| r.texto.as_str())),
+            ouvido: r.map_or("", |r| r.ouvido.as_str()),
+            erro: andamento.is_none() && r.is_some_and(|r| r.erro),
+            pergunta: andamento.is_none() && c.pergunta.is_some(),
+            abrir: if andamento.is_none() { r.and_then(|r| r.abrir) } else { None },
+            microfone: c.microfone_aberto(),
+        };
+        match tela::balao_voz(ui, rect, &self.nome, &fala) {
+            Some(tela::PedidoVoz::Sim) => {
+                c.responder(true);
+                self.resposta = None;
+            }
+            Some(tela::PedidoVoz::Nao) => {
+                c.responder(false);
+                self.resposta = None;
+            }
+            Some(tela::PedidoVoz::Abrir(t)) => {
+                ligacao::abrir_colmeia(self.perfil, t, None);
+                self.resposta = None;
+            }
+            Some(tela::PedidoVoz::Fechar) => {
+                c.cancelar();
+                c.calar();
+                c.pergunta = None;
+                self.resposta = None;
+            }
+            None => {}
+        }
     }
 
     /// A janela na tela para a abelha em `p`, com o cartão (se houver) para
@@ -212,6 +396,7 @@ impl eframe::App for Fixa {
             eprintln!("abelha fixa: {e}");
         }
         self.receber(&ctx, agora);
+        self.receber_voz(agora);
 
         let estado = if agora < self.comemorar_ate { Estado::Comemorando } else { self.resumo.estado() };
         if estado != self.estado {
@@ -269,9 +454,13 @@ impl eframe::App for Fixa {
         } else {
             self.arrastar = false;
         }
-        if resposta.clicked() {
+        // Com os comandos falados, o clique é para falar e o resumo vai ao botão direito.
+        if resposta.clicked() && self.conversa.is_some() {
+            self.falar(agora);
+        } else if resposta.clicked() || resposta.secondary_clicked() {
             self.aberto = !self.aberto;
             self.balao = None;
+            self.resposta = None;
         }
         let em_cima = resposta.hovered();
         if em_cima && !self.em_cima {
@@ -285,10 +474,15 @@ impl eframe::App for Fixa {
         let lado = ABELHA * 0.7;
         mascote::desenhar(pintor, abelha.center() + vec2(0.0, 2.0), lado, self.modelo, self.estado, self.tempo(agora, animando));
         tela::ponto(pintor, abelha, self.resumo.contagem());
+        if self.conversa.as_ref().is_some_and(Conversa::microfone_aberto) {
+            tela::microfone(pintor, abelha);
+        }
 
         let mut pedido = None;
         if let Some(rect) = cartao {
-            if self.aberto {
+            if self.com_voz() {
+                self.balao_voz(ui, rect);
+            } else if self.aberto {
                 let destaque = self.resumo.destaque();
                 pedido = tela::resumo(ui, rect, &self.nome, self.ligada, self.resumo.contagem(), destaque.as_ref());
             } else if let Some(b) = &mut self.balao {
@@ -309,8 +503,12 @@ impl eframe::App for Fixa {
         // Só pede quadros enquanto algo se mexe; parada, dorme até um evento.
         if animando {
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 / QUADROS_ANIMACAO));
-        } else if self.balao.is_some() && !self.aberto {
+        } else if self.balao.is_some() && !self.aberto && !self.com_voz() {
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 / QUADROS_BALAO));
+        }
+        // A resposta da voz some sozinha: um quadro só, na hora.
+        if let Some(r) = &self.resposta {
+            ctx.request_repaint_after(Duration::from_secs_f64((r.ate - agora).max(0.05)));
         }
     }
 }
@@ -355,7 +553,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let (envio, recebe) = mpsc::channel();
-            ligacao::iniciar(perfil, cc.egui_ctx.clone(), envio);
+            ligacao::iniciar(perfil, cc.egui_ctx.clone(), envio.clone());
             Ok(Box::new(Fixa {
                 perfil,
                 modelo: Modelo::default(),
@@ -378,6 +576,11 @@ fn main() -> eframe::Result {
                 quadros: 0,
                 tela: None,
                 transparente,
+                voz: OpcoesVoz::default(),
+                conversa: None,
+                resposta: None,
+                atalho: None,
+                envio,
                 _trava: trava,
             }))
         }),

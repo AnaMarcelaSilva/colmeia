@@ -83,6 +83,12 @@ Em Ajustes, **Ditado por voz** (desligado por padrão) mostra o tamanho do model
 
 A transcrição roda no computador, em português, sem internet e sem tokens. Ela fica no `colmeia-voz`, um programa à parte que abre só quando você usa o microfone e sai sozinho depois de 2 minutos parado, levando o modelo da memória. O áudio fica só na memória dele e nunca é gravado ([decisão 0014](docs/decisoes/0014-ditado-em-processo-a-parte.md)).
 
+### Comandos falados e voz da abelha
+
+Em Ajustes, **Comandos falados e voz da abelha** liga cada item à parte; tudo vem desligado. Com os **comandos falados**, um clique na abelha (a da barra lateral ou a fixa) ou Ctrl+Alt+Espaço abre o microfone: diga "rodar a loja web", "parar a loja web", "abrir a tarefa do login", "encerrar a tarefa do login", "como está a tarefa do login?" ou "o que espera por mim?". O microfone fecha sozinho na pausa, o Whisper transcreve e o núcleo entende, sem IA e sem tokens, achando os nomes de projeto e tarefa mesmo ditos pela metade. A resposta aparece num balão ao lado da abelha; parar, encerrar e o que não ficou claro pedem confirmação (Sim no balão, ou "sim" falado). Com os comandos ligados, o resumo da abelha fica no botão direito. No X11, a abelha fixa pega o Ctrl+Alt+Espaço de qualquer programa.
+
+A **voz da abelha** fala a resposta com uma voz feminina em português (Kokoro, voz pf_dora), com um brilho e um eco curto opcionais. Ligar mostra o tamanho (104 MB) e o núcleo baixa uma vez o modelo, a voz e o ONNX Runtime das fontes oficiais, conferidos pelo SHA-256 (por enquanto, só no Linux x86-64). **Ouvir o nome** deixa a abelha fixa ouvindo o nome dela ("Colmeia, o que espera por mim?"), com o ponto vermelho do microfone sempre nela e a sensibilidade de 1 a 9. "Colmeia" já vem reconhecido; outro nome aprende com 3 ou 4 gravações feitas ali, que viram referências (não áudio). Tudo fica no `colmeia-voz`, que abre só quando usado ([decisão 0015](docs/decisoes/0015-comandos-falados-e-voz-da-abelha.md)).
+
 ### Histórico, daily e sprint
 
 ![A apresentação da daily: o slide de uma tarefa com o que foi feito, os números, a nota e as fotos](docs/imagens/apresentacao.png)
@@ -139,6 +145,7 @@ Os atalhos próprios da Colmeia usam **Ctrl+Shift+letra** e não são repassados
 | Ctrl+Shift+S / Ctrl+Shift+B | Captura o terminal / o navegador da tarefa |
 | Ctrl+Shift+E / Ctrl+Shift+Q | Arquivos / lousa da tarefa |
 | Ctrl+Shift+M (segurar) | Com o ditado ligado, ouve enquanto você segura e põe o texto na caixa de mensagem |
+| Ctrl+Alt+Espaço | Com os comandos falados ligados, abre o microfone para um comando (com a abelha fixa, de qualquer programa no X11) |
 | Ctrl+1 … Ctrl+6 | Abas da tarefa |
 | Ctrl+P / Ctrl+Shift+F | Na aba Arquivos, busca pelo nome / pelo texto |
 | Ctrl+Esc | Volta ao quadro |
@@ -222,14 +229,14 @@ Para testar sem afetar os dados reais, aponte `COLMEIA_DIR` e `COLMEIA_DADOS` pa
 | `COLMEIA_SEM_ABELHA=1` | Desliga a abelha |
 | `COLMEIA_ABELHA` | Caminho do `colmeia-abelha` (a abelha fixa), se ele não estiver ao lado da tela nem no PATH |
 | `COLMEIA_APP` | Caminho do `colmeia`, para a abelha fixa abrir a janela |
-| `COLMEIA_VOZ` | Caminho do `colmeia-voz` (o ditado), se ele não estiver ao lado da tela nem no PATH |
-| `PULSE_SOURCE` | No Linux, a fonte de som do PulseAudio que o ditado ouve, no lugar do microfone padrão |
+| `COLMEIA_VOZ` | Caminho do `colmeia-voz` (o ditado e os comandos falados), se ele não estiver ao lado da tela nem no PATH |
+| `PULSE_SOURCE` / `PULSE_SINK` | No Linux, a fonte de som do PulseAudio que a voz ouve e a saída onde a abelha fala, no lugar das padrão |
 | `COLMEIA_TAMANHO` | Tamanho inicial da janela, como `1280x720` |
 | `COLMEIA_FPS=1` | Mostra o contador de quadros, para medir desempenho |
 
 </details>
 
-O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha nos cinco acabamentos, com uma vitrine em `cargo run --release -p mascote --example vitrine`; `MASCOTE_GALERIA=1` mostra todos), `abelha-fixa/` (o programa `colmeia-abelha`, a abelha fixa na área de trabalho), `canal/` (o socket e o token do núcleo, usados pela tela e pela abelha fixa), `voz/` (o programa `colmeia-voz`, o ditado; `cargo run --release -p colmeia-voz --example medir -- <modelo> <fala.wav>` mede o Whisper com um WAV de teste), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
+O código está dividido em `nucleo/` (Go), `app/` (a tela), `mascote/` (a abelha nos cinco acabamentos, com uma vitrine em `cargo run --release -p mascote --example vitrine`; `MASCOTE_GALERIA=1` mostra todos), `abelha-fixa/` (o programa `colmeia-abelha`, a abelha fixa na área de trabalho), `canal/` (o socket e o token do núcleo, usados pela tela e pela abelha fixa), `voz/` (o programa `colmeia-voz`: o ditado, os comandos falados, a voz da abelha e o ouvir o nome; `--example medir` mede o Whisper com um WAV de teste, `--example falar` grava a voz da abelha num WAV, `--example nome_padrao` refaz as referências do nome padrão e `--example avaliar_nome` mede o reconhecimento do nome com vozes sintéticas), `docs/`, `scripts/` e `packaging/`. Em `arquivo/` estão os protótipos avaliados antes da escolha de Rust e egui para a interface.
 
 ## Plataformas
 

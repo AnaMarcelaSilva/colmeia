@@ -79,6 +79,8 @@ pub enum Dialogo {
     Mascote(EscolhaMascote),
     /// Ligar o ditado por voz: o tamanho do modelo, o download e o progresso.
     Ditado(AjustesDitado),
+    /// Os comandos falados, a voz da abelha e o ouvir o nome.
+    Voz(Box<crate::ajustes_voz::AjustesVoz>),
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -114,6 +116,8 @@ pub enum Resultado {
     FecharJanela,
     /// O ditado do perfil ligou ou desligou no núcleo.
     Ditado(bool),
+    /// Ligar o ouvir o nome: a abelha fixa abre (é ela que ouve) e a opção liga.
+    OuvirNome,
     /// O núcleo já foi encerrado (e os agentes com ele): fechar a janela.
     PararEFechar,
 }
@@ -272,6 +276,7 @@ impl Dialogo {
                     Dialogo::LimparHistorico { agente, nome, guardadas, erro } => limpar_historico(ui, *agente, nome, *guardadas, erro),
                     Dialogo::Mascote(d) => escolher_mascote(ui, d, perfil),
                     Dialogo::Ditado(d) => ajustes_ditado(ui, d, perfil),
+                    Dialogo::Voz(d) => crate::ajustes_voz::mostrar(ui, d),
                     Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
                 }
             });

@@ -1,6 +1,6 @@
 [package]
 name = "colmeia-voz"
-description = "O ditado por voz da Colmeia: um programa à parte, aberto sob pedido, que ouve o microfone e transcreve com o Whisper no próprio computador."
+description = "A voz da Colmeia: um programa à parte, aberto sob pedido, que ouve o microfone e transcreve com o Whisper, fala com a voz da abelha (Kokoro) e ouve o nome dela, tudo no próprio computador."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,8 +15,13 @@ serde_json = "1.0.151"
 cpal = "0.18"
 # O whisper.cpp compilado junto, só com a CPU.
 whisper-rs = "0.16"
+# A voz da abelha: o ONNX Runtime carregado do arquivo que o núcleo baixou
+# (load-dynamic), sem baixar nada na compilação nem crescer o programa.
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["load-dynamic", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# malloc_trim: devolver ao sistema a memória dos modelos que saíram.
+libc = "0.2"
 # No Linux, o microfone pelo PulseAudio (ou o pipewire-pulse) direto: pelo
 # ALSA, o plugin do pulse acorda a thread de captura sem parar (70% de um
 # núcleo só para ouvir).

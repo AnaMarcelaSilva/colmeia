@@ -1,9 +1,13 @@
 //! Canal local com o núcleo: socket Unix num diretório só do usuário e um token
 //! lido do arquivo a cada conexão (nunca de variável de ambiente ou argumento,
 //! que apareceriam para outros processos). Nenhuma porta de rede é usada.
+//! Aqui também fica o lado de quem usa a voz (o módulo `voz`), dividido pela
+//! tela e pela abelha fixa.
 
 use std::io;
 use std::path::PathBuf;
+
+pub mod voz;
 
 const NOME_SOCKET: &str = "nucleo.sock";
 const NOME_TOKEN: &str = "token";

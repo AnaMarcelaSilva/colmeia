@@ -10,7 +10,7 @@ use std::time::Duration;
 use eframe::egui;
 use tungstenite::Message;
 
-use crate::resumo::{Evento, Quadro};
+use crate::resumo::{Evento, OpcoesVoz, Quadro};
 
 pub enum Mensagem {
     /// O perfil (a abelha e o nome), lido a cada vez que liga.
@@ -19,6 +19,8 @@ pub enum Mensagem {
     Evento(Evento),
     /// O núcleo saiu do ar (ou recusou): a abelha dorme até voltar.
     Fora,
+    /// O atalho global dos comandos falados foi apertado.
+    Atalho,
 }
 
 const ESPERA_MAXIMA: Duration = Duration::from_secs(30);
@@ -93,6 +95,8 @@ pub struct Perfil {
     pub mascote_modelo: String,
     #[serde(default)]
     pub mascote_nome: String,
+    #[serde(flatten)]
+    pub voz: OpcoesVoz,
 }
 
 enum Erro {
