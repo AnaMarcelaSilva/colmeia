@@ -306,6 +306,8 @@ func migrar(db *sql.DB) error {
 		{"perfis", "voz_efeito", "INTEGER NOT NULL DEFAULT 0"},
 		{"perfis", "voz_nome", "INTEGER NOT NULL DEFAULT 0"},
 		{"perfis", "voz_sensibilidade", "INTEGER NOT NULL DEFAULT 5"},
+		// A pergunta livre com IA (usa tokens): desligada por padrão.
+		{"perfis", "voz_ia", "INTEGER NOT NULL DEFAULT 0"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
@@ -444,11 +446,12 @@ func migrarPerfis(db *sql.DB) error {
 			voz_abelha INTEGER NOT NULL DEFAULT 0,
 			voz_efeito INTEGER NOT NULL DEFAULT 0,
 			voz_nome INTEGER NOT NULL DEFAULT 0,
-			voz_sensibilidade INTEGER NOT NULL DEFAULT 5)`,
+			voz_sensibilidade INTEGER NOT NULL DEFAULT 5,
+			voz_ia INTEGER NOT NULL DEFAULT 0)`,
 		`INSERT INTO perfis_nova (id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade)
+				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia)
 			SELECT id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade FROM perfis`,
+				voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia FROM perfis`,
 		`DROP TABLE perfis`,
 		`ALTER TABLE perfis_nova RENAME TO perfis`,
 	} {

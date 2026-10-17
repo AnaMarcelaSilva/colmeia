@@ -39,12 +39,15 @@ type Perfil struct {
 // Abelha: a resposta também é falada, com a voz da abelha; Efeito põe um
 // brilho e um eco curto nela. OuvirNome: a abelha fixa fica ouvindo o nome dela
 // para abrir o microfone sozinha, com a Sensibilidade (1 a 9) escolhida.
+// PerguntaIA: o que não é um comando fixo vai, como pergunta livre, num
+// pedido ao Claude Code (usa tokens da conta).
 type OpcoesVoz struct {
 	Comandos      bool `json:"voz_comandos"`
 	Abelha        bool `json:"voz_abelha"`
 	Efeito        bool `json:"voz_efeito"`
 	OuvirNome     bool `json:"voz_nome"`
 	Sensibilidade int  `json:"voz_sensibilidade"`
+	PerguntaIA    bool `json:"voz_ia"`
 }
 
 // SensibilidadePadrao é o meio da escala: nem ouve por engano, nem precisa gritar.
@@ -57,11 +60,11 @@ var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zan
 const NomeMascotePadrao = "Colmeia"
 
 const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
-	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade`
+	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia`
 
 func (p *Perfil) campos() []any {
 	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado,
-		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade}
+		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade, &p.PerguntaIA}
 }
 
 type Conta struct {
@@ -304,8 +307,8 @@ func (b *Banco) DefinirVoz(ctx context.Context, perfil int64, o OpcoesVoz) error
 		return ErrInvalido{Motivo: "A sensibilidade vai de 1 a 9."}
 	}
 	return b.emTransacao(ctx, func(tx *transacao) error {
-		r, err := tx.ExecContext(ctx, `UPDATE perfis SET voz_comandos = ?, voz_abelha = ?, voz_efeito = ?, voz_nome = ?, voz_sensibilidade = ? WHERE id = ?`,
-			o.Comandos, o.Abelha, o.Efeito, o.OuvirNome, o.Sensibilidade, perfil)
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET voz_comandos = ?, voz_abelha = ?, voz_efeito = ?, voz_nome = ?, voz_sensibilidade = ?, voz_ia = ? WHERE id = ?`,
+			o.Comandos, o.Abelha, o.Efeito, o.OuvirNome, o.Sensibilidade, o.PerguntaIA, perfil)
 		if err != nil {
 			return err
 		}

@@ -135,6 +135,22 @@ func tirarNome(t, nome string) string {
 	return t
 }
 
+// SemChamado tira do começo da frase, como foi dita (com acentos e
+// pontuação), o "ei" e o nome da abelha: a pergunta livre vai sem eles.
+func SemChamado(frase, nomeAbelha string) string {
+	palavras := strings.Fields(frase)
+	for n := 0; n <= min(3, len(palavras)); n++ {
+		if normalizar(strings.Join(palavras[:n], " ")) == "" {
+			continue
+		}
+		dito := normalizar(strings.Join(palavras[n:], " "))
+		if tirarNome(normalizar(frase), normalizar(nomeAbelha)) == dito {
+			return strings.TrimLeft(strings.Join(palavras[n:], " "), ",.!:; ")
+		}
+	}
+	return strings.TrimSpace(frase)
+}
+
 // Entender lê a frase transcrita. O nome da abelha no começo ("Colmeia,
 // rodar a loja web") e as cortesias saem antes.
 func Entender(frase, nomeAbelha string) Pedido {

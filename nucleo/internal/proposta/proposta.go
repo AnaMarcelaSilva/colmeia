@@ -16,12 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/segredos"
 )
@@ -32,8 +31,6 @@ const (
 	MaxTitulo    = 120
 	MaxDescricao = 1000
 	MaxAssuntos  = 12
-	// Do que a ferramenta escreve na saída, o resto é descartado.
-	maxSaida = 1 << 20
 	// Do "o que aconteceu" de cada tarefa, só o começo vai no pedido.
 	maxFeito      = 8
 	maxTextoFeito = 200
@@ -42,13 +39,8 @@ const (
 // Prazo para o agente responder (os testes encurtam).
 var Prazo = 3 * time.Minute
 
-// Argumentos: impressão sem terminal, saída em JSON, nenhuma ferramenta,
-// nenhum servidor MCP, nenhuma configuração de projeto ou de usuário (sem
-// ganchos) e nenhuma conversa guardada. O pedido vai pela entrada padrão.
-var Argumentos = []string{
-	"-p", "--output-format", "json", "--tools", "", "--strict-mcp-config",
-	"--setting-sources", "", "--no-session-persistence",
-}
+// Argumentos são os do pedido único ao Claude Code (veja o pacote claudecode).
+var Argumentos = claudecode.Argumentos
 
 // Tarefa é o que o agente sabe de uma tarefa da sprint.
 type Tarefa struct {
@@ -106,7 +98,7 @@ func ConferirPedido(pedido string) (string, error) {
 		return "", dados.ErrInvalido{Motivo: "diga o que você quer da sprint"}
 	case utf8.RuneCountInString(pedido) > MaxPedido:
 		return "", dados.ErrInvalido{Motivo: fmt.Sprintf("o pedido pode ter no máximo %d caracteres", MaxPedido)}
-	case controle(pedido, true):
+	case claudecode.Controle(pedido, true):
 		return "", dados.ErrInvalido{Motivo: "o pedido tem caracteres de controle"}
 	case segredos.Parece(pedido):
 		return "", dados.ErrInvalido{Motivo: "o pedido parece ter uma senha ou chave"}
@@ -160,59 +152,21 @@ func (g Gerador) Gerar(ctx context.Context, pedido string, s Sprint) (Proposta, 
 	if err != nil {
 		return Proposta{}, err
 	}
-	// Uma pasta vazia: o agente não vê nenhum projeto nem instrução de projeto.
-	pasta, err := os.MkdirTemp("", "colmeia-proposta-")
+	resultado, err := claudecode.Pedido{Executavel: g.Executavel, Env: g.Env, Pasta: "colmeia-proposta-", Prazo: Prazo}.Rodar(ctx, entrada)
 	if err != nil {
 		return Proposta{}, err
 	}
-	defer os.RemoveAll(pasta)
-	ctx, cancelar := context.WithTimeout(ctx, Prazo)
-	defer cancelar()
-	cmd := exec.CommandContext(ctx, g.Executavel, Argumentos...)
-	cmd.Dir = pasta
-	cmd.Env = append(os.Environ(), g.Env...)
-	cmd.Stdin = bytes.NewReader(entrada)
-	saida := &limitado{max: maxSaida}
-	cmd.Stdout = saida
-	cmd.Stderr = io.Discard
-	cmd.WaitDelay = 2 * time.Second
-	err = cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return Proposta{}, dados.ErrInvalido{Motivo: fmt.Sprintf("o Claude Code não respondeu em %s", duracao(Prazo))}
-	}
-	if ctx.Err() != nil {
-		return Proposta{}, ctx.Err()
-	}
-	if saida.passou {
-		return Proposta{}, dados.ErrInvalido{Motivo: "a resposta do Claude Code veio grande demais"}
-	}
-	// Com erro, a saída em JSON ainda explica (is_error); sem saída, só o código.
-	if err != nil && saida.b.Len() == 0 {
-		return Proposta{}, dados.ErrInvalido{Motivo: "o Claude Code parou com erro sem responder"}
-	}
-	return Ler(saida.b.Bytes(), s)
+	return Validar(resultado, s)
 }
 
 // Ler confere a saída do Claude Code (o envelope do --output-format json) e
 // a proposta dentro dele.
 func Ler(saida []byte, s Sprint) (Proposta, error) {
-	var envelope struct {
-		Tipo    string  `json:"type"`
-		Subtipo string  `json:"subtype"`
-		Erro    bool    `json:"is_error"`
-		Result  *string `json:"result"`
+	resultado, err := claudecode.Resultado(saida)
+	if err != nil {
+		return Proposta{}, err
 	}
-	if err := json.Unmarshal(saida, &envelope); err != nil || envelope.Tipo != "result" {
-		return Proposta{}, dados.ErrInvalido{Motivo: "o Claude Code respondeu num formato que não conheço"}
-	}
-	if envelope.Erro || envelope.Subtipo != "success" || envelope.Result == nil {
-		motivo := "o Claude Code não conseguiu responder"
-		if envelope.Result != nil && *envelope.Result != "" && !segredos.Parece(*envelope.Result) {
-			motivo += ": " + umaLinha(*envelope.Result, 160)
-		}
-		return Proposta{}, dados.ErrInvalido{Motivo: motivo}
-	}
-	return Validar(*envelope.Result, s)
+	return Validar(resultado, s)
 }
 
 // Validar lê a proposta (JSON estrito: campo desconhecido, texto depois ou
@@ -256,7 +210,7 @@ func Validar(texto string, s Sprint) (Proposta, error) {
 			return ruim("uma descrição passou do tamanho")
 		case utf8.RuneCountInString(it.Assunto) > dados.MaxNomeAssunto:
 			return ruim("um assunto passou do tamanho")
-		case controle(it.Titulo, false) || controle(it.Assunto, false) || controle(it.Descricao, true):
+		case claudecode.Controle(it.Titulo, false) || claudecode.Controle(it.Assunto, false) || claudecode.Controle(it.Descricao, true):
 			return ruim("tem caracteres de controle")
 		case segredos.Parece(it.Titulo) || segredos.Parece(it.Descricao) || segredos.Parece(it.Assunto):
 			return ruim("parece ter uma senha ou chave")
@@ -283,46 +237,4 @@ func semCercas(texto string) string {
 		texto = texto[i+1:]
 	}
 	return strings.TrimSpace(texto)
-}
-
-// controle diz se o texto tem caractere de controle (a quebra de linha só
-// vale onde `linhas`).
-func controle(texto string, linhas bool) bool {
-	return !utf8.ValidString(texto) || strings.ContainsFunc(texto, func(r rune) bool {
-		return (r < ' ' && !(linhas && r == '\n')) || r == 0x7f
-	})
-}
-
-func umaLinha(texto string, maximo int) string {
-	texto, _, _ = strings.Cut(strings.TrimSpace(texto), "\n")
-	if utf8.RuneCountInString(texto) > maximo {
-		texto = string([]rune(texto)[:maximo-1]) + "…"
-	}
-	return texto
-}
-
-func duracao(d time.Duration) string {
-	if d >= time.Minute && d%time.Minute == 0 {
-		if d == time.Minute {
-			return "1 minuto"
-		}
-		return fmt.Sprintf("%d minutos", int(d/time.Minute))
-	}
-	return d.String()
-}
-
-// limitado guarda até `max` bytes e marca se passou.
-type limitado struct {
-	b      bytes.Buffer
-	max    int
-	passou bool
-}
-
-func (l *limitado) Write(p []byte) (int, error) {
-	if l.b.Len()+len(p) > l.max {
-		l.passou = true
-		l.b.Write(p[:max(0, l.max-l.b.Len())])
-		return len(p), nil
-	}
-	return l.b.Write(p)
 }

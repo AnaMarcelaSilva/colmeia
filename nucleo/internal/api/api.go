@@ -105,6 +105,8 @@ type Servidor struct {
 	kokoro  *pacoteVoz
 	// A pergunta de cada perfil esperando o "sim" (veja comandovoz.go).
 	confirmacoes confirmacoes
+	// A pergunta livre com IA de cada perfil em andamento (veja pergunta.go).
+	perguntando perguntando
 }
 
 func (s *Servidor) Rotas() http.Handler {

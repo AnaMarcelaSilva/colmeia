@@ -296,3 +296,21 @@ func TestListaEmPortugues(t *testing.T) {
 		}
 	}
 }
+
+func TestSemChamado(t *testing.T) {
+	casos := map[string]string{
+		"Colmeia, o que eu fiz hoje?":         "o que eu fiz hoje?",
+		"Ei, Colmeia! O que falta na sprint?": "O que falta na sprint?",
+		"com meia quanto falta?":              "quanto falta?",
+		"O que eu fiz hoje?":                  "O que eu fiz hoje?",
+		"  ":                                  "",
+	}
+	for frase, quer := range casos {
+		if got := SemChamado(frase, "Colmeia"); got != quer {
+			t.Errorf("%q: %q, queria %q", frase, got, quer)
+		}
+	}
+	if got := SemChamado("Zuzu, como foi o dia?", "Zuzu"); got != "como foi o dia?" {
+		t.Errorf("outro nome: %q", got)
+	}
+}

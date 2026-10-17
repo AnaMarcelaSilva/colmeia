@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/voz"
 )
@@ -288,10 +290,11 @@ type mudancaVoz struct {
 	Efeito        *bool `json:"voz_efeito"`
 	OuvirNome     *bool `json:"voz_nome"`
 	Sensibilidade *int  `json:"voz_sensibilidade"`
+	PerguntaIA    *bool `json:"voz_ia"`
 }
 
 func (m mudancaVoz) vazia() bool {
-	return m.Comandos == nil && m.Abelha == nil && m.Efeito == nil && m.OuvirNome == nil && m.Sensibilidade == nil
+	return m.Comandos == nil && m.Abelha == nil && m.Efeito == nil && m.OuvirNome == nil && m.Sensibilidade == nil && m.PerguntaIA == nil
 }
 
 // definirVoz confere o que cada item precisa antes de ligar: os comandos, o
@@ -314,6 +317,7 @@ func (s *Servidor) definirVoz(ctx context.Context, perfil int64, m mudancaVoz) e
 	aplicar(&m.Abelha, &v.Abelha)
 	aplicar(&m.Efeito, &v.Efeito)
 	aplicar(&m.OuvirNome, &v.OuvirNome)
+	aplicar(&m.PerguntaIA, &v.PerguntaIA)
 	if m.Sensibilidade != nil {
 		v.Sensibilidade = *m.Sensibilidade
 	}
@@ -325,6 +329,11 @@ func (s *Servidor) definirVoz(ctx context.Context, perfil int64, m mudancaVoz) e
 	}
 	if v.Abelha && !antes.Abelha && (!voz.KokoroDisponivel() || !s.Fala.Pronto()) {
 		return dados.ErrInvalido{Motivo: "Baixe a voz da abelha antes de ligar."}
+	}
+	if v.PerguntaIA && !antes.PerguntaIA {
+		if _, err := exec.LookPath(claudecode.Executavel); err != nil {
+			return dados.ErrInvalido{Motivo: "A pergunta livre usa o Claude Code, que não está instalado."}
+		}
 	}
 	if v.OuvirNome && !antes.OuvirNome {
 		if !p.AbelhaFixa {

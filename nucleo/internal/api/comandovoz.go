@@ -100,7 +100,8 @@ func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	if !perfil.Comandos {
+	// Escrita no resumo da abelha, a frase chega também só com a pergunta livre ligada.
+	if !perfil.Comandos && !perfil.PerguntaIA {
 		responderErro(w, dados.ErrInvalido{Motivo: "Os comandos falados estão desligados. Ligue em Ajustes › Voz."})
 		return
 	}
@@ -117,6 +118,11 @@ func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
 	case comandovoz.Nao:
 		s.confirmacoes.tirar(id, "")
 		responderJSON(w, respostaVoz{Texto: "Tudo bem, não fiz nada."})
+		return
+	}
+	// Não é um comando fixo: com a opção ligada, vira pergunta livre (e só então usa tokens).
+	if p.Intencao == comandovoz.Desconhecida && perfil.PerguntaIA {
+		responderJSON(w, s.perguntaLivre(r.Context(), perfil, comandovoz.SemChamado(pedido.Texto, perfil.MascoteNome)))
 		return
 	}
 	q, err := s.quadroFalado(r.Context(), id)

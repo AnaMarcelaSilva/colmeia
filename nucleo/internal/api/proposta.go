@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
-	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/ferramentas"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/linha"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/proposta"
 )
@@ -20,10 +20,8 @@ import (
 // exatamente o que foi conferido aqui (a tela só manda o número).
 
 const (
-	maxPropostas       = 8
-	validadeProposta   = time.Hour
-	executavelClaude   = "claude"
-	semClaudeInstalado = "o Claude Code não está instalado"
+	maxPropostas     = 8
+	validadeProposta = time.Hour
 )
 
 type propostaGuardada struct {
@@ -150,9 +148,9 @@ func (s *Servidor) gerarSprint(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
-	executavel, err := exec.LookPath(executavelClaude)
+	executavel, err := exec.LookPath(claudecode.Executavel)
 	if err != nil {
-		responderErro(w, dados.ErrInvalido{Motivo: semClaudeInstalado})
+		responderErro(w, dados.ErrInvalido{Motivo: claudecode.SemClaude})
 		return
 	}
 	deck, err := s.montarDeck(r, "sprint")
@@ -167,14 +165,10 @@ func (s *Servidor) gerarSprint(w http.ResponseWriter, r *http.Request) {
 	}
 	entrada := entradaDaSprint(deck, sprint)
 	// A mesma conta que os agentes do perfil usam.
-	var env []string
-	separada, err := s.pastaSeparada(r.Context(), perfil, executavelClaude)
+	env, err := s.contaDoClaude(r.Context(), perfil)
 	if err != nil {
 		responderErro(w, err)
 		return
-	}
-	if separada != "" {
-		env = append(env, ferramentas.Variavel(executavelClaude)+"="+separada)
 	}
 	if !s.propostas.comecar() {
 		responderErro(w, dados.ErrInvalido{Motivo: "já estou gerando uma proposta; espere ela chegar"})

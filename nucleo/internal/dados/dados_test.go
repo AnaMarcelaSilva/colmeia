@@ -706,14 +706,14 @@ func TestOpcoesDeVozDoPerfil(t *testing.T) {
 	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != (OpcoesVoz{Sensibilidade: SensibilidadePadrao}) {
 		t.Fatalf("a voz nasce toda desligada: %+v", p.OpcoesVoz)
 	}
-	o := OpcoesVoz{Comandos: true, Abelha: true, Efeito: true, OuvirNome: true, Sensibilidade: 7}
+	o := OpcoesVoz{Comandos: true, Abelha: true, Efeito: true, OuvirNome: true, Sensibilidade: 7, PerguntaIA: true}
 	if err := b.DefinirVoz(ctx, perfil.ID, o); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != o {
 		t.Errorf("gravou %+v", p.OpcoesVoz)
 	}
-	if p, _ := b.Perfil(ctx, outro.ID); p.Comandos || p.Abelha {
+	if p, _ := b.Perfil(ctx, outro.ID); p.Comandos || p.Abelha || p.PerguntaIA {
 		t.Error("as opções valem só para o perfil")
 	}
 	for _, s := range []int{0, 10, -1} {
@@ -730,7 +730,7 @@ func TestOpcoesDeVozDoPerfil(t *testing.T) {
 	}
 
 	// Um banco de antes da voz (sem as colunas) abre com tudo desligado.
-	for _, c := range []string{"voz_comandos", "voz_abelha", "voz_efeito", "voz_nome", "voz_sensibilidade"} {
+	for _, c := range []string{"voz_comandos", "voz_abelha", "voz_efeito", "voz_nome", "voz_sensibilidade", "voz_ia"} {
 		if _, err := b.db.Exec(`ALTER TABLE perfis DROP COLUMN ` + c); err != nil {
 			t.Fatal(err)
 		}
