@@ -30,7 +30,25 @@ type Perfil struct {
 	// Ditado: o microfone na caixa de mensagem das tarefas. Desligado por
 	// padrão; só liga com o modelo de voz baixado.
 	Ditado bool `json:"ditado"`
+	// Os comandos falados à abelha (veja OpcoesVoz). Tudo desligado por padrão.
+	OpcoesVoz
 }
+
+// OpcoesVoz são os comandos falados à abelha, cada item ligado à parte.
+// Comandos: clicar na abelha (ou o atalho) abre o microfone para um comando.
+// Abelha: a resposta também é falada, com a voz da abelha; Efeito põe um
+// brilho e um eco curto nela. OuvirNome: a abelha fixa fica ouvindo o nome dela
+// para abrir o microfone sozinha, com a Sensibilidade (1 a 9) escolhida.
+type OpcoesVoz struct {
+	Comandos      bool `json:"voz_comandos"`
+	Abelha        bool `json:"voz_abelha"`
+	Efeito        bool `json:"voz_efeito"`
+	OuvirNome     bool `json:"voz_nome"`
+	Sensibilidade int  `json:"voz_sensibilidade"`
+}
+
+// SensibilidadePadrao é o meio da escala: nem ouve por engano, nem precisa gritar.
+const SensibilidadePadrao = 5
 
 // ModelosMascote são os acabamentos que a tela sabe desenhar; o primeiro é o padrão.
 var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zangao"}
@@ -38,10 +56,12 @@ var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zan
 // NomeMascotePadrao é o nome da abelha de um perfil novo.
 const NomeMascotePadrao = "Colmeia"
 
-const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado`
+const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
+	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade`
 
 func (p *Perfil) campos() []any {
-	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado}
+	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado,
+		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade}
 }
 
 type Conta struct {
@@ -141,7 +161,8 @@ func (b *Banco) CriarPerfil(ctx context.Context, nome, tema string) (Perfil, err
 	if err := umDe("tema", tema, Temas); err != nil {
 		return Perfil{}, err
 	}
-	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true, MascoteModelo: ModelosMascote[0], MascoteNome: NomeMascotePadrao}
+	p := Perfil{Nome: nome, Tema: tema, CriadoEm: agora(), AvisoCaptura: true, MascoteModelo: ModelosMascote[0], MascoteNome: NomeMascotePadrao,
+		OpcoesVoz: OpcoesVoz{Sensibilidade: SensibilidadePadrao}}
 	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO perfis (nome, tema, criado_em) VALUES (?, ?, ?)`, p.Nome, p.Tema, p.CriadoEm)
 		if err != nil {
@@ -272,6 +293,26 @@ func (b *Banco) DefinirDitado(ctx context.Context, perfil int64, ligado bool) er
 			return ErrNaoEncontrado
 		}
 		return registrar(ctx, tx, "perfil.ditado", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
+	})
+}
+
+// DefinirVoz grava as opções dos comandos falados do perfil. Quem confere
+// se os modelos estão baixados (e se o nome da abelha já tem gravações) é a
+// API; aqui só a sensibilidade, de 1 a 9.
+func (b *Banco) DefinirVoz(ctx context.Context, perfil int64, o OpcoesVoz) error {
+	if o.Sensibilidade < 1 || o.Sensibilidade > 9 {
+		return ErrInvalido{Motivo: "A sensibilidade vai de 1 a 9."}
+	}
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET voz_comandos = ?, voz_abelha = ?, voz_efeito = ?, voz_nome = ?, voz_sensibilidade = ? WHERE id = ?`,
+			o.Comandos, o.Abelha, o.Efeito, o.OuvirNome, o.Sensibilidade, perfil)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		return registrar(ctx, tx, "perfil.voz", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "voz": o})
 	})
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -257,33 +258,39 @@ func (s *Servidor) rodarComando(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	c, perfil, err := s.Banco.ComandoPorID(r.Context(), id)
+	resposta, err := s.rodarConfiguracao(r.Context(), id, pedido)
 	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	p, err := s.Banco.Projeto(r.Context(), c.ProjetoID)
+	responderJSON(w, resposta)
+}
+
+// rodarConfiguracao roda uma configuração do Play (pela tela ou por um
+// comando falado). Rodar de novo para a execução anterior.
+func (s *Servidor) rodarConfiguracao(ctx context.Context, id int64, pedido pedidoRodar) (comandoNaTela, error) {
+	c, perfil, err := s.Banco.ComandoPorID(ctx, id)
 	if err != nil {
-		responderErro(w, err)
-		return
+		return comandoNaTela{}, err
+	}
+	p, err := s.Banco.Projeto(ctx, c.ProjetoID)
+	if err != nil {
+		return comandoNaTela{}, err
 	}
 	base := p.Caminho
 	if pedido.Tarefa != 0 {
-		t, projeto, _, err := s.Banco.Tarefa(r.Context(), pedido.Tarefa)
+		t, projeto, _, err := s.Banco.Tarefa(ctx, pedido.Tarefa)
 		if err != nil {
-			responderErro(w, err)
-			return
+			return comandoNaTela{}, err
 		}
 		if t.ProjetoID != p.ID {
-			responderErro(w, dados.ErrInvalido{Motivo: "a tarefa é de outro projeto"})
-			return
+			return comandoNaTela{}, dados.ErrInvalido{Motivo: "a tarefa é de outro projeto"}
 		}
 		base = t.Pasta(projeto)
 	}
 	pasta, err := pastaDaExecucao(base, c.Pasta)
 	if err != nil {
-		responderErro(w, err)
-		return
+		return comandoNaTela{}, err
 	}
 	env := make([]string, 0, len(c.Ambiente))
 	for _, v := range c.Ambiente {
@@ -293,8 +300,7 @@ func (s *Servidor) rodarComando(w http.ResponseWriter, r *http.Request) {
 	s.Execucoes.Fechar(id)
 	pty, err := terminal.Iniciar(linhaDeComando(c.Comando), env, pasta, terminal.Tamanho{Colunas: pedido.Cols, Linhas: pedido.Rows}.OuPadrao())
 	if err != nil {
-		responderErro(w, dados.ErrInvalido{Motivo: "não consegui rodar: " + err.Error()})
-		return
+		return comandoNaTela{}, dados.ErrInvalido{Motivo: "não consegui rodar: " + err.Error()}
 	}
 	sessao := terminal.NovaSessao(id, pty, s.Bytes)
 	agora := time.Now()
@@ -317,7 +323,7 @@ func (s *Servidor) rodarComando(w http.ResponseWriter, r *http.Request) {
 	})
 	resposta := s.naTela(c)
 	resposta.Rodando = true
-	responderJSON(w, resposta)
+	return resposta, nil
 }
 
 func (s *Servidor) pararComando(w http.ResponseWriter, r *http.Request) {

@@ -697,3 +697,51 @@ func TestDitadoDoPerfil(t *testing.T) {
 		t.Errorf("depois da migração: %+v %v", p, err)
 	}
 }
+
+func TestOpcoesDeVozDoPerfil(t *testing.T) {
+	b, dir := bancoDeTeste(t)
+	ctx := context.Background()
+	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
+	outro, _ := b.CriarPerfil(ctx, "Pessoal", "")
+	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != (OpcoesVoz{Sensibilidade: SensibilidadePadrao}) {
+		t.Fatalf("a voz nasce toda desligada: %+v", p.OpcoesVoz)
+	}
+	o := OpcoesVoz{Comandos: true, Abelha: true, Efeito: true, OuvirNome: true, Sensibilidade: 7}
+	if err := b.DefinirVoz(ctx, perfil.ID, o); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := b.Perfil(ctx, perfil.ID); p.OpcoesVoz != o {
+		t.Errorf("gravou %+v", p.OpcoesVoz)
+	}
+	if p, _ := b.Perfil(ctx, outro.ID); p.Comandos || p.Abelha {
+		t.Error("as opções valem só para o perfil")
+	}
+	for _, s := range []int{0, 10, -1} {
+		if err := b.DefinirVoz(ctx, perfil.ID, OpcoesVoz{Sensibilidade: s}); err == nil {
+			t.Errorf("sensibilidade %d aceita", s)
+		}
+	}
+	if err := b.DefinirVoz(ctx, 99, OpcoesVoz{Sensibilidade: 5}); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("perfil que não existe: %v", err)
+	}
+	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.voz"}})
+	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"voz_sensibilidade":7`) {
+		t.Errorf("evento da voz: %+v", eventos)
+	}
+
+	// Um banco de antes da voz (sem as colunas) abre com tudo desligado.
+	for _, c := range []string{"voz_comandos", "voz_abelha", "voz_efeito", "voz_nome", "voz_sensibilidade"} {
+		if _, err := b.db.Exec(`ALTER TABLE perfis DROP COLUMN ` + c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.Fechar()
+	b2, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b2.Fechar()
+	if p, err := b2.Perfil(ctx, perfil.ID); err != nil || p.OpcoesVoz != (OpcoesVoz{Sensibilidade: SensibilidadePadrao}) {
+		t.Errorf("depois da migração: %+v %v", p.OpcoesVoz, err)
+	}
+}

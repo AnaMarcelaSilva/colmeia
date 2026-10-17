@@ -53,21 +53,31 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasBancosDoAgente(mux)
 }
 
-// responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.
-func responderErro(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	mensagem := "erro interno"
+// traduzirErro dá o status HTTP e uma mensagem clara para os erros dos dados.
+func traduzirErro(err error) (int, string) {
 	var invalido dados.ErrInvalido
 	switch {
 	case errors.As(err, &invalido):
-		status, mensagem = http.StatusBadRequest, invalido.Motivo
+		return http.StatusBadRequest, invalido.Motivo
 	case errors.Is(err, dados.ErrNaoEncontrado):
-		status, mensagem = http.StatusNotFound, "não encontrado"
+		return http.StatusNotFound, "não encontrado"
 	case errors.Is(err, dados.ErrJaExiste):
-		status, mensagem = http.StatusConflict, "já existe um com esse nome"
+		return http.StatusConflict, "já existe um com esse nome"
 	case errors.Is(err, git.ErrMudancas):
-		status, mensagem = http.StatusConflict, "A cópia isolada tem mudanças que não estão em nenhum commit. Salve num commit ou descarte antes de remover."
+		return http.StatusConflict, "A cópia isolada tem mudanças que não estão em nenhum commit. Salve num commit ou descarte antes de remover."
 	}
+	return http.StatusInternalServerError, "erro interno"
+}
+
+// mensagemDeErro é só a mensagem, para quem responde em texto (a voz da abelha).
+func mensagemDeErro(err error) string {
+	_, m := traduzirErro(err)
+	return m
+}
+
+// responderErro traduz os erros dos dados em status HTTP com uma mensagem clara.
+func responderErro(w http.ResponseWriter, err error) {
+	status, mensagem := traduzirErro(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"erro": mensagem})
@@ -128,6 +138,7 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 		MascoteNome   *string `json:"mascote_nome"`
 		AbelhaFixa    *bool   `json:"abelha_fixa"`
 		Ditado        *bool   `json:"ditado"`
+		mudancaVoz
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -184,6 +195,13 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 	}
 	if pedido.Ditado != nil {
 		if err := s.definirDitado(r.Context(), id, *pedido.Ditado); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	// Depois da abelha fixa: ligar ela e o ouvir o nome vai num pedido só.
+	if !pedido.mudancaVoz.vazia() {
+		if err := s.definirVoz(r.Context(), id, pedido.mudancaVoz); err != nil {
 			responderErro(w, err)
 			return
 		}

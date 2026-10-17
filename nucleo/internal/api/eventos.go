@@ -486,6 +486,13 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "ligado": d.Ligado}
+	case "perfil.voz":
+		// As opções dos comandos falados: a abelha fixa liga ou desliga o ouvir o nome.
+		var d struct {
+			Voz dados.OpcoesVoz `json:"voz"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "voz": d.Voz}
 	case "navegador.aberto", "navegador.fechado", "navegador.captura", "navegador.recusado":
 		var d struct {
 			Descricao string `json:"descricao"`

@@ -97,9 +97,14 @@ type Servidor struct {
 	// As propostas de "Gerar sprint com IA" esperando aceitar (veja proposta.go).
 	propostas propostas
 
-	// O modelo do ditado por voz (veja voz.go); vazio, fica em DirDados/voz.
-	Voz         *voz.Gerente
-	baixandoVoz quemBaixa
+	// Os modelos de voz (veja voz.go): o Whisper do ditado e dos comandos
+	// falados e a voz da abelha (Kokoro); vazios, ficam em DirDados/voz.
+	Voz     *voz.Gerente
+	Fala    *voz.Gerente
+	whisper *pacoteVoz
+	kokoro  *pacoteVoz
+	// A pergunta de cada perfil esperando o "sim" (veja comandovoz.go).
+	confirmacoes confirmacoes
 }
 
 func (s *Servidor) Rotas() http.Handler {
