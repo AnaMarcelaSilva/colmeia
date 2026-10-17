@@ -3,7 +3,8 @@
 //! ciclo; MASCOTE_MODELO=antiga (ou meio-termo, favo, zangao: os códigos do
 //! perfil) abre num modelo. Parados: MASCOTE_GALERIA=1 mostra todos os modelos
 //! em todos os estados, MASCOTE_GALERIA=modelos os cinco lado a lado (grandes e
-//! a 40 px) e MASCOTE_GALERIA=estados o modelo escolhido nos cinco estados.
+//! a 40 px) e MASCOTE_GALERIA=estados o modelo escolhido nos cinco estados;
+//! MASCOTE_FUNDO=preto ou branco troca o fundo delas.
 
 use eframe::egui::{self, Color32, RichText};
 use mascote::{Estado, Modelo, Tempo};
@@ -17,6 +18,16 @@ const SUAVE: Color32 = Color32::from_rgb(0x9d, 0xa4, 0xba);
 const DESTAQUE: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
 /// O fundo do diálogo da abelha no tema escuro, o das prévias em Ajustes.
 const DIALOGO: Color32 = Color32::from_rgb(0x1e, 0x22, 0x33);
+/// O fundo das galerias paradas. MASCOTE_FUNDO=preto ou branco serve para
+/// recortar a abelha com transparência (a diferença entre os dois dá o alfa).
+fn fundo() -> Color32 {
+    match std::env::var("MASCOTE_FUNDO").as_deref() {
+        Ok("preto") => Color32::BLACK,
+        Ok("branco") => Color32::WHITE,
+        _ => DIALOGO,
+    }
+}
+
 /// O instante das galerias, o mesmo das prévias em Ajustes.
 const INSTANTE: Tempo = Tempo { total: 1.3, no_estado: 0.6 };
 const SEGUNDOS_POR_ESTADO: f64 = 3.0;
@@ -127,7 +138,7 @@ fn galeria(ui: &mut egui::Ui) {
 fn lado_a_lado(ui: &mut egui::Ui) {
     let area = ui.max_rect();
     let pintor = ui.painter();
-    pintor.rect_filled(area, 0.0, DIALOGO);
+    pintor.rect_filled(area, 0.0, fundo());
     let coluna = area.width() / 5.0;
     for (i, modelo) in Modelo::TODOS.into_iter().enumerate() {
         let x = area.left() + coluna * (i as f32 + 0.5);
@@ -141,7 +152,7 @@ fn lado_a_lado(ui: &mut egui::Ui) {
 fn estados(ui: &mut egui::Ui, modelo: Modelo) {
     let area = ui.max_rect();
     let pintor = ui.painter();
-    pintor.rect_filled(area, 0.0, DIALOGO);
+    pintor.rect_filled(area, 0.0, fundo());
     let coluna = area.width() / 5.0;
     for (i, estado) in Estado::TODOS.into_iter().enumerate() {
         let x = area.left() + coluna * (i as f32 + 0.5);
