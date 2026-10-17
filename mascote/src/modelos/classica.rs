@@ -1,5 +1,5 @@
-//! A abelha de antes da identidade: corpo redondo e amarelo, asas cinza
-//! translúcidas e a tela do rosto sem moldura.
+//! A Clássica, a abelha de antes da identidade: corpo redondo e amarelo,
+//! asas cinza translúcidas e a tela do rosto sem moldura.
 
 use eframe::egui::Color32;
 

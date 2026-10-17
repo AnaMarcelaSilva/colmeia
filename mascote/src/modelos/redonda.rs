@@ -1,4 +1,4 @@
-//! O meio-termo: o corpo redondo e o jeito da antiga com o acabamento da
+//! A Redonda: o corpo redondo e o jeito da Clássica com o acabamento da
 //! marca (tela com borda roxa, asas lilás translúcidas, mel nas antenas e
 //! um brilho suave no corpo).
 

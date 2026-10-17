@@ -73,7 +73,7 @@ Quando algo precisa de você em outra tarefa, aparece um aviso no rodapé. Com a
 
 ### A abelha e a abelha fixa
 
-A abelha no pé da barra lateral resume o perfil: dorme, trabalha, espera você, dá erro ou comemora, e o clique abre o que está acontecendo. Em Ajustes, **Abelha** escolhe o acabamento dela entre cinco (a da identidade, a antiga, o meio-termo, o robô do favo e o zangão) e o nome, Colmeia por padrão, que aparece no resumo e nos balões.
+A abelha no pé da barra lateral resume o perfil: dorme, trabalha, espera você, dá erro ou comemora, e o clique abre o que está acontecendo. Em Ajustes, **Abelha** escolhe o acabamento dela entre cinco (Colmeia, Clássica, Redonda, Favo e Zangão) e o nome, Colmeia por padrão, que aparece no resumo e nos balões.
 
 **Fixar a abelha na área de trabalho** abre o `colmeia-abelha`, um programa à parte, pequeno e sem moldura, sempre por cima e em todas as áreas de trabalho, que continua lá com a janela da Colmeia fechada (o núcleo segue rodando). Parada, ela mostra um ponto da cor do que mais pede você, ou um contador vermelho com os erros. O clique abre o resumo ("2 esperam você · 1 trabalhando · 0 com erro"), que fica até você fechar, com a tarefa que pede você, Abrir a Colmeia e Desafixar. Quando um agente espera você, dá erro ou uma tarefa é concluída, um balão sai dela e some em 8 s (parado com o mouse em cima). Abrir e Ver o erro levam à tarefa na janela aberta ou abrem a Colmeia já nela. A abelha se arrasta e lembra onde ficou, e só redesenha quando algo muda. No Wayland ela fica por cima só onde o compositor deixa, como uma janela comum ([decisão 0013](docs/decisoes/0013-abelha-fixa-em-programa-a-parte.md)).
 

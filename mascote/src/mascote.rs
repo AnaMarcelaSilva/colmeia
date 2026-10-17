@@ -59,36 +59,37 @@ impl Estado {
 pub enum Modelo {
     /// A da identidade: corpo numa célula deitada, como a logo.
     #[default]
-    Identidade,
-    /// A de antes da identidade: redonda, asas cinza.
-    Antiga,
-    /// O corpo redondo da antiga com o acabamento da marca.
-    MeioTermo,
+    Colmeia,
+    /// A de antes da identidade: redonda, visor escuro e asas cinza.
+    Classica,
+    /// O corpo redondo da clássica com o acabamento da marca.
+    Redonda,
     /// Visor em hexágono e asas de favo só no contorno.
     Favo,
-    /// A da identidade, maior e mais escura.
+    /// Corpo largo âmbar queimado, olhos grandes e um tufo no lugar das antenas.
     Zangao,
 }
 
 impl Modelo {
-    pub const TODOS: [Modelo; 5] = [Modelo::Identidade, Modelo::Antiga, Modelo::MeioTermo, Modelo::Favo, Modelo::Zangao];
+    pub const TODOS: [Modelo; 5] = [Modelo::Colmeia, Modelo::Classica, Modelo::Redonda, Modelo::Favo, Modelo::Zangao];
 
     pub fn nome(self) -> &'static str {
         match self {
-            Modelo::Identidade => "Identidade",
-            Modelo::Antiga => "A antiga",
-            Modelo::MeioTermo => "Meio-termo",
-            Modelo::Favo => "Robô do favo",
+            Modelo::Colmeia => "Colmeia",
+            Modelo::Classica => "Clássica",
+            Modelo::Redonda => "Redonda",
+            Modelo::Favo => "Favo",
             Modelo::Zangao => "Zangão",
         }
     }
 
-    /// O código guardado no perfil (a mesma lista do núcleo).
+    /// O código guardado no perfil (a mesma lista do núcleo). Ficou o dos
+    /// nomes de antes, para não mexer nos perfis gravados.
     pub fn codigo(self) -> &'static str {
         match self {
-            Modelo::Identidade => "identidade",
-            Modelo::Antiga => "antiga",
-            Modelo::MeioTermo => "meio-termo",
+            Modelo::Colmeia => "identidade",
+            Modelo::Classica => "antiga",
+            Modelo::Redonda => "meio-termo",
             Modelo::Favo => "favo",
             Modelo::Zangao => "zangao",
         }
@@ -168,11 +169,11 @@ fn corpo(p: Pincel, modelo: Modelo, estado: Estado, t: Tempo) {
 
     let p = p.movido(0.0, pulo);
     match modelo {
-        Modelo::Identidade => modelos::identidade::desenhar(p, &modelos::identidade::MEL, estado, t),
-        Modelo::Zangao => modelos::identidade::desenhar(p.ampliado(1.12), &modelos::identidade::ZANGAO, estado, t),
-        Modelo::Antiga => modelos::antiga::desenhar(p, estado, t),
-        Modelo::MeioTermo => modelos::redonda::desenhar(p, estado, t),
+        Modelo::Colmeia => modelos::colmeia::desenhar(p, estado, t),
+        Modelo::Classica => modelos::classica::desenhar(p, estado, t),
+        Modelo::Redonda => modelos::redonda::desenhar(p, estado, t),
         Modelo::Favo => modelos::favo::desenhar(p, estado, t),
+        Modelo::Zangao => modelos::zangao::desenhar(p, estado, t),
     }
 }
 
@@ -317,8 +318,17 @@ mod testes {
             assert_eq!(Modelo::do_codigo(m.codigo()), m);
             assert!(!m.nome().is_empty());
         }
-        assert_eq!(Modelo::do_codigo("unicornio"), Modelo::Identidade);
-        assert_eq!(Modelo::default(), Modelo::Identidade);
+        assert_eq!(Modelo::do_codigo("unicornio"), Modelo::Colmeia);
+        assert_eq!(Modelo::default(), Modelo::Colmeia);
+    }
+
+    /// Os nomes mudaram; os códigos não, para os perfis gravados continuarem valendo.
+    #[test]
+    fn codigos_gravados_continuam_os_de_antes() {
+        let codigos: Vec<_> = Modelo::TODOS.iter().map(|m| m.codigo()).collect();
+        assert_eq!(codigos, ["identidade", "antiga", "meio-termo", "favo", "zangao"]);
+        let nomes: Vec<_> = Modelo::TODOS.iter().map(|m| m.nome()).collect();
+        assert_eq!(nomes, ["Colmeia", "Clássica", "Redonda", "Favo", "Zangão"]);
     }
 
     /// Todo modelo desenha todo estado dentro do quadro (com folga para o

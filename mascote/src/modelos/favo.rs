@@ -1,6 +1,6 @@
-//! O robô do favo: corpo redondo, a tela do rosto num hexágono como a logo,
-//! asas em célula de favo só com o contorno e listras curvas. É o que lê
-//! melhor pequeno.
+//! A Favo: corpo redondo, a tela do rosto num hexágono como a logo,
+//! asas em célula de favo só com o contorno e listras curvas. É a que lê
+//! melhor pequena.
 
 use eframe::egui::{Color32, Pos2, pos2};
 
