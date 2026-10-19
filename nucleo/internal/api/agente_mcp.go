@@ -42,6 +42,8 @@ func (s *Servidor) rotasAgente(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agente/coluna", s.doAgente(s.agenteMoverTarefa))
 	mux.HandleFunc("GET /v1/agente/lousa", s.doAgente(s.agenteLerLousa))
 	mux.HandleFunc("POST /v1/agente/lousa/elementos", s.doAgente(s.agenteAcrescentarALousa))
+	mux.HandleFunc("GET /v1/agente/conhecimento", s.doAgente(s.agenteLerConhecimento))
+	mux.HandleFunc("POST /v1/agente/conhecimento", s.doAgente(s.agenteAnotarConhecimento))
 	mux.HandleFunc("POST /v1/agente/uso", s.agenteUso)
 }
 
@@ -470,7 +472,10 @@ func gravarPrivado(dir, nome string, conteudo []byte) (string, error) {
 // Code recebe por --mcp-config e os settings da sessão (--settings, com a
 // statusLine que manda o uso). Devolve os argumentos a acrescentar. O token
 // fica só num arquivo 0600: não vai em argumento nem em variável de ambiente.
-func (s *Servidor) prepararMCP(agente int64) ([]string, error) {
+// Com conhecimento (a base do workspace e do projeto, já montada), ele vai
+// também num arquivo 0600, acrescentado ao prompt do sistema: a linha de
+// comando qualquer usuário da máquina lê.
+func (s *Servidor) prepararMCP(agente int64, conhecimento string) ([]string, error) {
 	if s.DirCanal == "" || s.Executavel == "" {
 		return nil, nil
 	}
@@ -505,7 +510,16 @@ func (s *Servidor) prepararMCP(agente int64) ([]string, error) {
 		s.limparMCP(agente)
 		return nil, err
 	}
-	return []string{"--mcp-config", arquivoConfig, "--settings", arquivoSettings, "--allowedTools", "mcp__colmeia"}, nil
+	extras := []string{"--mcp-config", arquivoConfig, "--settings", arquivoSettings, "--allowedTools", "mcp__colmeia"}
+	if conhecimento != "" {
+		arquivo, err := gravarPrivado(dir, id+".conhecimento.md", []byte(conhecimento))
+		if err != nil {
+			s.limparMCP(agente)
+			return nil, err
+		}
+		extras = append(extras, "--append-system-prompt-file", arquivo)
+	}
+	return extras, nil
 }
 
 // limparMCP revoga o token do agente, apaga os arquivos dele e esquece o uso.
@@ -516,7 +530,7 @@ func (s *Servidor) limparMCP(agente int64) {
 		return
 	}
 	id := strconv.FormatInt(agente, 10)
-	for _, nome := range []string{id + ".token", id + ".mcp.json", id + ".settings.json"} {
+	for _, nome := range []string{id + ".token", id + ".mcp.json", id + ".settings.json", id + ".conhecimento.md"} {
 		os.Remove(filepath.Join(s.DirCanal, "agentes", nome))
 	}
 }

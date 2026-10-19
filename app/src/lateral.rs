@@ -36,6 +36,8 @@ pub enum Lugar {
     Quadro,
     Tarefa { id: i64, foco: i64 },
     Lousa(i64),
+    /// A base de conhecimento do workspace.
+    Conhecimento(i64),
     Banco,
 }
 
@@ -66,6 +68,10 @@ pub struct Vista<'a> {
     pub agora: f64,
     /// O uso dos agentes e da conta (pela statusLine do Claude Code).
     pub uso: &'a crate::dados::Uso,
+    /// As imagens dos workspaces.
+    pub icones: &'a crate::icones::Icones,
+    /// Sugestões dos agentes na base de conhecimento, por workspace.
+    pub sugestoes: &'a std::collections::HashMap<i64, usize>,
 }
 
 /// O que foi pedido na barra.
@@ -76,6 +82,10 @@ pub enum Acao {
         agente: Option<i64>,
     },
     Lousa(i64),
+    /// A base de conhecimento do workspace.
+    Conhecimento(i64),
+    /// O nome e a imagem do workspace.
+    EditarWorkspace(i64),
     Bancos,
     /// Novo projeto já no workspace dado; `None` começa num workspace novo.
     NovoProjeto(Option<i64>),
@@ -210,14 +220,16 @@ struct Grupo<'a> {
     id: i64,
     nome: &'a str,
     projetos: Vec<&'a Projeto>,
+    /// A imagem do workspace, já carregada (sem ela, a inicial).
+    icone: Option<&'a egui::TextureHandle>,
 }
 
-fn grupos(projetos: &[Projeto]) -> Vec<Grupo<'_>> {
+fn grupos<'a>(projetos: &'a [Projeto], icones: Option<&'a crate::icones::Icones>) -> Vec<Grupo<'a>> {
     let mut lista: Vec<Grupo> = Vec::new();
     for p in projetos {
         match lista.iter_mut().find(|g| g.id == p.workspace_id && g.nome == p.workspace) {
             Some(g) => g.projetos.push(p),
-            None => lista.push(Grupo { id: p.workspace_id, nome: &p.workspace, projetos: vec![p] }),
+            None => lista.push(Grupo { id: p.workspace_id, nome: &p.workspace, projetos: vec![p], icone: icones.and_then(|i| i.do_workspace(p.workspace_id)) }),
         }
     }
     lista
@@ -252,7 +264,7 @@ impl Lateral {
         let mut saida = Saida::default();
         abelha.fone = v.fone;
         self.atualizar_uso(v);
-        let grupos = grupos(v.projetos);
+        let grupos = grupos(v.projetos, Some(v.icones));
         self.seguir_foco(v, &grupos);
         let area = ui.max_rect();
         let t = self.abertura(ui.ctx());
@@ -337,13 +349,27 @@ impl Lateral {
                 for g in grupos {
                     let ativo = self.mostra_painel() && self.workspace == Some(g.id);
                     let espera = abelha::esperando(v.tarefas.iter().filter(|t| g.projetos.iter().any(|p| p.id == t.projeto_id)));
-                    if quadrado_do_workspace(ui, g, ativo, espera).clicked() {
+                    let quadrado = quadrado_do_workspace(ui, g, ativo, espera);
+                    if quadrado.clicked() {
                         if ativo {
                             self.aberto = false;
                         } else {
                             self.workspace = Some(g.id);
                             self.aberto = true;
                         }
+                    }
+                    if !v.demo && g.id != 0 {
+                        quadrado.context_menu(|ui| {
+                            ui.set_min_width(220.0);
+                            if tema::opcao_menu_com(ui, "Editar workspace…", None, v.pode) {
+                                saida.acoes.push(Acao::EditarWorkspace(g.id));
+                                ui.close();
+                            }
+                            if tema::opcao_menu_com(ui, "Conhecimento", None, true) {
+                                saida.acoes.push(Acao::Conhecimento(g.id));
+                                ui.close();
+                            }
+                        });
                     }
                 }
             });
@@ -594,17 +620,30 @@ impl Lateral {
         if tema::botao_icone_em(ui, fechar, ui.id().with("recolher"), Icone::Anterior).on_hover_text("Recolher o painel").clicked() {
             self.aberto = false;
         }
-        // O selo e o nome abrem todos os projetos do workspace.
-        let titulo = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top() + 10.0), pos2(fechar.left() - 6.0, rect.top() + 50.0));
         let clicavel = grupo.id != 0;
+        let mut direita = fechar.left();
+        if clicavel && !v.demo && v.pode {
+            let editar = fechar.translate(vec2(-32.0, 0.0));
+            if tema::botao_icone_em(ui, editar, ui.id().with("editar"), Icone::Lapis).on_hover_text("Editar o nome e a imagem do workspace").clicked() {
+                saida.acoes.push(Acao::EditarWorkspace(grupo.id));
+            }
+            direita = editar.left();
+        }
+        // O selo e o nome abrem todos os projetos do workspace.
+        let titulo = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top() + 10.0), pos2(direita - 6.0, rect.top() + 50.0));
         let resposta = ui.interact(titulo, ui.id().with("titulo"), if clicavel { Sense::click() } else { Sense::hover() });
         let ativo = clicavel && v.escopo == Escopo::Workspace(grupo.id) && v.lugar == Lugar::Quadro;
         if clicavel {
             fundo_do_item(ui, &resposta, titulo, ativo, resposta.hovered());
         }
         let selo = Rect::from_min_size(pos2(titulo.left() + 6.0, titulo.center().y - 12.0), vec2(24.0, 24.0));
-        ui.painter().rect_filled(selo, CornerRadius::same(7), tema::cor_do_nome(grupo.nome));
-        ui.painter().text(selo.center(), egui::Align2::CENTER_CENTER, inicial(grupo.nome), tema::forte(12.0), tema::sobre_destaque());
+        match grupo.icone {
+            Some(textura) => imagem_arredondada(ui, textura, selo, 7),
+            None => {
+                ui.painter().rect_filled(selo, CornerRadius::same(7), tema::cor_do_nome(grupo.nome));
+                ui.painter().text(selo.center(), egui::Align2::CENTER_CENTER, inicial(grupo.nome), tema::forte(12.0), tema::sobre_destaque());
+            }
+        }
         let x = selo.right() + 10.0;
         let largura = titulo.right() - x - 6.0;
         let nome = tema::cortar(ui.painter(), grupo.nome, egui::TextFormat::simple(tema::forte(15.0), p.texto), largura, 1, false);
@@ -630,6 +669,19 @@ impl Lateral {
             let dica = format!("Lousa do workspace {}: notas, código, imagens e ligações", grupo.nome);
             if item(ui, "Lousa do workspace", Some(Icone::Lousa), v.lugar == Lugar::Lousa(grupo.id)).on_hover_text(dica).clicked() {
                 saida.acoes.push(Acao::Lousa(grupo.id));
+            }
+            let sugestoes = v.sugestoes.get(&grupo.id).copied().unwrap_or(0);
+            let dica = match sugestoes {
+                0 => "O que todo agente deste workspace já sabe ao começar".to_string(),
+                1 => "1 sugestão dos agentes esperando você".to_string(),
+                n => format!("{n} sugestões dos agentes esperando você"),
+            };
+            let linha = item(ui, "Conhecimento", Some(Icone::Livro), v.lugar == Lugar::Conhecimento(grupo.id));
+            if sugestoes > 0 {
+                tema::contador(ui.painter(), canto_do_contador(linha.rect), sugestoes, None);
+            }
+            if linha.on_hover_text(dica).clicked() {
+                saida.acoes.push(Acao::Conhecimento(grupo.id));
             }
             ui.add_space(6.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
@@ -743,7 +795,7 @@ fn workspace_em_foco(v: &Vista) -> Option<i64> {
     let do_projeto = |id: i64| v.projetos.iter().find(|p| p.id == id).map(|p| p.workspace_id);
     match v.lugar {
         Lugar::Tarefa { id, .. } => v.tarefas.iter().find(|t| t.id == id).and_then(|t| do_projeto(t.projeto_id)),
-        Lugar::Lousa(ws) => Some(ws),
+        Lugar::Lousa(ws) | Lugar::Conhecimento(ws) => Some(ws),
         Lugar::Quadro | Lugar::Banco => match v.escopo {
             Escopo::Workspace(w) => Some(w),
             Escopo::Projeto(p) => do_projeto(p),
@@ -850,7 +902,7 @@ fn dica_fora_do_menu(resposta: Response, dica: &str) -> Response {
     if egui::Popup::is_id_open(&resposta.ctx, egui::Popup::default_response_id(&resposta)) { resposta } else { resposta.on_hover_text(dica) }
 }
 
-/// O quadrado do workspace: a inicial na cor do nome. Escolhido, ele se
+/// O quadrado do workspace: a imagem dele ou a inicial na cor do nome. Escolhido, ele se
 /// enche da cor e ganha a marca à esquerda; o contador âmbar diz quantos
 /// esperam você ali.
 fn quadrado_do_workspace(ui: &mut Ui, g: &Grupo, ativo: bool, espera: usize) -> Response {
@@ -870,8 +922,18 @@ fn quadrado_do_workspace(ui: &mut Ui, g: &Grupo, ativo: bool, espera: usize) -> 
         let sombra = egui::Shadow { offset: [0, 6], blur: 14, spread: 0, color: cor.gamma_multiply(0.35 * escolhido) };
         pintor.add(sombra.as_shape(rect, CornerRadius::same(raio as u8)));
     }
-    pintor.rect(rect, CornerRadius::same(raio as u8), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
-    pintor.text(rect.center(), egui::Align2::CENTER_CENTER, inicial(g.nome), tema::forte(15.0), cor.lerp_to_gamma(tema::sobre_destaque(), escolhido));
+    match g.icone {
+        Some(textura) => {
+            imagem_arredondada(ui, textura, rect, raio as u8);
+            let pintor = ui.painter();
+            pintor.rect_stroke(rect, CornerRadius::same(raio as u8), Stroke::new(1.0 + escolhido, borda), egui::StrokeKind::Inside);
+        }
+        None => {
+            pintor.rect(rect, CornerRadius::same(raio as u8), fundo, Stroke::new(1.0, borda), egui::StrokeKind::Inside);
+            pintor.text(rect.center(), egui::Align2::CENTER_CENTER, inicial(g.nome), tema::forte(15.0), cor.lerp_to_gamma(tema::sobre_destaque(), escolhido));
+        }
+    }
+    let pintor = ui.painter();
     let marca = (26.0 * escolhido).max(18.0 * mouse);
     if marca > 0.5 {
         let r = Rect::from_center_size(pos2(linha.left() + 2.0, linha.center().y), vec2(4.0, marca));
@@ -886,6 +948,11 @@ fn quadrado_do_workspace(ui: &mut Ui, g: &Grupo, ativo: bool, espera: usize) -> 
         n => format!("{} · {n} esperam você", g.nome),
     };
     resposta.on_hover_text(dica)
+}
+
+/// A imagem do workspace com os cantos arredondados.
+pub fn imagem_arredondada(ui: &Ui, textura: &egui::TextureHandle, rect: Rect, raio: u8) {
+    egui::Image::from_texture(egui::load::SizedTexture::from_handle(textura)).corner_radius(raio).paint_at(ui, rect);
 }
 
 fn botao_novo_workspace(ui: &mut Ui) -> Response {
@@ -1191,13 +1258,14 @@ mod testes {
             caminho: String::new(),
             sem_git: false,
             branch_padrao: "main".into(),
+            ..Default::default()
         }
     }
 
     #[test]
     fn workspaces_saem_dos_projetos_na_ordem() {
         let projetos = [projeto(1, 2, "Clientes"), projeto(2, 2, "Clientes"), projeto(3, 5, "Meus projetos")];
-        let g = grupos(&projetos);
+        let g = grupos(&projetos, None);
         assert_eq!(g.iter().map(|g| (g.id, g.nome, g.projetos.len())).collect::<Vec<_>>(), vec![(2, "Clientes", 2), (5, "Meus projetos", 1)]);
     }
 

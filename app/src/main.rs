@@ -14,6 +14,7 @@ mod apresentacao;
 mod arquivos;
 mod banco;
 mod compositor;
+mod conhecimento;
 mod dados;
 mod descricao;
 mod dialogos;
@@ -22,6 +23,7 @@ mod eventos;
 mod execucao;
 mod falada;
 mod gaveta;
+mod icones;
 mod lateral;
 mod lousa;
 mod pedido;
@@ -106,6 +108,8 @@ enum Tela {
     },
     /// A lousa (quadro livre) do workspace.
     Lousa(i64),
+    /// A base de conhecimento do workspace.
+    Conhecimento(i64),
     /// Os bancos de dados do perfil.
     Banco,
 }
@@ -312,6 +316,9 @@ struct Colmeia {
     /// onde Ctrl+Shift+K veio e o que você está fazendo em cada pedido de
     /// consulta de um agente.
     banco: banco::Bancos,
+    /// A base de conhecimento do workspace aberto e as imagens dos workspaces.
+    conhecimento: conhecimento::TelaConhecimento,
+    icones: icones::Icones,
     /// O "Play" dos projetos: configurações de execução e o painel da saída.
     play: execucao::Play,
     tela_antes_do_banco: Option<Tela>,
@@ -407,6 +414,8 @@ impl Colmeia {
             lousa_ativa_ao_abrir: None,
             palco: None,
             banco: banco::Bancos::novo(0),
+            conhecimento: conhecimento::TelaConhecimento::default(),
+            icones: icones::Icones::default(),
             play: execucao::Play::default(),
             tela_antes_do_banco: None,
             pedidos_consulta: HashMap::new(),
@@ -1330,7 +1339,7 @@ impl Colmeia {
             ui.set_height(34.0);
             let perfil = self.perfil.as_ref().map(|p| p.nome.clone()).unwrap_or_default();
             let workspace_da_lousa = match self.tela {
-                Tela::Lousa(ws) => self.modelo.projetos.iter().find(|p| p.workspace_id == ws).map(|p| p.workspace.clone()),
+                Tela::Lousa(ws) | Tela::Conhecimento(ws) => self.modelo.projetos.iter().find(|p| p.workspace_id == ws).map(|p| p.workspace.clone()),
                 _ => None,
             };
             let fps = format!("{} FPS", self.fps);
@@ -1367,11 +1376,12 @@ impl Colmeia {
                     ir = Some(Escopo::Perfil);
                 }
                 if migalha(ui, &ws)
-                    && let Tela::Lousa(id) = self.tela
+                    && let Tela::Lousa(id) | Tela::Conhecimento(id) = self.tela
                 {
                     ir = Some(Escopo::Workspace(id));
                 }
-                ui.label(texto_forte("Lousa", 15.0).color(p.texto));
+                let pagina = if matches!(self.tela, Tela::Conhecimento(_)) { "Conhecimento" } else { "Lousa" };
+                ui.label(texto_forte(pagina, 15.0).color(p.texto));
                 if self.mostrar_fps {
                     medir(ui);
                 }
@@ -1478,7 +1488,7 @@ impl Colmeia {
         });
         if let Some(escopo) = ir {
             // Da lousa e dos bancos volta ao quadro; o registro só troca o escopo.
-            if matches!(self.tela, Tela::Lousa(_) | Tela::Banco) {
+            if matches!(self.tela, Tela::Lousa(_) | Tela::Conhecimento(_) | Tela::Banco) {
                 self.tela = Tela::Quadro;
             }
             self.mudar_escopo(escopo);
@@ -2003,9 +2013,11 @@ impl Colmeia {
     /// A barra lateral deste quadro: o trilho e o painel (em `lateral.rs`),
     /// com o que a tela sabe agora.
     fn mostrar_lateral(&mut self, ui: &mut egui::Ui, agora: f64, linha: &str, rodando: bool) -> lateral::Saida {
+        self.icones.atualizar(ui.ctx(), &self.modelo.projetos);
         let lugar = match self.tela {
             Tela::Tarefa { id, foco } => lateral::Lugar::Tarefa { id, foco },
             Tela::Lousa(ws) => lateral::Lugar::Lousa(ws),
+            Tela::Conhecimento(ws) => lateral::Lugar::Conhecimento(ws),
             Tela::Banco => lateral::Lugar::Banco,
             Tela::Quadro | Tela::Registro(_) | Tela::Entrada(_) => lateral::Lugar::Quadro,
         };
@@ -2028,6 +2040,8 @@ impl Colmeia {
             com_abelha: !self.sem_abelha,
             agora,
             uso: &self.modelo.uso,
+            icones: &self.icones,
+            sugestoes: &self.modelo.sugestoes,
         };
         let saida = self.lateral.mostrar(ui, &mut self.abelha, &vista);
         // Na tela de bancos, o miolo do painel é o painel dos bancos.
@@ -2052,6 +2066,18 @@ impl Colmeia {
                 Acao::Escopo(escopo) => self.mudar_escopo(escopo),
                 Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, agente),
                 Acao::Lousa(ws) => self.abrir_lousa_do_workspace(ws),
+                Acao::Conhecimento(ws) => {
+                    self.conhecimento.abrir(ws);
+                    self.tela = Tela::Conhecimento(ws);
+                    self.abelha.resumo_aberto = false;
+                    self.filtro = None;
+                }
+                Acao::EditarWorkspace(ws) => {
+                    if let Some(p) = self.modelo.projetos.iter().find(|p| p.workspace_id == ws) {
+                        let d = dialogos::EditarWorkspace::new(ws, &p.workspace, self.icones.do_workspace(ws).cloned());
+                        self.dialogo = Some(Dialogo::EditarWorkspace(d));
+                    }
+                }
                 Acao::Bancos => self.alternar_banco(true),
                 Acao::NovoProjeto(workspace) => {
                     if let Some(perfil) = &self.perfil {
@@ -3225,6 +3251,24 @@ impl eframe::App for Colmeia {
                     self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
                     acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
                 }
+                Tela::Conhecimento(ws) => {
+                    let projetos: Vec<(i64, &str)> = self.modelo.projetos.iter().filter(|p| p.workspace_id == ws).map(|p| (p.id, p.nome.as_str())).collect();
+                    match self.modelo.projetos.iter().find(|p| p.workspace_id == ws) {
+                        Some(primeiro) => {
+                            let cx = conhecimento::Contexto {
+                                workspace: ws,
+                                nome: &primeiro.workspace,
+                                projetos,
+                                automatico: primeiro.conhecimento_auto,
+                                versao: self.modelo.versao_conhecimento,
+                                pode: self.pode_mudar(),
+                            };
+                            self.conhecimento.mostrar(ui, &cx);
+                        }
+                        // O workspace saiu (o último projeto foi removido).
+                        None => self.tela = Tela::Quadro,
+                    }
+                }
                 Tela::Banco => {
                     let modelo = &self.modelo;
                     let nomes = |agente: i64| {
@@ -3548,6 +3592,7 @@ mod testes {
             caminho: String::new(),
             sem_git: false,
             branch_padrao: String::new(),
+            ..Default::default()
         };
         let projetos = vec![projeto(1, "loja-web", "estudos"), projeto(2, "loja-web", "trabalho-x"), projeto(3, "pedidos-api", "trabalho-x")];
         let todos: HashSet<i64> = [1, 2, 3].into();

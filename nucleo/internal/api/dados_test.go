@@ -308,7 +308,7 @@ func TestRecolherWorkspace(t *testing.T) {
 	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]string{}); status != http.StatusBadRequest {
 		t.Errorf("sem o campo: status %d, esperado 400", status)
 	}
-	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]any{"recolhido": true, "nome": "x"}); status != http.StatusBadRequest {
+	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/1", map[string]any{"recolhido": true, "cor": "x"}); status != http.StatusBadRequest {
 		t.Errorf("campo desconhecido: status %d, esperado 400", status)
 	}
 	if status, _ := pedir(t, "PATCH", srv.URL+"/v1/workspaces/99", map[string]bool{"recolhido": true}); status != http.StatusNotFound {

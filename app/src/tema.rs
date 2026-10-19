@@ -1034,6 +1034,8 @@ pub enum Icone {
     Globo,
     // O ditado na caixa de mensagem.
     Microfone,
+    // A base de conhecimento do workspace.
+    Livro,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1195,6 +1197,18 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
             }
             pintor.line_segment([r.left_top() + vec2(0.0, 3.0), r.right_top() + vec2(0.0, 3.0)], traco);
             pintor.line_segment([r.center_top() + vec2(0.0, 3.0), r.center_bottom()], traco);
+        }
+        Icone::Livro => {
+            // Livro aberto: as duas páginas a partir da lombada, um pouco
+            // caídas para fora, e uma linha de texto em cada.
+            let lombada = [c + vec2(0.0, -4.0), c + vec2(0.0, 6.0)];
+            pintor.line_segment(lombada, traco);
+            for lado in [-1.0f32, 1.0] {
+                let pagina = vec![c + vec2(0.0, -4.0), c + vec2(6.5 * lado, -5.5), c + vec2(6.5 * lado, 4.5), c + vec2(0.0, 6.0)];
+                pintor.add(Shape::line(pagina, traco));
+                pintor.line_segment([c + vec2(2.0 * lado, -1.5), c + vec2(4.5 * lado, -2.0)], traco);
+                pintor.line_segment([c + vec2(2.0 * lado, 1.5), c + vec2(4.5 * lado, 1.0)], traco);
+            }
         }
         Icone::Lapis => {
             // Lápis inclinado em 14 px: corpo de 2 traços paralelos (4 px de

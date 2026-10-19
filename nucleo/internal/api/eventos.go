@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -444,6 +445,25 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": "banco.consulta", "conexao_id": d.ConexaoID, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+	case "workspace.mudou":
+		var ws dados.Workspace
+		ler(&ws)
+		return map[string]any{"tipo": e.Tipo, "workspace": ws}
+	case "conhecimento.criado", "conhecimento.sugerido", "conhecimento.editado", "conhecimento.aprovado", "conhecimento.removido":
+		// Sem o texto: a aba aberta busca a lista de novo; o selo das
+		// sugestões vem contado agora.
+		var d struct {
+			Workspace int64 `json:"workspace"`
+			Projeto   int64 `json:"projeto"`
+		}
+		ler(&d)
+		workspace := d.Workspace
+		quantas := 0
+		if contagem, err := s.Banco.SugestoesPorWorkspace(context.Background(), e.Escopo.Perfil); err == nil {
+			quantas = contagem[workspace]
+		}
+		return map[string]any{"tipo": "conhecimento.mudou", "acao": strings.TrimPrefix(e.Tipo, "conhecimento."), "workspace_id": workspace,
+			"projeto_id": d.Projeto, "sugestoes": quantas}
 	case "workspace.recolhido":
 		var d struct {
 			Workspace int64 `json:"workspace"`
@@ -659,6 +679,11 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	sugestoes, err := s.Banco.SugestoesPorWorkspace(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
 	navegadores := []int64{}
 	for _, t := range tarefas {
 		if s.Navegadores.Aberto(id, t.ID).Aberto {
@@ -666,7 +691,8 @@ func (s *Servidor) quadro(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	responderJSON(w, map[string]any{"seq": seq, "projetos": projetos, "tarefas": tarefas, "agentes": lista, "pedidos": pedidos, "navegadores": navegadores,
-		"aprovacoes": s.aprovacoesPendentes(id), "uso": s.uso.doPerfil(id), "frases": s.frases.doPerfil(id)})
+		"aprovacoes": s.aprovacoesPendentes(id), "uso": s.uso.doPerfil(id), "frases": s.frases.doPerfil(id),
+		"sugestoes": sugestoes})
 }
 
 // comEstado junta ao agente o que o núcleo sabe dele agora: se roda, em que

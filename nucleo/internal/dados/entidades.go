@@ -2,7 +2,9 @@ package dados
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"strings"
 )
@@ -95,6 +97,12 @@ type Workspace struct {
 	ID       int64  `json:"id"`
 	PerfilID int64  `json:"perfil_id"`
 	Nome     string `json:"nome"`
+	// Icone muda com a imagem do workspace ("" sem imagem): a tela busca a
+	// imagem de novo quando ele muda.
+	Icone string `json:"icone"`
+	// ConhecimentoAuto: o que os agentes anotam na base de conhecimento vale
+	// sem você aprovar.
+	ConhecimentoAuto bool `json:"conhecimento_auto"`
 }
 
 type Projeto struct {
@@ -102,9 +110,12 @@ type Projeto struct {
 	WorkspaceID int64  `json:"workspace_id"`
 	Workspace   string `json:"workspace"`
 	// WorkspaceRecolhido: o workspace está recolhido na barra lateral.
-	WorkspaceRecolhido bool   `json:"workspace_recolhido"`
-	Nome               string `json:"nome"`
-	Caminho            string `json:"caminho"`
+	WorkspaceRecolhido bool `json:"workspace_recolhido"`
+	// WorkspaceIcone e WorkspaceConhecimentoAuto: veja Workspace.
+	WorkspaceIcone            string `json:"workspace_icone"`
+	WorkspaceConhecimentoAuto bool   `json:"workspace_conhecimento_auto"`
+	Nome                      string `json:"nome"`
+	Caminho                   string `json:"caminho"`
 	// Tipo é "git" (repositório) ou "pasta" (pasta de trabalho sem git, sem branches).
 	Tipo         string `json:"tipo"`
 	BranchPadrao string `json:"branch_padrao"`
@@ -440,7 +451,7 @@ func (b *Banco) ListarWorkspaces(ctx context.Context, perfil int64) ([]Workspace
 	if err := b.existePerfil(ctx, perfil); err != nil {
 		return nil, err
 	}
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, perfil_id, nome FROM workspaces WHERE perfil_id = ? ORDER BY nome`, perfil)
+	linhas, err := b.db.QueryContext(ctx, `SELECT `+colunasWorkspace+` FROM workspaces WHERE perfil_id = ? ORDER BY nome`, perfil)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +459,7 @@ func (b *Banco) ListarWorkspaces(ctx context.Context, perfil int64) ([]Workspace
 	lista := []Workspace{}
 	for linhas.Next() {
 		var w Workspace
-		if err := linhas.Scan(&w.ID, &w.PerfilID, &w.Nome); err != nil {
+		if err := linhas.Scan(&w.ID, &w.PerfilID, &w.Nome, &w.Icone, &w.ConhecimentoAuto); err != nil {
 			return nil, err
 		}
 		lista = append(lista, w)
@@ -476,6 +487,90 @@ func (b *Banco) CriarWorkspace(ctx context.Context, perfil int64, nome string) (
 	return w, err
 }
 
+const colunasWorkspace = `id, perfil_id, nome, icone_versao, conhecimento_auto`
+
+func (b *Banco) Workspace(ctx context.Context, id int64) (Workspace, error) {
+	var w Workspace
+	err := b.db.QueryRowContext(ctx, `SELECT `+colunasWorkspace+` FROM workspaces WHERE id = ?`, id).
+		Scan(&w.ID, &w.PerfilID, &w.Nome, &w.Icone, &w.ConhecimentoAuto)
+	if errors.Is(err, sql.ErrNoRows) {
+		return w, ErrNaoEncontrado
+	}
+	return w, err
+}
+
+// MudancaWorkspace traz só o que muda; nil fica como está.
+type MudancaWorkspace struct {
+	Nome             *string
+	ConhecimentoAuto *bool
+}
+
+// EditarWorkspace troca o nome ou a aprovação automática da base de conhecimento.
+func (b *Banco) EditarWorkspace(ctx context.Context, id int64, m MudancaWorkspace) (Workspace, error) {
+	if m.Nome != nil {
+		nome, err := nomeValido("O nome do workspace", *m.Nome, 60)
+		if err != nil {
+			return Workspace{}, err
+		}
+		m.Nome = &nome
+	}
+	var w Workspace
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		if m.Nome != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE workspaces SET nome = ? WHERE id = ?`, *m.Nome, id); err != nil {
+				return traduzir(err)
+			}
+		}
+		if m.ConhecimentoAuto != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE workspaces SET conhecimento_auto = ? WHERE id = ?`, *m.ConhecimentoAuto, id); err != nil {
+				return err
+			}
+		}
+		return workspaceMudou(ctx, tx, id, &w)
+	})
+	return w, err
+}
+
+// workspaceMudou relê o workspace e registra o evento com ele inteiro.
+func workspaceMudou(ctx context.Context, tx *transacao, id int64, w *Workspace) error {
+	err := tx.QueryRowContext(ctx, `SELECT `+colunasWorkspace+` FROM workspaces WHERE id = ?`, id).
+		Scan(&w.ID, &w.PerfilID, &w.Nome, &w.Icone, &w.ConhecimentoAuto)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNaoEncontrado
+	}
+	if err != nil {
+		return err
+	}
+	return registrar(ctx, tx, "workspace.mudou", Escopo{Perfil: w.PerfilID}, w)
+}
+
+// GravarIconeWorkspace guarda a imagem já reduzida (nil tira a imagem).
+func (b *Banco) GravarIconeWorkspace(ctx context.Context, id int64, png []byte) (Workspace, error) {
+	versao := ""
+	if png != nil {
+		soma := sha256.Sum256(png)
+		versao = hex.EncodeToString(soma[:8])
+	}
+	var w Workspace
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE workspaces SET icone = ?, icone_versao = ? WHERE id = ?`, png, versao, id); err != nil {
+			return err
+		}
+		return workspaceMudou(ctx, tx, id, &w)
+	})
+	return w, err
+}
+
+// IconeWorkspace devolve o PNG da imagem do workspace (nil sem imagem).
+func (b *Banco) IconeWorkspace(ctx context.Context, id int64) ([]byte, error) {
+	var png []byte
+	err := b.db.QueryRowContext(ctx, `SELECT icone FROM workspaces WHERE id = ?`, id).Scan(&png)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNaoEncontrado
+	}
+	return png, err
+}
+
 // RecolherWorkspace guarda se o workspace fica recolhido na barra lateral.
 func (b *Banco) RecolherWorkspace(ctx context.Context, workspace int64, recolhido bool) error {
 	return b.emTransacao(ctx, func(tx *transacao) error {
@@ -501,7 +596,7 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 		return nil, err
 	}
 	linhas, err := b.db.QueryContext(ctx, `
-		SELECT p.id, p.workspace_id, w.nome, w.recolhido, p.nome, p.caminho, p.tipo, p.branch_padrao
+		SELECT p.id, p.workspace_id, w.nome, w.recolhido, w.icone_versao, w.conhecimento_auto, p.nome, p.caminho, p.tipo, p.branch_padrao
 		FROM projetos p JOIN workspaces w ON w.id = p.workspace_id
 		WHERE w.perfil_id = ? ORDER BY w.nome, p.nome`, perfil)
 	if err != nil {
@@ -511,7 +606,7 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 	lista := []Projeto{}
 	for linhas.Next() {
 		var p Projeto
-		if err := linhas.Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao); err != nil {
+		if err := linhas.Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.WorkspaceIcone, &p.WorkspaceConhecimentoAuto, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao); err != nil {
 			return nil, err
 		}
 		lista = append(lista, p)
@@ -522,9 +617,9 @@ func (b *Banco) ListarProjetos(ctx context.Context, perfil int64) ([]Projeto, er
 func (b *Banco) Projeto(ctx context.Context, id int64) (Projeto, error) {
 	var p Projeto
 	err := b.db.QueryRowContext(ctx, `
-		SELECT p.id, p.workspace_id, w.nome, w.recolhido, p.nome, p.caminho, p.tipo, p.branch_padrao
+		SELECT p.id, p.workspace_id, w.nome, w.recolhido, w.icone_versao, w.conhecimento_auto, p.nome, p.caminho, p.tipo, p.branch_padrao
 		FROM projetos p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = ?`, id).
-		Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao)
+		Scan(&p.ID, &p.WorkspaceID, &p.Workspace, &p.WorkspaceRecolhido, &p.WorkspaceIcone, &p.WorkspaceConhecimentoAuto, &p.Nome, &p.Caminho, &p.Tipo, &p.BranchPadrao)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNaoEncontrado
 	}

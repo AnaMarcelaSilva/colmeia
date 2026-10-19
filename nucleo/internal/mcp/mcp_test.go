@@ -138,7 +138,7 @@ func TestServidorMCP(t *testing.T) {
 	for _, f := range ferramentas {
 		nomes = append(nomes, f.(map[string]any)["name"].(string))
 	}
-	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,mover_tarefa,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,listar_bancos,consultar_banco" {
+	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,mover_tarefa,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,ler_conhecimento,anotar_conhecimento,listar_bancos,consultar_banco" {
 		t.Errorf("ferramentas: %v", nomes)
 	}
 

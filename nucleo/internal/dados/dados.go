@@ -155,6 +155,25 @@ CREATE TABLE IF NOT EXISTS comandos (
 	criado_em TEXT NOT NULL,
 	UNIQUE (projeto_id, nome)
 );
+-- Base de conhecimento: notas que todo agente do workspace (projeto_id nulo)
+-- ou do projeto (workspace_id nulo) recebe ao começar. A de um agente nasce
+-- sugerida; substitui aponta a nota que a sugestão quer mudar.
+CREATE TABLE IF NOT EXISTS conhecimento (
+	id INTEGER PRIMARY KEY,
+	workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+	projeto_id INTEGER REFERENCES projetos(id) ON DELETE CASCADE,
+	titulo TEXT NOT NULL,
+	texto TEXT NOT NULL,
+	origem TEXT NOT NULL CHECK (origem IN ('voce', 'agente')),
+	estado TEXT NOT NULL CHECK (estado IN ('aprovada', 'sugerida')),
+	substitui INTEGER REFERENCES conhecimento(id) ON DELETE CASCADE,
+	agente_id INTEGER NOT NULL DEFAULT 0,
+	criada_em TEXT NOT NULL,
+	atualizada_em TEXT NOT NULL,
+	CHECK ((workspace_id IS NULL) <> (projeto_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS conhecimento_por_workspace ON conhecimento (workspace_id);
+CREATE INDEX IF NOT EXISTS conhecimento_por_projeto ON conhecimento (projeto_id);
 `
 
 // colunasPerfis é a definição da tabela perfis desde a versão 9 do banco
@@ -313,6 +332,12 @@ func migrar(db *sql.DB) error {
 		{"perfis", "voz_pausa", "INTEGER NOT NULL DEFAULT 1200"},
 		// Workspace recolhido na barra lateral.
 		{"workspaces", "recolhido", "INTEGER NOT NULL DEFAULT 0"},
+		// A imagem do workspace (PNG quadrado, já reduzido) e um resumo dela,
+		// que muda com a imagem e diz à tela quando buscar de novo.
+		{"workspaces", "icone", "BLOB"},
+		{"workspaces", "icone_versao", "TEXT NOT NULL DEFAULT ''"},
+		// Aprovar sem perguntar o que os agentes anotam na base de conhecimento.
+		{"workspaces", "conhecimento_auto", "INTEGER NOT NULL DEFAULT 0"},
 		// Colunas derivadas do _escopo, fora do hash (veja preencherEscopo).
 		{"eventos", "perfil_id", "INTEGER"},
 		{"eventos", "projeto_id", "INTEGER"},
@@ -401,6 +426,12 @@ func migrar(db *sql.DB) error {
 	if versao < 9 {
 		if err := migrarPerfis(db); err != nil {
 			return fmt.Errorf("liberando o tema fosco nos perfis: %w", err)
+		}
+	}
+	// Versão 10: a base de conhecimento (tabela do esquema) e a imagem do workspace.
+	if versao < 10 {
+		if _, err := db.Exec(`PRAGMA user_version = 10`); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -269,8 +269,13 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho te
 			env = append(env, ferramentas.Variavel(a.Ferramenta)+"="+separada)
 		}
 		if a.Ferramenta == "claude" {
-			// As ferramentas da Colmeia (MCP), com o token deste agente.
-			extras, err := s.prepararMCP(a.ID)
+			// As ferramentas da Colmeia (MCP), com o token deste agente, e a
+			// base de conhecimento do workspace e do projeto (nada sem notas).
+			conhecimento, err := s.textoDoConhecimento(ctx, projeto)
+			if err != nil {
+				return err
+			}
+			extras, err := s.prepararMCP(a.ID, conhecimento)
 			if err != nil {
 				return fmt.Errorf("preparando as ferramentas da Colmeia: %w", err)
 			}

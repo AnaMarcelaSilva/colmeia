@@ -81,6 +81,8 @@ pub enum Dialogo {
     Ditado(AjustesDitado),
     /// Os comandos falados, a voz da abelha e o ouvir o nome.
     Voz(Box<crate::ajustes_voz::AjustesVoz>),
+    /// O nome e a imagem de um workspace.
+    EditarWorkspace(EditarWorkspace),
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -277,6 +279,7 @@ impl Dialogo {
                     Dialogo::Mascote(d) => escolher_mascote(ui, d, perfil),
                     Dialogo::Ditado(d) => ajustes_ditado(ui, d, perfil),
                     Dialogo::Voz(d) => crate::ajustes_voz::mostrar(ui, d),
+                    Dialogo::EditarWorkspace(d) => editar_workspace(ui, d),
                     Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
                 }
             });
@@ -284,6 +287,120 @@ impl Dialogo {
             Resultado::Continua if modal.should_close() => Resultado::Fechar,
             outro => outro,
         }
+    }
+}
+
+/// A imagem escolhida já volta do núcleo cortada e reduzida (PNG): a prévia
+/// mostra exatamente o que vai ficar, e é ela que se grava.
+pub struct EditarWorkspace {
+    id: i64,
+    nome: String,
+    original: String,
+    atual: Option<egui::TextureHandle>,
+    nova: Option<(Vec<u8>, egui::TextureHandle)>,
+    tirar: bool,
+    preparando: Option<Receiver<Option<Result<Vec<u8>, String>>>>,
+    erro: Option<String>,
+}
+
+impl EditarWorkspace {
+    pub fn new(id: i64, nome: &str, atual: Option<egui::TextureHandle>) -> Self {
+        EditarWorkspace { id, nome: nome.to_string(), original: nome.to_string(), atual, nova: None, tirar: false, preparando: None, erro: None }
+    }
+
+    /// Escolher o arquivo e pedir a prévia ao núcleo, numa thread.
+    fn escolher(&mut self, ctx: &egui::Context) {
+        let (envio, recebendo) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let arquivo = rfd::FileDialog::new().set_title("Imagem do workspace").add_filter("Imagens", &api::FORMATOS_ICONE).pick_file();
+            let _ = envio.send(arquivo.map(|a| api::previa_icone(&a)));
+            ctx.request_repaint();
+        });
+        self.preparando = Some(recebendo);
+        self.erro = None;
+    }
+}
+
+/// O nome e a imagem do workspace. A imagem pode ser qualquer foto ou
+/// desenho: o meio dela vira o quadrado do trilho.
+fn editar_workspace(ui: &mut egui::Ui, d: &mut EditarWorkspace) -> Resultado {
+    let p = cores();
+    if let Some(chegou) = d.preparando.as_ref().and_then(|r| r.try_recv().ok()) {
+        d.preparando = None;
+        match chegou.map(|r| r.and_then(|png| crate::registro::decodificar(&png, None).map(|img| (png, img)))) {
+            Some(Ok((png, img))) => {
+                let textura = ui.ctx().load_texture(format!("previa-workspace-{}", d.id), img, egui::TextureOptions::LINEAR);
+                d.nova = Some((png, textura));
+                d.tirar = false;
+            }
+            Some(Err(e)) => d.erro = Some(e),
+            None => {}
+        }
+    }
+    tema::cabecalho(ui, "Editar workspace", "O nome e a imagem aparecem no trilho à esquerda e no topo do painel.");
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
+        let mostrada = d.nova.as_ref().map(|(_, t)| t.clone()).or(if d.tirar { None } else { d.atual.clone() });
+        match &mostrada {
+            Some(textura) => crate::lateral::imagem_arredondada(ui, textura, rect, 18),
+            None => {
+                let nome = if d.nome.trim().is_empty() { &d.original } else { &d.nome };
+                let cor = tema::cor_do_nome(nome.trim());
+                ui.painter().rect_filled(rect, 18, cor);
+                let inicial = nome.trim().chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, inicial, tema::forte(28.0), tema::sobre_destaque());
+            }
+        }
+        ui.add_space(14.0);
+        ui.vertical(|ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let texto = if d.preparando.is_some() { "Preparando…" } else { "Escolher imagem…" };
+                if tema::botao_secundario_com(ui, texto, d.preparando.is_none()).clicked() {
+                    d.escolher(ui.ctx());
+                }
+                if mostrada.is_some() && tema::botao_secundario(ui, "Tirar imagem").clicked() {
+                    d.nova = None;
+                    d.tirar = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("PNG, JPEG, GIF ou WebP. O meio da imagem vira um quadrado.").color(p.suave).size(12.0));
+        });
+    });
+    ui.add_space(14.0);
+    tema::campo(ui, "Nome", &mut d.nome, "Ex.: Estudos");
+    mostrar_erro(ui, &d.erro);
+    let nome = d.nome.trim().to_string();
+    let mudou = nome != d.original || d.nova.is_some() || (d.tirar && d.atual.is_some());
+    match rodape(ui, "Salvar", !nome.is_empty() && mudou && d.preparando.is_none()) {
+        (true, _) => Resultado::Fechar,
+        (_, true) => {
+            let mut feito = Ok(());
+            if nome != d.original {
+                feito = api::renomear_workspace(d.id, &nome).map(|_| ());
+                if feito.is_ok() {
+                    d.original.clone_from(&nome);
+                }
+            }
+            if feito.is_ok() {
+                if let Some((png, _)) = &d.nova {
+                    feito = api::trocar_icone(d.id, png).map(|_| ());
+                } else if d.tirar && d.atual.is_some() {
+                    feito = api::tirar_icone(d.id).map(|_| ());
+                }
+            }
+            match feito {
+                Ok(()) => Resultado::Fechar,
+                Err(e) => {
+                    d.erro = Some(e);
+                    Resultado::Continua
+                }
+            }
+        }
+        _ => Resultado::Continua,
     }
 }
 

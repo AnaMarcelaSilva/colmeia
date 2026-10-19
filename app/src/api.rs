@@ -122,6 +122,11 @@ pub struct Ferramenta {
 pub struct Workspace {
     pub id: i64,
     pub nome: String,
+    /// Muda com a imagem do workspace ("" sem imagem).
+    #[serde(default)]
+    pub icone: String,
+    #[serde(default)]
+    pub conhecimento_auto: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -131,6 +136,12 @@ pub struct Projeto {
     #[serde(default)]
     pub workspace_id: i64,
     pub workspace: String,
+    /// A versão da imagem do workspace ("" sem imagem).
+    #[serde(default)]
+    pub workspace_icone: String,
+    /// O que os agentes anotam na base de conhecimento vale sem aprovação.
+    #[serde(default)]
+    pub workspace_conhecimento_auto: bool,
     pub nome: String,
     pub caminho: String,
     /// "git" ou "pasta" (pasta de trabalho sem git).
@@ -219,6 +230,9 @@ pub struct Quadro {
     /// Tarefas cuja frase da reunião o agente está escrevendo agora.
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub frases: Vec<i64>,
+    /// Sugestões dos agentes na base de conhecimento, por workspace.
+    #[serde(default)]
+    pub sugestoes: std::collections::HashMap<i64, usize>,
 }
 
 /// O contexto da conversa de um agente: tokens na janela, o tamanho dela e
@@ -1791,6 +1805,91 @@ pub fn workspaces(perfil: i64) -> Result<Vec<Workspace>, String> {
 
 pub fn criar_workspace(perfil: i64, nome: &str) -> Result<Workspace, String> {
     chamar("POST", &format!("/v1/perfis/{perfil}/workspaces"), Some(json!({ "nome": nome })))
+}
+
+pub fn renomear_workspace(id: i64, nome: &str) -> Result<Workspace, String> {
+    chamar("PATCH", &format!("/v1/workspaces/{id}"), Some(json!({ "nome": nome })))
+}
+
+pub fn conhecimento_automatico(id: i64, ligado: bool) -> Result<Workspace, String> {
+    chamar("PATCH", &format!("/v1/workspaces/{id}"), Some(json!({ "conhecimento_auto": ligado })))
+}
+
+/// Os formatos de imagem que o núcleo aceita para o workspace.
+pub const FORMATOS_ICONE: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+/// A imagem do disco como fica no workspace: o núcleo corta o meio e reduz
+/// (a tela só lê PNG).
+pub fn previa_icone(arquivo: &std::path::Path) -> Result<Vec<u8>, String> {
+    match canal::pedir_arquivo("POST", "/v1/icone/previa", "application/octet-stream", arquivo, |_, _| {})? {
+        (200, corpo) => Ok(corpo),
+        (status, corpo) => Err(serde_json::from_slice::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
+/// Grava a imagem já reduzida pela prévia.
+pub fn trocar_icone(id: i64, png: &[u8]) -> Result<Workspace, String> {
+    let (status, corpo) = canal::pedir_bytes("PUT", &format!("/v1/workspaces/{id}/icone"), "image/png", png)?;
+    let corpo = String::from_utf8_lossy(&corpo);
+    if !(200..300).contains(&status) {
+        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
+    }
+    serde_json::from_str(&corpo).map_err(|e| inesperada("/v1/workspaces/icone", e))
+}
+
+pub fn tirar_icone(id: i64) -> Result<Workspace, String> {
+    chamar("DELETE", &format!("/v1/workspaces/{id}/icone"), None)
+}
+
+/// O PNG pequeno do workspace.
+pub fn ler_icone(id: i64) -> Result<Vec<u8>, String> {
+    match canal::pedir_bytes("GET", &format!("/v1/workspaces/{id}/icone"), "application/json", &[])? {
+        (200, corpo) => Ok(corpo),
+        (status, _) => Err(format!("erro {status} do núcleo")),
+    }
+}
+
+/// Uma nota da base de conhecimento: do workspace (`projeto_id` 0) ou de um
+/// projeto. A de um agente chega "sugerida"; `substitui` é a nota que ela muda.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Conhecimento {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub projeto_id: i64,
+    pub titulo: String,
+    pub texto: String,
+    pub origem: String,
+    pub estado: String,
+    #[serde(default)]
+    pub substitui: i64,
+    #[serde(default)]
+    pub atualizada_em: String,
+}
+
+impl Conhecimento {
+    pub fn sugerida(&self) -> bool {
+        self.estado == "sugerida"
+    }
+}
+
+pub fn conhecimento(workspace: i64) -> Result<Vec<Conhecimento>, String> {
+    chamar("GET", &format!("/v1/workspaces/{workspace}/conhecimento"), None)
+}
+
+pub fn criar_conhecimento(workspace: i64, projeto: i64, titulo: &str, texto: &str) -> Result<Conhecimento, String> {
+    chamar("POST", &format!("/v1/workspaces/{workspace}/conhecimento"), Some(json!({ "projeto_id": projeto, "titulo": titulo, "texto": texto })))
+}
+
+pub fn editar_conhecimento(id: i64, titulo: &str, texto: &str) -> Result<Conhecimento, String> {
+    chamar("PATCH", &format!("/v1/conhecimento/{id}"), Some(json!({ "titulo": titulo, "texto": texto })))
+}
+
+pub fn aprovar_conhecimento(id: i64) -> Result<Conhecimento, String> {
+    chamar("POST", &format!("/v1/conhecimento/{id}/aprovar"), None)
+}
+
+pub fn remover_conhecimento(id: i64) -> Result<(), String> {
+    chamar::<Ok>("DELETE", &format!("/v1/conhecimento/{id}"), None).map(|_| ())
 }
 
 pub fn criar_projeto(workspace: i64, nome: &str, caminho: &str) -> Result<Projeto, String> {

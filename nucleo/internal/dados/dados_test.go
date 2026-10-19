@@ -627,7 +627,7 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 	defer b2.Fechar()
 	var versao int
 	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 9 {
+	if versao != 10 {
 		t.Errorf("versão: %d", versao)
 	}
 	if err := b2.DefinirTema(ctx, p.ID, "fosco"); err != nil {

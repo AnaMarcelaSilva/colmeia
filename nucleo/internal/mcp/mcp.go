@@ -75,7 +75,8 @@ const (
 		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide. " +
 		"Ao terminar o trabalho, antes de encerrar, grave com complementar_nota (daily) uma ou duas frases para a reunião: o que ficou pronto e para quem, sem termos técnicos. " +
 		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar). " +
-		"Se o usuário pedir para concluir a tarefa ou mandá-la para revisão, use mover_tarefa; nunca por conta própria."
+		"Se o usuário pedir para concluir a tarefa ou mandá-la para revisão, use mover_tarefa; nunca por conta própria. " +
+		"Quando aprender algo que valha para as próximas tarefas do projeto, proponha com anotar_conhecimento."
 )
 
 // Servir lê os pedidos até o fim da entrada.
@@ -543,6 +544,54 @@ var Ferramentas = []Ferramenta{
 			ids, _ := r["ids"].([]any)
 			bruto, _ := json.Marshal(map[string]any{"ids": ids, "refs": r["refs"]})
 			return []any{texto(fmt.Sprintf("Acrescentei %d itens à lousa da tarefa: %s", len(ids), bruto))}, nil
+		},
+	},
+	{
+		Nome: "ler_conhecimento", Titulo: "Ler a base de conhecimento",
+		Descricao: "Lê a base de conhecimento do projeto e do workspace da tarefa: as notas que o usuário aprovou, inteiras, com id, onde vale (projeto ou workspace), título e texto. " +
+			"As que cabem já vêm no início da conversa; use esta para ler as outras ou as que mudaram depois.",
+		Entrada: objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/conhecimento", nil)
+			if err != nil {
+				return nil, err
+			}
+			return comoTexto(r), nil
+		},
+	},
+	{
+		Nome: "anotar_conhecimento", Titulo: "Anotar na base de conhecimento",
+		Descricao: "Propõe uma nota para a base de conhecimento, que todo agente do projeto (ou do workspace inteiro) recebe ao começar: como o projeto funciona, padrões, onde olhar, o que o usuário sempre pede. " +
+			"Não anote o que é só desta tarefa nem segredos. Uma nota por assunto, curta e direta. A nota fica como sugestão até o usuário aprovar. " +
+			"Para corrigir uma nota que já existe, passe o id dela em substitui com o texto inteiro novo.",
+		Entrada: objeto(map[string]any{
+			"titulo":    map[string]any{"type": "string", "maxLength": 80, "description": "O assunto, em poucas palavras."},
+			"texto":     map[string]any{"type": "string", "maxLength": 4000, "description": "A nota, em markdown simples."},
+			"onde":      map[string]any{"type": "string", "enum": []string{"projeto", "workspace"}, "description": "projeto (padrão) ou workspace, quando vale para todos os projetos dele."},
+			"substitui": map[string]any{"type": "integer", "description": "O id da nota que esta corrige (opcional)."},
+		}, "titulo", "texto"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Titulo    string `json:"titulo"`
+				Texto     string `json:"texto"`
+				Onde      string `json:"onde"`
+				Substitui int64  `json:"substitui"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/conhecimento", a)
+			if err != nil {
+				return nil, err
+			}
+			if r["estado"] == "aprovada" {
+				return []any{texto("Anotado na base de conhecimento.")}, nil
+			}
+			return []any{texto("Anotado como sugestão: o usuário aprova na aba Conhecimento do workspace.")}, nil
 		},
 	},
 	{

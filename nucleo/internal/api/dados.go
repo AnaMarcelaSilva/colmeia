@@ -52,6 +52,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasLousas(mux)
 	s.rotasBancos(mux)
 	s.rotasBancosDoAgente(mux)
+	s.rotasConhecimento(mux)
 }
 
 // traduzirErro dá o status HTTP e uma mensagem clara para os erros dos dados.
@@ -273,15 +274,28 @@ func (s *Servidor) atualizarWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pedido struct {
-		Recolhido *bool `json:"recolhido"`
+		Recolhido        *bool   `json:"recolhido"`
+		Nome             *string `json:"nome"`
+		ConhecimentoAuto *bool   `json:"conhecimento_auto"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
 		return
 	}
-	if pedido.Recolhido == nil {
-		responderErro(w, dados.ErrInvalido{Motivo: "Diga se o workspace fica recolhido."})
+	if pedido.Recolhido == nil && pedido.Nome == nil && pedido.ConhecimentoAuto == nil {
+		responderErro(w, dados.ErrInvalido{Motivo: "Diga o que muda no workspace."})
 		return
+	}
+	if pedido.Nome != nil || pedido.ConhecimentoAuto != nil {
+		ws, err := s.Banco.EditarWorkspace(r.Context(), id, dados.MudancaWorkspace{Nome: pedido.Nome, ConhecimentoAuto: pedido.ConhecimentoAuto})
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		if pedido.Recolhido == nil {
+			responderJSON(w, ws)
+			return
+		}
 	}
 	if err := s.Banco.RecolherWorkspace(r.Context(), id, *pedido.Recolhido); err != nil {
 		responderErro(w, err)

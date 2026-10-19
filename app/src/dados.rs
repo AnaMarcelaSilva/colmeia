@@ -43,13 +43,17 @@ impl Coluna {
 }
 
 /// Projeto como a tela precisa dele.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Projeto {
     pub id: i64,
     pub nome: String,
     /// O workspace: o id (para a lousa dele) e o nome.
     pub workspace_id: i64,
     pub workspace: String,
+    /// A versão da imagem do workspace ("" sem imagem): muda, a tela busca de novo.
+    pub workspace_icone: String,
+    /// O que os agentes anotam na base de conhecimento vale sem aprovação.
+    pub conhecimento_auto: bool,
     pub caminho: String,
     /// Pasta de trabalho sem git: sem branches nem cópias isoladas.
     pub sem_git: bool,
@@ -63,6 +67,8 @@ impl From<api::Projeto> for Projeto {
             nome: p.nome,
             workspace_id: p.workspace_id,
             workspace: p.workspace,
+            workspace_icone: p.workspace_icone,
+            conhecimento_auto: p.workspace_conhecimento_auto,
             caminho: p.caminho,
             sem_git: p.tipo == "pasta",
             branch_padrao: p.branch_padrao,
@@ -331,6 +337,10 @@ pub struct Modelo {
     pub uso: Uso,
     /// Tarefas cuja frase da reunião o agente está escrevendo.
     pub frases: std::collections::HashSet<i64>,
+    /// Sugestões dos agentes na base de conhecimento, por workspace.
+    pub sugestoes: std::collections::HashMap<i64, usize>,
+    /// Muda a cada mudança na base de conhecimento: a tela aberta lê de novo.
+    pub versao_conhecimento: u64,
 }
 
 /// O uso que os agentes do Claude Code mandam pela statusLine: o contexto de
@@ -615,6 +625,13 @@ pub enum Evento {
     /// Um workspace foi recolhido ou aberto na barra lateral (nesta ou em outra tela).
     #[serde(rename = "workspace.recolhido")]
     WorkspaceRecolhido { seq: u64 },
+    /// O nome, a imagem ou a aprovação automática do workspace mudou.
+    #[serde(rename = "workspace.mudou")]
+    WorkspaceMudou { seq: u64, workspace: api::Workspace },
+    /// Uma nota da base de conhecimento mudou (sem o texto): a tela aberta
+    /// busca a lista; `sugestoes` é o selo do workspace, já contado.
+    #[serde(rename = "conhecimento.mudou")]
+    ConhecimentoMudou { seq: u64, workspace_id: i64, sugestoes: usize },
     /// Uma configuração de execução do Play começou ou terminou (fora da
     /// corrente: não entra na linha do tempo).
     #[serde(rename = "comando.iniciou")]
@@ -674,6 +691,8 @@ impl Evento {
             | Evento::VozModelo { seq, .. }
             | Evento::TelaAbrir { seq, .. }
             | Evento::WorkspaceRecolhido { seq, .. }
+            | Evento::WorkspaceMudou { seq, .. }
+            | Evento::ConhecimentoMudou { seq, .. }
             | Evento::ComandoIniciou { seq, .. }
             | Evento::ComandoTerminou { seq, .. }
             | Evento::ComandoRemovido { seq, .. } => *seq,
@@ -689,6 +708,7 @@ impl Evento {
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
+            Evento::WorkspaceMudou { .. } | Evento::ConhecimentoMudou { .. } => false,
             Evento::PerfilMascote { .. } | Evento::PerfilAbelhaFixa { .. } | Evento::TelaAbrir { .. } => false,
             Evento::PerfilDitado { .. } | Evento::PerfilVoz { .. } | Evento::VozModelo { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
@@ -728,6 +748,7 @@ impl Modelo {
         self.navegadores = q.navegadores.into_iter().collect();
         self.aprovacoes = q.aprovacoes;
         self.frases = q.frases.into_iter().collect();
+        self.sugestoes = q.sugestoes;
         self.uso = Uso {
             contextos: q.uso.agentes.into_iter().map(|a| (a.agente_id, a.contexto)).collect(),
             cinco_horas: q.uso.cinco_horas,
@@ -835,6 +856,23 @@ impl Modelo {
             }
             // A barra lateral não recolhe mais workspaces: o trilho mostra todos.
             Evento::WorkspaceRecolhido { .. } => {}
+            Evento::WorkspaceMudou { workspace, .. } => {
+                for p in self.projetos.iter_mut().filter(|p| p.workspace_id == workspace.id) {
+                    p.workspace.clone_from(&workspace.nome);
+                    p.workspace_icone.clone_from(&workspace.icone);
+                    p.conhecimento_auto = workspace.conhecimento_auto;
+                }
+                // Na mesma ordem do núcleo: o nome novo pode mudar o lugar.
+                self.projetos.sort_by(|a, b| (&a.workspace, &a.nome).cmp(&(&b.workspace, &b.nome)));
+            }
+            Evento::ConhecimentoMudou { workspace_id, sugestoes, .. } => {
+                self.versao_conhecimento += 1;
+                if sugestoes == 0 {
+                    self.sugestoes.remove(&workspace_id);
+                } else {
+                    self.sugestoes.insert(workspace_id, sugestoes);
+                }
+            }
             Evento::ProjetoRemovido { projeto_id, .. } => {
                 self.projetos.retain(|p| p.id != projeto_id);
                 for t in self.tarefas.iter().filter(|t| t.projeto_id == projeto_id) {
@@ -985,6 +1023,7 @@ pub fn projetos_demo() -> Vec<Projeto> {
             caminho: String::new(),
             sem_git: false,
             branch_padrao: "main".into(),
+            ..Default::default()
         })
         .collect()
 }
