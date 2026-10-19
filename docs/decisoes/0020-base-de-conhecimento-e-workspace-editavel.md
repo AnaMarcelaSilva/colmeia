@@ -15,12 +15,15 @@ Em cada tarefa a usuária repetia ao agente as mesmas coisas do lugar onde ele t
 - **A tela Conhecimento.** Na barra lateral, abaixo da Lousa do workspace, com o selo âmbar das sugestões; também no menu do botão direito no quadrado do workspace. As sugestões ficam no topo, com Aprovar, Editar antes e Recusar e o que cada uma muda. Depois vêm as notas de todo o workspace e as de cada projeto, com quanto um agente dali recebe. O estado vazio explica com exemplos e oferece a primeira nota.
 - **O workspace editável.** O lápis no topo do painel e "Editar workspace…" no menu do quadrado abrem o nome e a imagem. A imagem pode ser PNG, JPEG, GIF ou WebP de até 20 MB e 40 megapixels. O núcleo corta o quadrado do meio, reduz para 128 px e grava só esse PNG no banco (`workspaces.icone`, com um resumo em `icone_versao` que a tela usa para saber quando buscar de novo). A prévia do diálogo vem do mesmo corte (`POST /v1/icone/previa`), então mostra exatamente o que vai ficar. Os projetos levam o nome e a versão da imagem do workspace, e `workspace.mudou` atualiza todas as telas.
 
+- **Os arquivos das notas.** Uma nota leva até 10 arquivos de até 25 MB, de qualquer tipo, guardados em `conhecimento/<id>/<nome original>` na pasta de dados (`0600`, pastas `0700`) e listados em `conhecimento_arquivos`. O arquivo chega primeiro num temporário e só muda para o lugar depois do registro no banco. O nome não pode ter barra, `.` ou `..`. O agente recebe só o caminho, no texto do começo e em `ler_conhecimento`, e lê quando precisar; só a tela anexa, o agente não tem rota para isso. Apagar a nota, o arquivo ou o projeto apaga as pastas que não estão mais no banco. Na tela, o clique abre o arquivo com o programa padrão só nos tipos que não executam; nos outros, abre a pasta.
+
 ## Alternativas
 
 - **Um `CLAUDE.md` na pasta do projeto:** já funciona para quem usa só o Claude Code, mas mexe no repositório da usuária, não vale para o workspace inteiro e não tem aprovação do que o agente escreve.
 - **As notas nas instruções do servidor MCP:** são do servidor, iguais para todo agente, e o Claude Code pode cortá-las; o prompt do sistema é o lugar do que muda por projeto.
 - **`--append-system-prompt` com o texto:** apareceria na lista de processos para qualquer usuário da máquina.
 - **O agente gravar direto, sem aprovação:** um agente que leu um arquivo com instruções escondidas poderia ensiná-las a todos os próximos. A aprovação é o ponto em que uma pessoa lê.
+- **O conteúdo do arquivo no texto do agente:** um PDF de 20 páginas iria inteiro para toda conversa. O caminho custa uma linha e o agente lê só quando a tarefa pede.
 - **Reduzir a imagem na tela:** a tela só lê PNG, e a regra do tamanho ficaria fora do núcleo; com o núcleo cortando, a prévia e o gravado são o mesmo.
 
 ## Consequências

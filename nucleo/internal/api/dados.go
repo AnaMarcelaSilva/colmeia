@@ -473,6 +473,8 @@ func (s *Servidor) removerProjeto(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	// As notas do projeto (e as do workspace, se ele saiu junto) levam os arquivos.
+	s.limparArquivosConhecimento(r.Context())
 	responderJSON(w, map[string]any{"ok": true})
 }
 

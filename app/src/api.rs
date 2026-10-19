@@ -1864,6 +1864,47 @@ pub struct Conhecimento {
     pub substitui: i64,
     #[serde(default)]
     pub atualizada_em: String,
+    #[serde(default)]
+    pub arquivos: Vec<ArquivoConhecimento>,
+}
+
+/// Um arquivo guardado com a nota; o agente recebe o caminho.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ArquivoConhecimento {
+    pub id: i64,
+    pub nome: String,
+    pub bytes: i64,
+    #[serde(default)]
+    pub caminho: String,
+}
+
+/// O tamanho máximo de um arquivo de nota (o mesmo do núcleo).
+pub const MAX_ARQUIVO_CONHECIMENTO: u64 = 25 << 20;
+
+/// Manda o arquivo do disco para a nota, com o nome que ele tem.
+pub fn anexar_ao_conhecimento(nota: i64, caminho: &std::path::Path) -> Result<(), String> {
+    let nome = caminho.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tamanho = std::fs::metadata(caminho).map_err(|e| format!("Não consegui ler {nome}: {e}"))?.len();
+    if tamanho > MAX_ARQUIVO_CONHECIMENTO {
+        return Err(format!("{nome} passa de {} MB", MAX_ARQUIVO_CONHECIMENTO >> 20));
+    }
+    // Direto do disco, em partes: o arquivo não passa inteiro pela memória.
+    let (status, corpo) = canal::pedir_arquivo(
+        "POST",
+        &format!("/v1/conhecimento/{nota}/arquivos?nome={}", codificar_url(&nome)),
+        "application/octet-stream",
+        caminho,
+        |_, _| {},
+    )?;
+    if !(200..300).contains(&status) {
+        let corpo = String::from_utf8_lossy(&corpo);
+        return Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status)));
+    }
+    Ok(())
+}
+
+pub fn remover_arquivo_conhecimento(id: i64) -> Result<(), String> {
+    chamar::<Ok>("DELETE", &format!("/v1/conhecimento/arquivos/{id}"), None).map(|_| ())
 }
 
 impl Conhecimento {

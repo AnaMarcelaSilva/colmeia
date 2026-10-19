@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS conhecimento (
 );
 CREATE INDEX IF NOT EXISTS conhecimento_por_workspace ON conhecimento (workspace_id);
 CREATE INDEX IF NOT EXISTS conhecimento_por_projeto ON conhecimento (projeto_id);
+-- Os arquivos de uma nota (um PDF, um modelo): ficam na pasta de dados e o
+-- agente recebe o caminho, para ler quando precisar.
+CREATE TABLE IF NOT EXISTS conhecimento_arquivos (
+	id INTEGER PRIMARY KEY,
+	conhecimento_id INTEGER NOT NULL REFERENCES conhecimento(id) ON DELETE CASCADE,
+	nome TEXT NOT NULL,
+	bytes INTEGER NOT NULL,
+	criado_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS arquivos_por_conhecimento ON conhecimento_arquivos (conhecimento_id);
 `
 
 // colunasPerfis é a definição da tabela perfis desde a versão 9 do banco

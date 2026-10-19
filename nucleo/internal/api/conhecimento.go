@@ -3,8 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/icone"
@@ -22,6 +27,123 @@ func (s *Servidor) rotasConhecimento(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/conhecimento/{id}", s.editarConhecimento)
 	mux.HandleFunc("POST /v1/conhecimento/{id}/aprovar", s.aprovarConhecimento)
 	mux.HandleFunc("DELETE /v1/conhecimento/{id}", s.removerConhecimento)
+	mux.HandleFunc("POST /v1/conhecimento/{id}/arquivos", s.anexarAoConhecimento)
+	mux.HandleFunc("DELETE /v1/conhecimento/arquivos/{id}", s.removerArquivoConhecimento)
+}
+
+// pastaConhecimento guarda os arquivos das notas, um por pasta com o número
+// dele: o nome fica o original, que é o que o agente vê no caminho.
+func (s *Servidor) pastaConhecimento() string {
+	return filepath.Join(s.DirDados, "conhecimento")
+}
+
+func (s *Servidor) caminhoArquivo(a dados.ArquivoConhecimento) string {
+	return filepath.Join(s.pastaConhecimento(), strconv.FormatInt(a.ID, 10), a.Nome)
+}
+
+// comCaminhos põe nos arquivos das notas onde eles estão no disco.
+func (s *Servidor) comCaminhos(notas []dados.Conhecimento) {
+	for i := range notas {
+		for j := range notas[i].Arquivos {
+			notas[i].Arquivos[j].Caminho = s.caminhoArquivo(notas[i].Arquivos[j])
+		}
+	}
+}
+
+// anexarAoConhecimento recebe o arquivo no corpo, de qualquer tipo, até
+// MaxBytesArquivoConhecimento, com ?nome= o nome dele sem a pasta. Só a tela
+// anexa: o agente não tem rota para isso. O arquivo vai primeiro para um
+// temporário e só muda para o lugar dele depois do registro no banco.
+func (s *Servidor) anexarAoConhecimento(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	nome, err := dados.NomeArquivoValido(r.URL.Query().Get("nome"))
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	pasta := s.pastaConhecimento()
+	if err := os.MkdirAll(pasta, 0o700); err != nil {
+		responderErro(w, err)
+		return
+	}
+	tmp, err := os.CreateTemp(pasta, ".chegando-*")
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	n, err := io.Copy(tmp, io.LimitReader(r.Body, dados.MaxBytesArquivoConhecimento+1))
+	if errFechar := tmp.Close(); err == nil {
+		err = errFechar
+	}
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if n > dados.MaxBytesArquivoConhecimento || n == 0 {
+		responderErro(w, dados.ErrInvalido{Motivo: fmt.Sprintf("o arquivo precisa ter até %d MB", dados.MaxBytesArquivoConhecimento>>20)})
+		return
+	}
+	a, err := s.Banco.CriarArquivoConhecimento(r.Context(), id, nome, n)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	destino := s.caminhoArquivo(a)
+	if err = os.MkdirAll(filepath.Dir(destino), 0o700); err == nil {
+		err = os.Rename(tmp.Name(), destino)
+	}
+	if err != nil {
+		if errRemover := s.Banco.RemoverArquivoConhecimento(r.Context(), a.ID); errRemover != nil {
+			log.Printf("conhecimento: o arquivo %d ficou registrado sem estar no disco: %v", a.ID, errRemover)
+		}
+		responderErro(w, err)
+		return
+	}
+	a.Caminho = destino
+	responderJSON(w, a)
+}
+
+func (s *Servidor) removerArquivoConhecimento(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if err := s.Banco.RemoverArquivoConhecimento(r.Context(), id); err != nil {
+		responderErro(w, err)
+		return
+	}
+	s.limparArquivosConhecimento(r.Context())
+	responderJSON(w, map[string]any{"ok": true})
+}
+
+// limparArquivosConhecimento apaga do disco as pastas de arquivos que não
+// estão mais no banco: da nota removida e das notas que saíram junto com um
+// projeto ou workspace. São poucas pastas, então olha todas.
+func (s *Servidor) limparArquivosConhecimento(ctx context.Context) {
+	entradas, err := os.ReadDir(s.pastaConhecimento())
+	if err != nil || len(entradas) == 0 {
+		return
+	}
+	existem, err := s.Banco.IDsArquivosConhecimento(ctx)
+	if err != nil {
+		log.Printf("conhecimento: limpando arquivos: %v", err)
+		return
+	}
+	for _, e := range entradas {
+		id, err := strconv.ParseInt(e.Name(), 10, 64)
+		if err != nil || !e.IsDir() || existem[id] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.pastaConhecimento(), e.Name())); err != nil {
+			log.Printf("conhecimento: apagando o arquivo %d: %v", id, err)
+		}
+	}
 }
 
 func (s *Servidor) lerIcone(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +238,7 @@ func (s *Servidor) listarConhecimento(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	s.comCaminhos(lista)
 	responderJSON(w, lista)
 }
 
@@ -194,6 +317,7 @@ func (s *Servidor) removerConhecimento(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	s.limparArquivosConhecimento(r.Context())
 	responderJSON(w, map[string]any{"ok": true})
 }
 
@@ -205,13 +329,22 @@ func (s *Servidor) agenteLerConhecimento(w http.ResponseWriter, r *http.Request,
 		responderErro(w, err)
 		return
 	}
+	s.comCaminhos(notas)
 	lista := make([]map[string]any, 0, len(notas))
 	for _, n := range notas {
 		onde := "workspace"
 		if n.ProjetoID != 0 {
 			onde = "projeto"
 		}
-		lista = append(lista, map[string]any{"id": n.ID, "onde": onde, "titulo": n.Titulo, "texto": n.Texto})
+		nota := map[string]any{"id": n.ID, "onde": onde, "titulo": n.Titulo, "texto": n.Texto}
+		if len(n.Arquivos) > 0 {
+			caminhos := make([]string, len(n.Arquivos))
+			for i, a := range n.Arquivos {
+				caminhos[i] = a.Caminho
+			}
+			nota["arquivos"] = caminhos
+		}
+		lista = append(lista, nota)
 	}
 	responderJSON(w, map[string]any{"workspace": q.projeto.Workspace, "projeto": q.projeto.Nome, "notas": lista})
 }
@@ -253,5 +386,6 @@ func (s *Servidor) textoDoConhecimento(ctx context.Context, projeto dados.Projet
 	if err != nil {
 		return "", err
 	}
+	s.comCaminhos(notas)
 	return dados.TextoDoConhecimento(notas, projeto.Workspace, projeto.Nome), nil
 }

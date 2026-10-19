@@ -27,6 +27,11 @@ const ALTURA_PROJETO: f32 = 32.0;
 const ALTURA_TAREFA: f32 = 30.0;
 const ALTURA_AGENTE: f32 = 28.0;
 const ALTURA_RESTO: f32 = 24.0;
+/// O quanto a tarefa entra em relação ao projeto: a seta dela fica à direita
+/// da guia que desce do projeto.
+const RECUO_TAREFA: f32 = 16.0;
+/// O espaço entre um projeto e o seguinte.
+const ENTRE_PROJETOS: f32 = 4.0;
 /// O bloco da abelha com o uso, no pé do painel.
 const ALTURA_USO: f32 = 92.0;
 
@@ -34,7 +39,10 @@ const ALTURA_USO: f32 = 92.0;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Lugar {
     Quadro,
-    Tarefa { id: i64, foco: i64 },
+    Tarefa {
+        id: i64,
+        foco: i64,
+    },
     Lousa(i64),
     /// A base de conhecimento do workspace.
     Conhecimento(i64),
@@ -356,6 +364,11 @@ impl Lateral {
                         } else {
                             self.workspace = Some(g.id);
                             self.aberto = true;
+                            // A página acompanha o workspace escolhido, para
+                            // o painel e o conteúdo não ficarem em lugares diferentes.
+                            if let Some(acao) = ir_para_o_workspace(v, g.id) {
+                                saida.acoes.push(acao);
+                            }
                         }
                     }
                     if !v.demo && g.id != 0 {
@@ -697,7 +710,10 @@ impl Lateral {
         ui.spacing_mut().scroll.bar_width = 6.0;
         egui::ScrollArea::vertical().id_salt("painel-arvore").auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            for projeto in &grupo.projetos {
+            for (i, projeto) in grupo.projetos.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(ENTRE_PROJETOS);
+                }
                 self.ramo_do_projeto(ui, projeto, v, saida);
             }
             if !v.demo && v.pode && item(ui, "+ Novo projeto", None, false).clicked() {
@@ -750,6 +766,8 @@ impl Lateral {
         let altura = andamento.iter().zip(&aberturas).map(|(t, a)| ALTURA_TAREFA + a * t.agentes.len() as f32 * ALTURA_AGENTE).sum::<f32>()
             + if resto.is_some() { ALTURA_RESTO } else { 0.0 };
         let t = abertura_do_no(&ctx, No::Projeto(projeto.id), aberto);
+        let topo = ui.cursor().min.y;
+        let x_guia = ui.max_rect().left() + 14.0;
         recolhivel(ui, t, altura, |ui| {
             for (tarefa, abertura) in andamento.iter().zip(&aberturas) {
                 self.ramo_da_tarefa(ui, tarefa, *abertura, v, saida);
@@ -758,12 +776,17 @@ impl Lateral {
                 let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_RESTO), Sense::click());
                 let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver no quadro do projeto");
                 let cor = tema::cor_animada(ui, resposta.id.with("cor"), resposta.hovered(), cores().suave, cores().texto);
-                ui.painter().text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, texto, FontId::proportional(11.5), cor);
+                ui.painter().text(rect.left_center() + vec2(RECUO_TAREFA + 36.0, 0.0), egui::Align2::LEFT_CENTER, texto, FontId::proportional(11.5), cor);
                 if resposta.clicked() {
                     saida.acoes.push(Acao::Escopo(Escopo::Projeto(projeto.id)));
                 }
             }
         });
+        // A guia que desce do projeto junta o que é dele.
+        let fundo = ui.cursor().min.y;
+        if fundo - topo > 8.0 {
+            ui.painter().vline(x_guia, (topo + 2.0)..=(fundo - 8.0), Stroke::new(1.0, cores().borda.gamma_multiply(t)));
+        }
     }
 
     fn ramo_da_tarefa(&mut self, ui: &mut Ui, tarefa: &Tarefa, abertura: f32, v: &Vista, saida: &mut Saida) {
@@ -788,6 +811,21 @@ impl Lateral {
             }
         });
     }
+}
+
+/// Para onde vai a página quando você escolhe outro workspace no trilho: a
+/// mesma página do workspace novo (lousa ou conhecimento) ou o quadro dele.
+/// Nada muda se a página já é dele ou se é a de bancos.
+fn ir_para_o_workspace(v: &Vista, workspace: i64) -> Option<Acao> {
+    // O grupo 0 (projetos sem workspace) não tem página própria.
+    if workspace == 0 || v.lugar == Lugar::Banco || workspace_em_foco(v) == Some(workspace) {
+        return None;
+    }
+    Some(match v.lugar {
+        Lugar::Lousa(_) => Acao::Lousa(workspace),
+        Lugar::Conhecimento(_) => Acao::Conhecimento(workspace),
+        _ => Acao::Escopo(Escopo::Workspace(workspace)),
+    })
 }
 
 /// O workspace do que está na tela: o da tarefa, da lousa ou do escopo.
@@ -1089,9 +1127,9 @@ fn linha_do_projeto(ui: &mut Ui, projeto: &Projeto, ativo: bool, aberto: Option<
         direita -= 8.0;
     }
 
-    let forte = ativo || aberto == Some(true);
-    let fonte = if forte { tema::forte(14.0) } else { FontId::proportional(14.0) };
-    let cor = tema::cor_animada(ui, resposta.id.with("cor"), forte || em_cima, p.suave, p.texto);
+    // Todo projeto com o mesmo peso, aberto ou não: a árvore se lê pelo recuo.
+    let fonte = tema::forte(13.5);
+    let cor = tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, tema::misturar(p.suave, p.texto, 0.55), p.texto);
     let x = rect.left() + 26.0;
     let nome = tema::cortar(ui.painter(), &projeto.nome, egui::TextFormat::simple(fonte, cor), (direita - x).max(24.0), 1, false);
     ui.painter().galley(pos2(x, rect.center().y - nome.size().y / 2.0), nome, cor);
@@ -1102,7 +1140,7 @@ fn linha_do_projeto(ui: &mut Ui, projeto: &Projeto, ativo: bool, aberto: Option<
 fn linha_da_tarefa(ui: &mut Ui, tarefa: &Tarefa, ativa: bool, aberta: Option<bool>) -> (Response, Option<Response>) {
     let p = cores();
     let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_TAREFA), Sense::click());
-    let rect = rect.with_min_x(rect.left() + 10.0);
+    let rect = rect.with_min_x(rect.left() + RECUO_TAREFA);
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let seta = aberta.map(|a| seta_do_ramo(ui, rect, 0.0, a, resposta.id.with("seta")));
     let em_cima = resposta.hovered() || seta.as_ref().is_some_and(|s| s.hovered());
@@ -1128,7 +1166,7 @@ fn linha_do_agente(ui: &mut Ui, agente: &AgenteTela, focado: bool, ultimo: bool)
     let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_AGENTE), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
     let pintor = ui.painter();
-    let guia = rect.left() + 30.0;
+    let guia = rect.left() + RECUO_TAREFA + 20.0;
     let meio = rect.center().y;
     let traco = Stroke::new(1.0, p.borda);
     let raio = 6.0;

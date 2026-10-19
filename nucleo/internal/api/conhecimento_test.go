@@ -4,13 +4,19 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"image"
 	"image/png"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 )
 
 func TestAgenteRecebeEAnotaConhecimento(t *testing.T) {
@@ -98,4 +104,61 @@ func TestImagemDoWorkspace(t *testing.T) {
 	if status != http.StatusOK || ws["nome"] != "Estudos" || ws["icone"] == "" {
 		t.Fatalf("renomear: %d %v", status, ws)
 	}
+}
+
+func TestArquivoNaNota(t *testing.T) {
+	srv, servidor := servidorComAgentes(t)
+	montarTarefas(t, srv.URL)
+	_, nota := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/workspaces/1/conhecimento", map[string]any{"titulo": "Gerador", "texto": "Siga o passo a passo do PDF."})
+	id := strconv.FormatFloat(nota["id"].(float64), 'f', 0, 64)
+
+	enviar := func(nome, corpo string) (int, map[string]any) {
+		pedido, _ := http.NewRequest("POST", srv.URL+"/v1/conhecimento/"+id+"/arquivos?nome="+url.QueryEscape(nome), strings.NewReader(corpo))
+		pedido.Header.Set("Authorization", "Bearer "+tokenTela)
+		resposta, err := http.DefaultClient.Do(pedido)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resposta.Body.Close()
+		var r map[string]any
+		json.NewDecoder(resposta.Body).Decode(&r)
+		return resposta.StatusCode, r
+	}
+	status, a := enviar("passo a passo.pdf", "%PDF-1.4 conteúdo")
+	caminho, _ := a["caminho"].(string)
+	if status != http.StatusOK || lerArquivo(caminho) != "%PDF-1.4 conteúdo" || filepath.Base(caminho) != "passo a passo.pdf" {
+		t.Fatalf("anexar: %d %v", status, a)
+	}
+	if info, _ := os.Stat(caminho); info.Mode().Perm() != 0o600 {
+		t.Errorf("permissão do arquivo: %v", info.Mode())
+	}
+	for _, nome := range []string{"../fora.txt", "..", "", "a/b.txt"} {
+		if status, _ := enviar(nome, "x"); status != http.StatusBadRequest {
+			t.Errorf("aceitou o nome %q: %d", nome, status)
+		}
+	}
+	if status, _ := enviar("vazio.txt", ""); status != http.StatusBadRequest {
+		t.Errorf("aceitou arquivo vazio: %d", status)
+	}
+
+	// O agente recebe o caminho, não o conteúdo.
+	texto, err := servidor.textoDoConhecimento(t.Context(), dadosProjeto(t, servidor, 1))
+	if err != nil || !strings.Contains(texto, caminho) || strings.Contains(texto, "%PDF") {
+		t.Fatalf("texto ao agente: %v %q", err, texto)
+	}
+
+	// Apagar a nota apaga o arquivo do disco.
+	pedirComo(t, tokenTela, "DELETE", srv.URL+"/v1/conhecimento/"+id, nil)
+	if _, err := os.Stat(filepath.Dir(caminho)); !os.IsNotExist(err) {
+		t.Fatalf("a pasta do arquivo ficou: %v", err)
+	}
+}
+
+func dadosProjeto(t *testing.T, s *Servidor, id int64) dados.Projeto {
+	t.Helper()
+	p, err := s.Banco.Projeto(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

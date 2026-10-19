@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -21,6 +22,10 @@ const (
 	// Sugestões dos agentes esperando você, por workspace: um agente que
 	// anota demais não enche a lista.
 	MaxSugestoes = 20
+	// Arquivos por nota e o tamanho de cada um. O agente recebe só o caminho.
+	MaxArquivosConhecimento     = 10
+	MaxBytesArquivoConhecimento = 25 << 20
+	MaxNomeArquivoConhecimento  = 120
 )
 
 const (
@@ -44,6 +49,18 @@ type Conhecimento struct {
 	AgenteID     int64  `json:"agente_id"`
 	CriadaEm     string `json:"criada_em"`
 	AtualizadaEm string `json:"atualizada_em"`
+	// Arquivos da nota; o Caminho quem preenche é a API, que sabe onde
+	// fica a pasta de dados.
+	Arquivos []ArquivoConhecimento `json:"arquivos,omitempty"`
+}
+
+// ArquivoConhecimento é um arquivo guardado junto de uma nota.
+type ArquivoConhecimento struct {
+	ID      int64  `json:"id"`
+	Nota    int64  `json:"conhecimento_id"`
+	Nome    string `json:"nome"`
+	Bytes   int64  `json:"bytes"`
+	Caminho string `json:"caminho,omitempty"`
 }
 
 // NovoConhecimento é o pedido de uma nota. Com Projeto, a nota é do projeto;
@@ -110,7 +127,7 @@ func (b *Banco) ListarConhecimento(ctx context.Context, workspace int64) ([]Conh
 	if err != nil {
 		return nil, err
 	}
-	return lerConhecimento(linhas)
+	return b.comArquivos(ctx, linhas)
 }
 
 // ConhecimentoDoProjeto devolve as notas aprovadas que valem para o projeto:
@@ -122,7 +139,124 @@ func (b *Banco) ConhecimentoDoProjeto(ctx context.Context, projeto int64) ([]Con
 	if err != nil {
 		return nil, err
 	}
-	return lerConhecimento(linhas)
+	return b.comArquivos(ctx, linhas)
+}
+
+// comArquivos lê as notas e junta a cada uma os arquivos dela.
+func (b *Banco) comArquivos(ctx context.Context, linhas *sql.Rows) ([]Conhecimento, error) {
+	notas, err := lerConhecimento(linhas)
+	if err != nil || len(notas) == 0 {
+		return notas, err
+	}
+	ids := make([]string, len(notas))
+	posicao := make(map[int64]int, len(notas))
+	for i, n := range notas {
+		ids[i] = strconv.FormatInt(n.ID, 10)
+		posicao[n.ID] = i
+		notas[i].Arquivos = []ArquivoConhecimento{}
+	}
+	arquivos, err := b.db.QueryContext(ctx, `SELECT id, conhecimento_id, nome, bytes FROM conhecimento_arquivos
+		WHERE conhecimento_id IN (`+strings.Join(ids, ",")+`) ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer arquivos.Close()
+	for arquivos.Next() {
+		var a ArquivoConhecimento
+		if err := arquivos.Scan(&a.ID, &a.Nota, &a.Nome, &a.Bytes); err != nil {
+			return nil, err
+		}
+		i := posicao[a.Nota]
+		notas[i].Arquivos = append(notas[i].Arquivos, a)
+	}
+	return notas, arquivos.Err()
+}
+
+// NomeArquivoValido aceita o nome do arquivo sem pasta, como ele vai ficar
+// no disco: nada de barra, de "." ou ".." nem de caracteres de controle.
+func NomeArquivoValido(nome string) (string, error) {
+	nome, err := nomeValido("O nome do arquivo", nome, MaxNomeArquivoConhecimento)
+	if err != nil {
+		return "", err
+	}
+	if nome == "." || nome == ".." || strings.ContainsAny(nome, `/\:*?"<>|`) || strings.ContainsRune(nome, 0x7f) {
+		return "", ErrInvalido{"o nome do arquivo tem caracteres que não podem ir para o disco"}
+	}
+	return nome, nil
+}
+
+// CriarArquivoConhecimento registra um arquivo da nota. Quem grava o arquivo
+// no disco é a API, depois daqui; se não conseguir, ela remove o registro.
+func (b *Banco) CriarArquivoConhecimento(ctx context.Context, nota int64, nome string, bytes int64) (ArquivoConhecimento, error) {
+	nome, err := NomeArquivoValido(nome)
+	if err != nil {
+		return ArquivoConhecimento{}, err
+	}
+	if bytes <= 0 || bytes > MaxBytesArquivoConhecimento {
+		return ArquivoConhecimento{}, ErrInvalido{fmt.Sprintf("o arquivo precisa ter até %d MB", MaxBytesArquivoConhecimento>>20)}
+	}
+	a := ArquivoConhecimento{Nota: nota, Nome: nome, Bytes: bytes}
+	err = b.emTransacao(ctx, func(tx *transacao) error {
+		c, escopo, err := escopoDaNota(ctx, tx, nota)
+		if err != nil {
+			return err
+		}
+		var quantos int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conhecimento_arquivos WHERE conhecimento_id = ?`, nota).Scan(&quantos); err != nil {
+			return err
+		}
+		if quantos >= MaxArquivosConhecimento {
+			return ErrInvalido{fmt.Sprintf("uma nota pode ter no máximo %d arquivos", MaxArquivosConhecimento)}
+		}
+		r, err := tx.ExecContext(ctx, `INSERT INTO conhecimento_arquivos (conhecimento_id, nome, bytes, criado_em) VALUES (?, ?, ?, ?)`, nota, nome, bytes, agora())
+		if err != nil {
+			return err
+		}
+		a.ID, _ = r.LastInsertId()
+		return registrar(ctx, tx, "conhecimento.editado", escopo, eventoDaNota(c, escopo.Perfil))
+	})
+	return a, err
+}
+
+// RemoverArquivoConhecimento tira o arquivo da nota (o disco a API limpa).
+func (b *Banco) RemoverArquivoConhecimento(ctx context.Context, id int64) error {
+	return b.emTransacao(ctx, func(tx *transacao) error {
+		var nota int64
+		err := tx.QueryRowContext(ctx, `SELECT conhecimento_id FROM conhecimento_arquivos WHERE id = ?`, id).Scan(&nota)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		c, escopo, err := escopoDaNota(ctx, tx, nota)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM conhecimento_arquivos WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "conhecimento.editado", escopo, eventoDaNota(c, escopo.Perfil))
+	})
+}
+
+// IDsArquivosConhecimento são os arquivos que ainda existem, para a API
+// apagar do disco os de notas, projetos e workspaces removidos.
+func (b *Banco) IDsArquivosConhecimento(ctx context.Context) (map[int64]bool, error) {
+	linhas, err := b.db.QueryContext(ctx, `SELECT id FROM conhecimento_arquivos`)
+	if err != nil {
+		return nil, err
+	}
+	defer linhas.Close()
+	ids := map[int64]bool{}
+	for linhas.Next() {
+		var id int64
+		if err := linhas.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = true
+	}
+	return ids, linhas.Err()
 }
 
 func (b *Banco) donoDoWorkspace(ctx context.Context, workspace int64) (int64, error) {
@@ -357,6 +491,9 @@ func TextoDoConhecimento(notas []Conhecimento, workspace, projeto string) string
 			onde = "projeto"
 		}
 		bloco := fmt.Sprintf("\n## %s (%s, nota %d)\n\n%s\n", n.Titulo, onde, n.ID, n.Texto)
+		if caminhos := caminhosDosArquivos(n.Arquivos); caminhos != "" {
+			bloco += "\nArquivos desta nota, para ler quando precisar:\n" + caminhos
+		}
 		if len(fora) > 0 || utf8.RuneCountInString(t.String())+utf8.RuneCountInString(bloco) > MaxConhecimentoInicio {
 			fora = append(fora, fmt.Sprintf("%q (nota %d)", n.Titulo, n.ID))
 			continue
@@ -367,6 +504,16 @@ func TextoDoConhecimento(notas []Conhecimento, workspace, projeto string) string
 		fmt.Fprintf(&t, "\nOutras notas, que não couberam aqui: %s. Leia com ler_conhecimento quando precisar.\n", strings.Join(fora, ", "))
 	}
 	t.WriteString("\nSe descobrir algo que valeria para as próximas tarefas deste projeto ou workspace, proponha com anotar_conhecimento, curto. O usuário aprova antes de valer.\n")
+	return t.String()
+}
+
+func caminhosDosArquivos(arquivos []ArquivoConhecimento) string {
+	var t strings.Builder
+	for _, a := range arquivos {
+		if a.Caminho != "" {
+			fmt.Fprintf(&t, "- %s\n", a.Caminho)
+		}
+	}
 	return t.String()
 }
 

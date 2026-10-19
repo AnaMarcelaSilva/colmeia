@@ -299,9 +299,12 @@ pub struct EditarWorkspace {
     atual: Option<egui::TextureHandle>,
     nova: Option<(Vec<u8>, egui::TextureHandle)>,
     tirar: bool,
-    preparando: Option<Receiver<Option<Result<Vec<u8>, String>>>>,
+    preparando: Option<Receiver<Option<PreviaIcone>>>,
     erro: Option<String>,
 }
+
+/// A prévia que o núcleo devolve da imagem escolhida: o PNG já cortado.
+type PreviaIcone = Result<Vec<u8>, String>;
 
 impl EditarWorkspace {
     pub fn new(id: i64, nome: &str, atual: Option<egui::TextureHandle>) -> Self {

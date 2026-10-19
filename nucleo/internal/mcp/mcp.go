@@ -548,7 +548,7 @@ var Ferramentas = []Ferramenta{
 	},
 	{
 		Nome: "ler_conhecimento", Titulo: "Ler a base de conhecimento",
-		Descricao: "Lê a base de conhecimento do projeto e do workspace da tarefa: as notas que o usuário aprovou, inteiras, com id, onde vale (projeto ou workspace), título e texto. " +
+		Descricao: "Lê a base de conhecimento do projeto e do workspace da tarefa: as notas que o usuário aprovou, inteiras, com id, onde vale (projeto ou workspace), título, texto e o caminho dos arquivos anexados, que você lê quando precisar. " +
 			"As que cabem já vêm no início da conversa; use esta para ler as outras ou as que mudaram depois.",
 		Entrada: objeto(map[string]any{}),
 		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
