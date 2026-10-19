@@ -162,7 +162,7 @@ func (s *Servidor) lerIcone(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Write(png)
+	w.Write(icone.Aparar(png))
 }
 
 // reduzirIcone lê a imagem do corpo e devolve o PNG pequeno, ou o erro em

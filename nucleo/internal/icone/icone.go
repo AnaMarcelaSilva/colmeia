@@ -31,7 +31,8 @@ var (
 	ErrGrande  = errors.New("a imagem é grande demais (até 20 MB e 40 megapixels)")
 )
 
-// Reduzir lê a imagem, corta o quadrado do meio e reduz para Lado × Lado.
+// Reduzir lê a imagem, tira a margem transparente (a de um ícone com sombra
+// em volta), corta o quadrado do meio e reduz para Lado × Lado.
 func Reduzir(bruto []byte) ([]byte, error) {
 	if len(bruto) > MaxBytes {
 		return nil, ErrGrande
@@ -47,7 +48,7 @@ func Reduzir(bruto []byte) ([]byte, error) {
 	if err != nil {
 		return nil, ErrFormato
 	}
-	b := img.Bounds()
+	b := areaVisivel(img)
 	lado := min(b.Dx(), b.Dy())
 	x, y := b.Min.X+(b.Dx()-lado)/2, b.Min.Y+(b.Dy()-lado)/2
 	corte := image.Rect(x, y, x+lado, y+lado)
@@ -63,4 +64,39 @@ func Reduzir(bruto []byte) ([]byte, error) {
 		return nil, err
 	}
 	return saida.Bytes(), nil
+}
+
+// Opaco é o quanto um pixel precisa cobrir para contar como imagem: a sombra
+// suave em volta de um ícone fica de fora.
+const Opaco = 0x8000
+
+// areaVisivel é o retângulo dos pixels que cobrem pelo menos Opaco. Uma
+// imagem toda transparente fica inteira.
+func areaVisivel(img image.Image) image.Rectangle {
+	b := img.Bounds()
+	area := image.Rectangle{}
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if _, _, _, a := img.At(x, y).RGBA(); a >= Opaco {
+				area = area.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	if area.Empty() {
+		return b
+	}
+	return area
+}
+
+// Aparar devolve o ícone já gravado sem a margem transparente, para os que
+// foram gravados antes do corte existir. Sem margem, devolve o mesmo.
+func Aparar(png []byte) []byte {
+	img, _, err := image.Decode(bytes.NewReader(png))
+	if err != nil || areaVisivel(img) == img.Bounds() {
+		return png
+	}
+	if aparado, err := Reduzir(png); err == nil {
+		return aparado
+	}
+	return png
 }

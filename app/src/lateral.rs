@@ -341,8 +341,12 @@ impl Lateral {
         let cima = Rect::from_min_max(rect.min + vec2(0.0, 16.0), pos2(rect.right(), pe.top()));
         let mut ui = ui.new_child(UiBuilder::new().id_salt("trilho-cima").max_rect(cima).layout(Layout::top_down(Align::Center)));
         ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
-        let (logo, _) = ui.allocate_exact_size(vec2(TRILHO, 28.0), Sense::hover());
+        // A logo leva para todos os projetos, como o botão do quadro geral.
+        let (logo, resposta) = ui.allocate_exact_size(vec2(TRILHO, 28.0), Sense::click());
         tema::logo(ui.painter(), logo.center(), 12.0);
+        if resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Todos os projetos").clicked() {
+            saida.acoes.push(Acao::Escopo(Escopo::Perfil));
+        }
         ui.add_space(4.0);
 
         // Os quadrados rolam quando não cabem; os botões de baixo ficam.
@@ -735,7 +739,8 @@ impl Lateral {
         };
         let ativo = v.escopo == Escopo::Projeto(projeto.id) && v.lugar == Lugar::Quadro;
         let (linha, seta) = linha_do_projeto(ui, projeto, ativo, tem_filhos.then_some(aberto), &contagem);
-        if seta.is_some_and(|s| s.clicked()) {
+        // A seta ou dois cliques na linha abrem e fecham o ramo; o primeiro clique já leva ao quadro.
+        if seta.is_some_and(|s| s.clicked()) || (tem_filhos && linha.double_clicked()) {
             self.trocar(No::Projeto(projeto.id));
         } else if linha.clicked() {
             saida.acoes.push(Acao::Escopo(Escopo::Projeto(projeto.id)));
@@ -794,7 +799,7 @@ impl Lateral {
         let aberta = com_agentes && self.aberto_no(No::Tarefa(tarefa.id), true);
         let ativa = matches!(v.lugar, Lugar::Tarefa { id, .. } if id == tarefa.id);
         let (linha, seta) = linha_da_tarefa(ui, tarefa, ativa, com_agentes.then_some(aberta));
-        if seta.is_some_and(|s| s.clicked()) {
+        if seta.is_some_and(|s| s.clicked()) || (com_agentes && linha.double_clicked()) {
             self.trocar(No::Tarefa(tarefa.id));
         } else if linha.clicked() {
             saida.acoes.push(Acao::AbrirTarefa { tarefa: tarefa.id, agente: None });
