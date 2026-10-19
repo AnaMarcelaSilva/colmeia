@@ -778,11 +778,13 @@ dependencies = [
  "libc",
  "mascote",
  "png",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "tungstenite",
  "windows-sys 0.60.2",
+ "x11rb",
 ]
 
 [[package]]

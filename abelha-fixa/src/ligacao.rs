@@ -132,9 +132,10 @@ fn perfil(id: i64) -> Result<Perfil, Erro> {
 
 /// "Abrir a Colmeia": pede às janelas abertas que mostrem a tarefa e, se não
 /// houver nenhuma, abre o app já nela. Fora da thread da tela.
-pub fn abrir_colmeia(perfil: i64, tarefa: i64, agente: Option<i64>) {
+/// Com `ditar` (o "responder" falado), a janela liga o ditado na caixa do agente.
+pub fn abrir_colmeia(perfil: i64, tarefa: i64, agente: Option<i64>, ditar: bool) {
     let _ = thread::Builder::new().name("abrir".into()).spawn(move || {
-        let corpo = serde_json::json!({ "tarefa_id": tarefa, "agente_id": agente.unwrap_or(0) }).to_string();
+        let corpo = serde_json::json!({ "tarefa_id": tarefa, "agente_id": agente.unwrap_or(0), "ditar": ditar }).to_string();
         let janelas = canal::pedir_com_corpo("POST", &format!("/v1/perfis/{perfil}/abrir"), Some(&corpo))
             .ok()
             .filter(|(status, _)| *status == 200)
@@ -153,6 +154,9 @@ pub fn abrir_colmeia(perfil: i64, tarefa: i64, agente: Option<i64>) {
             comando.arg("--tarefa").arg(tarefa.to_string());
             if let Some(a) = agente {
                 comando.arg("--agente").arg(a.to_string());
+                if ditar {
+                    comando.arg("--ditar");
+                }
             }
         }
         if let Err(e) = canal::iniciar_solto(comando) {

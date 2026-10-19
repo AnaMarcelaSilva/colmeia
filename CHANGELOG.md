@@ -6,6 +6,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Novo
 
+- **A abelha diz a lista e você responde com o número:** chamada pelo clique, pelo atalho ou pelo nome, a abelha mostra e fala o que importa agora, numerado, primeiro o que espera você, depois o que está trabalhando e os erros ("1. teste: o Claude Code espera você. 2. loja-web: trabalhando."). Em seguida o microfone abre e basta dizer "abrir a um", "responder a um" (abre a tarefa com o ditado já ligado para o agente), "concluir a dois", "enviar para revisão a dois", "rodar a três", "parar a três", "próxima", "repetir" ou "fechar". A abelha entende mesmo com a transcrição um pouco errada e, sem certeza, pergunta de novo uma vez. Concluir e parar continuam pedindo o "sim", agora também falado. Os pedidos com o nome da tarefa ou do projeto ainda valem.
 - **Concluir sem revisor:** a tarefa em Revisão mostra "Concluir" no cartão e no topo dela, e a que tem agente trabalhando ou esperando você mostra "Enviar para revisão". Quando você pede ao Claude Code para concluir ou mandar para revisão, ele mesmo move a tarefa, e o histórico diz que ela foi movida pelo agente a pedido. Ele nunca faz isso sozinho.
 - **Whisper small:** em Ajustes, "Modelo de transcrição" troca o Whisper base pelo small, com 488 MB, mais preciso e mais lento, baixado uma vez e conferido antes de usar. Com só um dos dois no computador, vale ele.
 - **Gravar "Colmeia" com a sua voz e testar o nome:** o nome padrão também aprende com 3 ou 4 gravações suas, somadas ao reconhecimento pronto. "Testar o nome" mostra, enquanto você fala, o quanto aquilo parece o nome e a partir de onde a abelha ouve.
@@ -45,6 +46,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Corrigido
 
+- **A abelha fixa volta com a janela minimizada:** antes ela só reaparecia ao fechar a janela. Agora volta também quando a janela da Colmeia é minimizada ou fica em outra área de trabalho, e some de novo quando a janela volta.
 - **A voz da abelha falava uma vez só depois de parada:** ao voltar a falar, aparecia "O ONNX Runtime não abriu". Os erros da voz agora dizem em português o que houve e o que fazer.
 - **O balão da abelha fixa ficava na tela** vazio depois do tempo dele.
 - **A nota do slide aparece inteira:** passava de 14 linhas e era cortada (com "…" em cima quando o agente tinha respondido um pedido). Agora usa o espaço livre e, se ainda não couber, rola dentro dela; respondido um pedido, começa no fim.

@@ -26,6 +26,8 @@ O programa da abelha fixa usa as mesmas bibliotecas da tela (eframe, tungstenite
 | raw-window-handle | 0.6 | MIT OR Apache-2.0 OR Zlib | O número da janela no X11 (só no Linux) |
 | libc | 0.2 | MIT OR Apache-2.0 | `flock`: uma abelha só por perfil (só no Unix) |
 
+A tela (`colmeia`) também passou a chamar o x11rb e o raw-window-handle, os mesmos de cima e já no binário dela pelo winit, para saber pelos eventos do X11 quando a janela minimiza, volta ou fica em outra área de trabalho ([decisão 0019](decisoes/0019-lista-numerada-e-gramatica-fechada.md)).
+
 ## A voz (`colmeia-voz`)
 
 O ditado, os comandos falados e a voz da abelha ficam num programa à parte ([decisão 0014](decisoes/0014-ditado-em-processo-a-parte.md)): nada disto entra no binário da tela (`cargo tree -p colmeia` não mostra nenhum deles). O núcleo baixa o modelo só com a biblioteca padrão do Go.

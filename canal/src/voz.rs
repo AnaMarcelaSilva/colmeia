@@ -222,9 +222,52 @@ pub struct RespostaNucleo {
     /// A ficha da pergunta que espera "sim".
     #[serde(default)]
     pub confirmar: String,
-    /// A tarefa a abrir.
+    /// A tarefa a abrir e, com `ditar`, o agente em cuja caixa o ditado liga.
     #[serde(default)]
     pub abrir: i64,
+    #[serde(default)]
+    pub agente: i64,
+    #[serde(default)]
+    pub ditar: bool,
+    /// A ficha da lista aberta (vai junto na próxima frase) e a página dela.
+    #[serde(default)]
+    pub sessao: String,
+    #[serde(default)]
+    pub lista: Option<Lista>,
+    /// Depois de mostrar (e falar) a resposta, o microfone abre de novo, com
+    /// este vocabulário para o Whisper (vazio: o do perfil).
+    #[serde(default)]
+    pub ouvir: bool,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+/// A página da lista numerada que a abelha fala quando é chamada.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Lista {
+    #[serde(default)]
+    pub linhas: Vec<String>,
+    #[serde(default)]
+    pub pagina: u32,
+    #[serde(default)]
+    pub paginas: u32,
+    #[serde(default)]
+    pub dica: String,
+}
+
+impl Lista {
+    /// O texto do balão: "Página 1 de 2" (com mais de uma) e os itens, um por linha.
+    pub fn texto(&self, vazia: &str) -> String {
+        let mut linhas = Vec::new();
+        if self.paginas > 1 {
+            linhas.push(format!("Página {} de {}", self.pagina, self.paginas));
+        }
+        if self.linhas.is_empty() {
+            linhas.push(vazia.to_string());
+        }
+        linhas.extend(self.linhas.iter().cloned());
+        linhas.join("\n")
+    }
 }
 
 /// Uma pergunta livre (com IA) pode levar o prazo inteiro do Claude Code no núcleo.
@@ -240,8 +283,18 @@ fn post(caminho: &str, corpo: serde_json::Value) -> Result<RespostaNucleo, Strin
     serde_json::from_str(&texto).map_err(|e| format!("Resposta estranha do núcleo: {e}"))
 }
 
-pub fn comando(perfil: i64, texto: &str) -> Result<RespostaNucleo, String> {
-    post(&format!("/v1/perfis/{perfil}/voz/comando"), serde_json::json!({ "texto": texto }))
+/// A frase dita (ou escrita); com a lista aberta, vai a ficha dela junto.
+pub fn comando(perfil: i64, texto: &str, lista: Option<&str>) -> Result<RespostaNucleo, String> {
+    let mut corpo = serde_json::json!({ "texto": texto });
+    if let Some(l) = lista {
+        corpo["lista"] = l.into();
+    }
+    post(&format!("/v1/perfis/{perfil}/voz/comando"), corpo)
+}
+
+/// Chamar a abelha: o núcleo monta a lista do que importa agora.
+pub fn lista(perfil: i64) -> Result<RespostaNucleo, String> {
+    post(&format!("/v1/perfis/{perfil}/voz/lista"), serde_json::json!({}))
 }
 
 pub fn confirmar(perfil: i64, ficha: &str, sim: bool) -> Result<RespostaNucleo, String> {
@@ -344,6 +397,13 @@ pub struct Conversa {
     falando: bool,
     /// A pergunta no ar (a ficha do "sim").
     pub pergunta: Option<String>,
+    /// A lista aberta: a ficha (vai com a próxima frase) e a página no balão.
+    sessao: Option<String>,
+    lista: Option<Lista>,
+    /// O microfone abre de novo quando a abelha terminar de falar, com este vocabulário.
+    ouvir_depois: Option<String>,
+    /// A última frase foi falada (só a fala reabre o microfone sozinha).
+    falado: bool,
 }
 
 impl Conversa {
@@ -362,7 +422,16 @@ impl Conversa {
             vigiando: false,
             falando: false,
             pergunta: None,
+            sessao: None,
+            lista: None,
+            ouvir_depois: None,
+            falado: false,
         }
+    }
+
+    /// A página da lista aberta (para o balão).
+    pub fn lista(&self) -> Option<&Lista> {
+        self.lista.as_ref()
     }
 
     pub fn fase(&self) -> Fase {
@@ -407,6 +476,58 @@ impl Conversa {
         self.mandar(pedido_de_ouvir(self.perfil, true))?;
         self.fase = Fase::Abrindo;
         Ok(())
+    }
+
+    /// Chamar a abelha (o clique, o atalho ou o nome ouvido): ela mostra e
+    /// fala a lista numerada do que importa agora e, em seguida, o microfone
+    /// abre para o comando ("abrir a um").
+    pub fn chamar(&mut self) {
+        if !matches!(self.fase, Fase::Parada) {
+            return;
+        }
+        self.calar();
+        self.pergunta = None;
+        self.ouvir_depois = None;
+        self.falado = true;
+        self.fase = Fase::Pensando;
+        self.perguntar(lista);
+    }
+
+    /// Abre o microfone para a próxima frase da conversa (depois da lista ou
+    /// de uma pergunta), com o vocabulário que o núcleo mandou.
+    fn ouvir_de_novo(&mut self, prompt: &str) -> Result<(), String> {
+        if !matches!(self.fase, Fase::Parada) {
+            return Ok(());
+        }
+        let mut p = pedido_de_ouvir(self.perfil, true);
+        if !prompt.is_empty() {
+            p["prompt"] = prompt.into();
+        }
+        self.mandar(p)?;
+        self.fase = Fase::Abrindo;
+        Ok(())
+    }
+
+    /// Clicar enquanto a abelha ainda fala a lista: ela cala e o microfone
+    /// abre já. Devolve se havia esse microfone a abrir.
+    pub fn ouvir_agora(&mut self) -> bool {
+        let Some(prompt) = self.ouvir_depois.take() else { return false };
+        self.calar();
+        self.ouvir_de_novo(&prompt).is_ok()
+    }
+
+    /// Fecha a conversa inteira (o x do balão): microfone, voz, pergunta e lista.
+    pub fn encerrar(&mut self) {
+        self.cancelar();
+        self.calar();
+        self.pergunta = None;
+        self.esquecer_lista();
+    }
+
+    fn esquecer_lista(&mut self) {
+        self.sessao = None;
+        self.lista = None;
+        self.ouvir_depois = None;
     }
 
     /// O clique de parar manda: fecha o microfone e transcreve o que ouviu,
@@ -488,13 +609,17 @@ impl Conversa {
     }
 
     /// Fala um texto com a voz da abelha (se ligada).
-    pub fn dizer(&mut self, texto: &str) {
-        if self.falar {
-            let efeito = self.efeito;
-            if self.mandar(serde_json::json!({ "comando": "falar", "texto": texto, "efeito": efeito })).is_err() {
-                self.falando = false;
-            }
+    /// Devolve se o texto foi para a voz (o fim dela chega como `Falou`).
+    pub fn dizer(&mut self, texto: &str) -> bool {
+        if !self.falar {
+            return false;
         }
+        let efeito = self.efeito;
+        let foi = self.mandar(serde_json::json!({ "comando": "falar", "texto": texto, "efeito": efeito })).is_ok();
+        if !foi {
+            self.falando = false;
+        }
+        foi
     }
 
     /// Uma frase escrita (no resumo da abelha) vai ao núcleo como uma falada,
@@ -506,14 +631,20 @@ impl Conversa {
         }
         self.calar();
         self.pergunta = None;
+        self.ouvir_depois = None;
+        self.falado = false;
         self.fase = Fase::Pensando;
-        self.perguntar(move |perfil| comando(perfil, &frase));
+        let lista = self.sessao.clone();
+        self.perguntar(move |perfil| comando(perfil, &frase, lista.as_deref()));
         true
     }
 
     /// Responde à pergunta no ar (o Sim ou o Não clicado).
     pub fn responder(&mut self, sim: bool) {
         let Some(ficha) = self.pergunta.take() else { return };
+        // O microfone aberto esperando o "sim" falado fecha: o clique respondeu.
+        self.cancelar();
+        self.esquecer_lista();
         self.fase = Fase::Pensando;
         self.perguntar(move |perfil| confirmar(perfil, &ficha, sim));
     }
@@ -526,6 +657,7 @@ impl Conversa {
         self.vigiando = false;
         self.falando = false;
         self.pergunta = None;
+        self.esquecer_lista();
     }
 
     /// Pede ao núcleo numa thread (a tela não espera a rede).
@@ -551,13 +683,40 @@ impl Conversa {
             match r {
                 Ok(resposta) => {
                     self.pergunta = (!resposta.confirmar.is_empty()).then(|| resposta.confirmar.clone());
-                    self.dizer(&resposta.texto.clone());
+                    self.seguir_lista(&resposta);
+                    // Com a voz, o microfone espera ela acabar (o `Falou`).
+                    if !self.dizer(&resposta.texto.clone()) {
+                        self.abrir_depois(&mut saidas);
+                    }
                     saidas.push(Saida::Resposta(resposta));
                 }
                 Err(e) => saidas.push(Saida::Erro(e)),
             }
         }
         saidas
+    }
+
+    /// Guarda a lista que veio (ou a esquece, se o núcleo a fechou) e se o
+    /// microfone abre de novo depois desta resposta.
+    fn seguir_lista(&mut self, r: &RespostaNucleo) {
+        if r.sessao.is_empty() {
+            self.sessao = None;
+            self.lista = None;
+        } else {
+            self.sessao = Some(r.sessao.clone());
+            if let Some(l) = &r.lista {
+                self.lista = Some(l.clone());
+            }
+        }
+        self.ouvir_depois = (r.ouvir && self.falado).then(|| r.prompt.clone());
+    }
+
+    /// Abre o microfone pendente; sem conseguir, diz por quê.
+    fn abrir_depois(&mut self, saidas: &mut Vec<Saida>) {
+        let Some(prompt) = self.ouvir_depois.take() else { return };
+        if let Err(e) = self.ouvir_de_novo(&prompt) {
+            saidas.push(Saida::Erro(e));
+        }
     }
 
     fn aplicar(&mut self, r: Resposta) -> Option<Saida> {
@@ -569,8 +728,12 @@ impl Conversa {
                 }
                 None
             }
+            // Ouviu o nome: em vez de ouvir o comando direto, a abelha fala a
+            // lista e o microfone abre depois dela.
             Resposta::Chamado => {
-                self.fase = Fase::Ouvindo;
+                let _ = self.mandar(pedido("cancelar"));
+                self.fase = Fase::Parada;
+                self.chamar();
                 Some(Saida::Chamado)
             }
             Resposta::Transcrevendo { .. } => {
@@ -584,11 +747,19 @@ impl Conversa {
                 }
                 self.fase = Fase::Pensando;
                 let frase = texto.clone();
-                self.perguntar(move |perfil| comando(perfil, &frase));
+                let lista = self.sessao.clone();
+                self.perguntar(move |perfil| comando(perfil, &frase, lista.as_deref()));
                 Some(Saida::Ouvido(texto))
             }
             Resposta::Erro { mensagem } => {
                 self.fase = Fase::Parada;
+                // A voz da abelha falhou: o microfone abre do mesmo jeito.
+                if let Some(prompt) = self.ouvir_depois.take()
+                    && self.ouvir_de_novo(&prompt).is_ok()
+                {
+                    return None;
+                }
+                self.esquecer_lista();
                 Some(Saida::Erro(mensagem))
             }
             Resposta::Vigiando { ligado } => {
@@ -604,6 +775,12 @@ impl Conversa {
             }
             Resposta::Falou => {
                 self.falando = false;
+                let prompt = self.ouvir_depois.take();
+                if let Some(p) = prompt
+                    && let Err(e) = self.ouvir_de_novo(&p)
+                {
+                    return Some(Saida::Erro(e));
+                }
                 Some(Saida::Falando(false))
             }
             Resposta::Amostra { numero, .. } => {
@@ -642,7 +819,15 @@ impl Conversa {
 mod testes {
     use super::*;
 
+    /// Os testes nunca falam com um núcleo de verdade: o canal aponta para
+    /// uma pasta vazia, e os pedidos falham.
     fn conversa() -> Conversa {
+        static SEM_NUCLEO: std::sync::Once = std::sync::Once::new();
+        SEM_NUCLEO.call_once(|| {
+            let vazia = std::env::temp_dir().join(format!("colmeia-canal-teste-{}", std::process::id()));
+            // SAFETY: feito uma vez, antes de qualquer pedido dos testes.
+            unsafe { std::env::set_var("COLMEIA_DIR", vazia) };
+        });
         Conversa::nova(1, Arc::new(|| {}))
     }
 
@@ -681,8 +866,9 @@ mod testes {
         let mut c = conversa();
         assert_eq!(c.aplicar(Resposta::Vigiando { ligado: true }), Some(Saida::Vigiando(true)));
         assert!(c.microfone_aberto() && c.vigiando());
+        // Ouvido o nome, a abelha pede a lista ao núcleo (o microfone abre depois dela).
         assert_eq!(c.aplicar(Resposta::Chamado), Some(Saida::Chamado));
-        assert_eq!(c.fase(), Fase::Ouvindo);
+        assert_eq!(c.fase(), Fase::Pensando);
         assert_eq!(c.aplicar(Resposta::Vigiando { ligado: false }), Some(Saida::Vigiando(false)));
         assert!(!c.vigiando());
     }
@@ -737,8 +923,67 @@ mod testes {
     #[test]
     fn resposta_do_nucleo() {
         let r: RespostaNucleo = serde_json::from_str(r#"{"texto":"Parar o projeto loja-web?","confirmar":"ab12"}"#).unwrap();
-        assert_eq!(r, RespostaNucleo { texto: "Parar o projeto loja-web?".into(), confirmar: "ab12".into(), abrir: 0 });
+        assert_eq!(r, RespostaNucleo { texto: "Parar o projeto loja-web?".into(), confirmar: "ab12".into(), ..Default::default() });
         let r: RespostaNucleo = serde_json::from_str(r#"{"texto":"Abrindo a tarefa Login.","abrir":7}"#).unwrap();
         assert_eq!(r.abrir, 7);
+    }
+
+    fn com_lista(sessao: &str, ouvir: bool) -> RespostaNucleo {
+        serde_json::from_value(serde_json::json!({
+            "texto": "1. teste: o Claude Code espera você.",
+            "sessao": sessao,
+            "lista": { "itens": [], "linhas": ["1. teste: o Claude Code espera você."], "pagina": 1, "paginas": 1, "dica": "Diga abrir a um." },
+            "ouvir": ouvir,
+            "prompt": "Abrir a um."
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_lista_fica_ate_o_nucleo_fechar_e_so_a_fala_reabre_o_microfone() {
+        let mut c = conversa();
+        c.falado = true;
+        c.seguir_lista(&com_lista("f1", true));
+        assert_eq!(c.sessao.as_deref(), Some("f1"));
+        assert_eq!(c.lista().map(|l| l.texto("")), Some("1. teste: o Claude Code espera você.".into()));
+        assert_eq!(c.ouvir_depois.as_deref(), Some("Abrir a um."));
+        // "Não entendi" mantém a lista (vem sem página) e escuta de novo.
+        let de_novo: RespostaNucleo = serde_json::from_str(r#"{"texto":"Não entendi.","sessao":"f1","ouvir":true,"prompt":"Abrir a um."}"#).unwrap();
+        c.seguir_lista(&de_novo);
+        assert!(c.lista().is_some() && c.ouvir_depois.is_some());
+        // Feita a ação, o núcleo fecha a lista.
+        let feito: RespostaNucleo = serde_json::from_str(r#"{"texto":"Abrindo a tarefa teste.","abrir":3}"#).unwrap();
+        c.seguir_lista(&feito);
+        assert!(c.lista().is_none() && c.sessao.is_none() && c.ouvir_depois.is_none());
+        // Escrita, a resposta não abre o microfone.
+        c.falado = false;
+        c.seguir_lista(&com_lista("f2", true));
+        assert!(c.lista().is_some() && c.ouvir_depois.is_none());
+        c.encerrar();
+        assert!(c.lista().is_none() && c.sessao.is_none());
+    }
+
+    #[test]
+    fn texto_da_lista_no_balao() {
+        let l = Lista { linhas: vec!["1. a: trabalhando.".into(), "2. b: espera você.".into()], pagina: 2, paginas: 3, dica: String::new() };
+        assert_eq!(l.texto(""), "Página 2 de 3\n1. a: trabalhando.\n2. b: espera você.");
+        assert_eq!(Lista::default().texto("Nada espera você agora."), "Nada espera você agora.");
+    }
+
+    #[test]
+    fn responder_le_o_agente_e_o_ditado() {
+        let r: RespostaNucleo = serde_json::from_str(r#"{"texto":"Abrindo…","abrir":7,"agente":4,"ditar":true}"#).unwrap();
+        assert_eq!((r.abrir, r.agente, r.ditar, r.ouvir), (7, 4, true, false));
+    }
+
+    #[test]
+    fn chamar_so_parada() {
+        let mut c = conversa();
+        c.fase = Fase::Ouvindo;
+        c.chamar();
+        assert_eq!(c.fase(), Fase::Ouvindo);
+        c.fase = Fase::Parada;
+        c.chamar();
+        assert_eq!(c.fase(), Fase::Pensando);
     }
 }

@@ -51,6 +51,14 @@ func (c *confirmacoes) guardar(perfil int64, a comandovoz.Acao) string {
 	return ficha
 }
 
+// tem diz se há uma pergunta valendo para o perfil.
+func (c *confirmacoes) tem(perfil int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.perfil[perfil]
+	return ok && time.Now().Before(p.expira)
+}
+
 // tirar devolve a pergunta do perfil (e a esquece). Com ficha, só se for
 // aquela; sem ficha, a que estiver no ar ("sim" falado).
 func (c *confirmacoes) tirar(perfil int64, ficha string) (comandovoz.Acao, bool) {
@@ -69,13 +77,24 @@ type respostaVoz struct {
 	Texto string `json:"texto"`
 	// Ficha da pergunta que espera "sim" (clique em Sim ou fala).
 	Confirmar string `json:"confirmar,omitempty"`
-	// A tarefa que a tela deve abrir.
-	Abrir int64 `json:"abrir,omitempty"`
+	// A tarefa que a tela deve abrir e, com Ditar, o agente em cuja caixa o
+	// ditado liga ("responder a um").
+	Abrir  int64 `json:"abrir,omitempty"`
+	Agente int64 `json:"agente,omitempty"`
+	Ditar  bool  `json:"ditar,omitempty"`
+	// A lista aberta (a ficha vai no próximo comando) e a página para o balão.
+	Sessao string    `json:"sessao,omitempty"`
+	Lista  *listaVoz `json:"lista,omitempty"`
+	// Ouvir: depois de mostrar (e falar) a resposta, o microfone abre de
+	// novo, com este vocabulário para o Whisper (vazio: o do perfil).
+	Ouvir  bool   `json:"ouvir,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
 }
 
 func (s *Servidor) rotasComandoVoz(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/perfis/{id}/voz/comando", s.comandoFalado)
 	mux.HandleFunc("POST /v1/perfis/{id}/voz/confirmar", s.confirmarFalado)
+	s.rotasListaVoz(mux)
 }
 
 func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +105,8 @@ func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
 	}
 	var pedido struct {
 		Texto string `json:"texto"`
+		// A ficha da lista aberta: o número dito vale para ela.
+		Lista string `json:"lista"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -105,8 +126,30 @@ func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, dados.ErrInvalido{Motivo: "Os comandos falados estão desligados. Ligue em Ajustes › Voz."})
 		return
 	}
+	if pedido.Lista != "" {
+		sessao, ok := s.listas.pegar(id, pedido.Lista)
+		if !ok {
+			responderJSON(w, respostaVoz{Texto: "Essa lista já não vale. Me chame de novo para ouvir a lista."})
+			return
+		}
+		if resposta, daLista := s.comandoDaLista(r.Context(), perfil, sessao, pedido.Texto); daLista {
+			responderJSON(w, resposta)
+			return
+		}
+	}
 	p := comandovoz.Entender(pedido.Texto, perfil.MascoteNome)
 	switch p.Intencao {
+	case comandovoz.SoNome:
+		// Só o nome: a abelha fala a lista do que importa agora.
+		if perfil.Comandos {
+			resposta, err := s.abrirLista(r.Context(), id)
+			if err != nil {
+				responderErro(w, err)
+				return
+			}
+			responderJSON(w, resposta)
+			return
+		}
 	case comandovoz.Sim:
 		a, valida := s.confirmacoes.tirar(id, "")
 		if !valida {
@@ -133,9 +176,10 @@ func (s *Servidor) comandoFalado(w http.ResponseWriter, r *http.Request) {
 	resposta := comandovoz.Responder(p, q)
 	switch {
 	case resposta.Acao == nil:
-		responderJSON(w, respostaVoz{Texto: resposta.Texto})
+		responderJSON(w, respostaVoz{Texto: resposta.Texto, Ouvir: resposta.Ouvir})
 	case resposta.Confirmar:
-		responderJSON(w, respostaVoz{Texto: resposta.Texto, Confirmar: s.confirmacoes.guardar(id, *resposta.Acao)})
+		// O microfone abre de novo para o "sim" falado.
+		responderJSON(w, respostaVoz{Texto: resposta.Texto, Confirmar: s.confirmacoes.guardar(id, *resposta.Acao), Ouvir: true, Prompt: vocabularioConfirmar})
 	default:
 		responderJSON(w, s.executarFalado(r.Context(), id, *resposta.Acao))
 	}
@@ -191,7 +235,7 @@ func (s *Servidor) executarFalado(ctx context.Context, perfil int64, a comandovo
 			return falhou(err)
 		}
 		return respostaVoz{Texto: a.Feito}
-	case comandovoz.AcaoEncerrar, comandovoz.AcaoAbrir:
+	case comandovoz.AcaoEncerrar, comandovoz.AcaoAbrir, comandovoz.AcaoRevisao, comandovoz.AcaoResponder:
 		_, _, dono, err := s.Banco.Tarefa(ctx, a.TarefaID)
 		if err == nil && dono != perfil {
 			err = dados.ErrNaoEncontrado
@@ -199,11 +243,24 @@ func (s *Servidor) executarFalado(ctx context.Context, perfil int64, a comandovo
 		if err != nil {
 			return falhou(err)
 		}
-		if a.Tipo == comandovoz.AcaoAbrir {
+		switch a.Tipo {
+		case comandovoz.AcaoAbrir:
 			return respostaVoz{Texto: a.Feito, Abrir: a.TarefaID}
+		case comandovoz.AcaoResponder:
+			ag, err := s.Banco.Agente(ctx, a.AgenteID)
+			if err == nil && ag.TarefaID != a.TarefaID {
+				err = dados.ErrNaoEncontrado
+			}
+			if err != nil {
+				return falhou(err)
+			}
+			return respostaVoz{Texto: a.Feito, Abrir: a.TarefaID, Agente: a.AgenteID, Ditar: true}
 		}
-		concluido := "concluido"
-		if _, err := s.Banco.AtualizarTarefa(ctx, a.TarefaID, dados.Mudanca{Coluna: &concluido}, dados.OrigemVoce); err != nil {
+		coluna := "concluido"
+		if a.Tipo == comandovoz.AcaoRevisao {
+			coluna = "revisao"
+		}
+		if _, err := s.Banco.AtualizarTarefa(ctx, a.TarefaID, dados.Mudanca{Coluna: &coluna}, dados.OrigemVoce); err != nil {
 			return falhou(err)
 		}
 		return respostaVoz{Texto: a.Feito}

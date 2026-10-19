@@ -608,6 +608,9 @@ pub enum Evento {
         tarefa_id: i64,
         #[serde(default)]
         agente_id: i64,
+        /// "Responder" falado: o ditado liga na caixa do agente.
+        #[serde(default)]
+        ditar: bool,
     },
     /// Um workspace foi recolhido ou aberto na barra lateral (nesta ou em outra tela).
     #[serde(rename = "workspace.recolhido")]

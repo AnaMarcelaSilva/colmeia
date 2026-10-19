@@ -1,8 +1,9 @@
 //! Os comandos falados na janela: clicar na abelha da barra lateral (ou o
-//! atalho Ctrl+Alt+Espaço) abre o microfone pelo `colmeia-voz`, a frase vai
-//! ao núcleo, que entende e responde, e a resposta aparece num balão ao lado
-//! da abelha (e é falada, com a voz da abelha ligada). O que pede "sim" mostra
-//! Sim e Não. Com a pergunta livre com IA ligada, a frase também pode ser
+//! atalho Ctrl+Alt+Espaço) chama a abelha, que mostra num balão (e fala, com
+//! a voz dela ligada) a lista numerada do que importa agora; em seguida o
+//! microfone abre pelo `colmeia-voz` para o comando ("abrir a um"), a frase
+//! vai ao núcleo, que entende e responde. O que pede "sim" mostra Sim e Não
+//! e abre o microfone para o "sim" falado. Com a pergunta livre com IA ligada, a frase também pode ser
 //! escrita no resumo da abelha (sem microfone), e o que não é comando vai ao
 //! Claude Code pelo núcleo. Tudo desligado por padrão: sem os comandos e sem
 //! a pergunta livre, nada disto abre.
@@ -34,6 +35,8 @@ pub struct Balao {
     pub escrito: bool,
     pub erro: bool,
     pub abrir: Option<i64>,
+    /// A resposta é a própria lista (o rodapé ensina o que dizer).
+    pub de_lista: bool,
     pub ate: f64,
 }
 
@@ -41,6 +44,11 @@ pub struct Balao {
 #[derive(Debug, PartialEq)]
 pub enum Pedido {
     AbrirTarefa(i64),
+    /// "Responder a um": a tarefa aberta no agente, com o ditado ligado na caixa dele.
+    Responder {
+        tarefa: i64,
+        agente: i64,
+    },
 }
 
 #[derive(Default)]
@@ -99,7 +107,8 @@ impl Falada {
         let Some(c) = self.conversa.as_mut() else { return };
         let frase = self.rascunho.trim().to_string();
         if c.escrever(&frase) {
-            self.balao = Some(Balao { texto: String::new(), ouvido: frase, escrito: true, erro: false, abrir: None, ate: agora + PERGUNTA_SEGUNDOS });
+            self.balao =
+                Some(Balao { texto: String::new(), ouvido: frase, escrito: true, erro: false, abrir: None, de_lista: false, ate: agora + PERGUNTA_SEGUNDOS });
             self.rascunho.clear();
         }
     }
@@ -113,19 +122,20 @@ impl Falada {
         self.conversa.as_ref().is_some_and(Conversa::microfone_aberto)
     }
 
-    /// Clique na abelha (ou o atalho): abre o microfone; clicado de novo
-    /// ouvindo, para e transcreve o que ouviu (o clique manda, sem esperar a pausa).
-    pub fn alternar(&mut self, agora: f64) {
+    /// Clique na abelha (ou o atalho): chama a abelha, que fala a lista e
+    /// abre o microfone; clicado de novo ouvindo, para e transcreve o que
+    /// ouviu (o clique manda, sem esperar a pausa).
+    pub fn alternar(&mut self) {
         let Some(c) = self.conversa.as_mut().filter(|_| self.comandos) else { return };
         if matches!(c.fase(), Fase::Abrindo | Fase::Ouvindo) {
             c.parar();
             return;
         }
-        c.calar();
-        if let Err(e) = c.ouvir() {
-            self.balao = Some(Balao { texto: e, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA_SEGUNDOS });
+        if c.ouvir_agora() {
             return;
         }
+        c.encerrar();
+        c.chamar();
         self.balao = None;
     }
 
@@ -149,21 +159,40 @@ impl Falada {
         for s in c.receber() {
             match s {
                 Saida::Ouvido(texto) => {
-                    self.balao = Some(Balao { texto: String::new(), ouvido: texto, escrito: false, erro: false, abrir: None, ate: agora + PERGUNTA_SEGUNDOS });
+                    self.balao = Some(Balao {
+                        texto: String::new(),
+                        ouvido: texto,
+                        escrito: false,
+                        erro: false,
+                        abrir: None,
+                        de_lista: false,
+                        ate: agora + PERGUNTA_SEGUNDOS,
+                    });
                 }
                 Saida::Resposta(r) => {
                     let (ouvido, escrito) = self.balao.as_ref().map(|b| (b.ouvido.clone(), b.escrito)).unwrap_or_default();
-                    let pergunta = !r.confirmar.is_empty();
+                    let espera = !r.confirmar.is_empty() || r.ouvir;
                     let abrir = (r.abrir > 0).then_some(r.abrir);
-                    if let Some(t) = abrir {
-                        pedidos.push(Pedido::AbrirTarefa(t));
+                    match abrir {
+                        Some(tarefa) if r.ditar && r.agente > 0 => pedidos.push(Pedido::Responder { tarefa, agente: r.agente }),
+                        Some(t) => pedidos.push(Pedido::AbrirTarefa(t)),
+                        None => {}
                     }
                     // Uma resposta longa (a pergunta livre) fica o tempo de ler.
-                    let tempo = if pergunta { PERGUNTA_SEGUNDOS } else { RESPOSTA_SEGUNDOS.max(r.texto.chars().count() as f64 / 15.0) };
-                    self.balao = Some(Balao { texto: r.texto, ouvido, escrito, erro: false, abrir, ate: agora + tempo });
+                    let tempo = if espera { PERGUNTA_SEGUNDOS } else { RESPOSTA_SEGUNDOS.max(r.texto.chars().count() as f64 / 15.0) };
+                    let de_lista = r.lista.is_some();
+                    self.balao = Some(Balao { texto: r.texto, ouvido, escrito, erro: false, abrir, de_lista, ate: agora + tempo });
                 }
                 Saida::Erro(e) => {
-                    self.balao = Some(Balao { texto: e, ouvido: String::new(), escrito: false, erro: true, abrir: None, ate: agora + RESPOSTA_SEGUNDOS });
+                    self.balao = Some(Balao {
+                        texto: e,
+                        ouvido: String::new(),
+                        escrito: false,
+                        erro: true,
+                        abrir: None,
+                        de_lista: false,
+                        ate: agora + RESPOSTA_SEGUNDOS,
+                    });
                 }
                 Saida::Chamado | Saida::Vigiando(_) | Saida::Falando(_) | Saida::Amostra(_) | Saida::Aprendido | Saida::Nota { .. } => {}
             }
@@ -175,6 +204,7 @@ impl Falada {
     fn estado(&self) -> Option<(String, bool)> {
         let c = self.conversa.as_ref()?;
         match c.fase() {
+            Fase::Abrindo | Fase::Ouvindo if c.lista().is_some() => Some(("Ouvindo…".into(), false)),
             Fase::Abrindo | Fase::Ouvindo => Some(("Ouvindo… diga o comando.".into(), false)),
             Fase::Transcrevendo => Some(("Entendendo…".into(), false)),
             Fase::Pensando => Some(("Um instante…".into(), false)),
@@ -193,11 +223,27 @@ impl Falada {
         }
         let andamento = self.estado();
         let Some(c) = self.conversa.as_mut() else { return };
-        let (texto, erro, ouvido) = match (&andamento, &self.balao) {
+        let (mut texto, erro, mut ouvido) = match (&andamento, &self.balao) {
             (Some((t, _)), b) => (t.clone(), false, b.as_ref().map(|b| b.ouvido.clone()).unwrap_or_default()),
             (None, Some(b)) => (b.texto.clone(), b.erro, b.ouvido.clone()),
             (None, None) => return,
         };
+        // Com a lista aberta, ela fica no balão; embaixo, o que acontece agora
+        // (ouvindo, a resposta curta) ou o que dá para dizer.
+        let mut rodape = None;
+        if let Some(l) = c.lista() {
+            let agora_diz = match (&andamento, &self.balao) {
+                (Some((t, _)), _) => format!("{t} {}", l.dica),
+                (None, Some(b)) if !b.de_lista => b.texto.clone(),
+                _ => l.dica.clone(),
+            };
+            texto = l.texto("Nada espera você agora.");
+            rodape = Some(agora_diz);
+            // O que foi ouvido fica só na resposta (para ver o que a abelha entendeu).
+            if self.balao.as_ref().is_none_or(|b| b.de_lista) || andamento.is_some() {
+                ouvido.clear();
+            }
+        }
         let escrito = self.balao.as_ref().is_some_and(|b| b.escrito);
         let pergunta = andamento.is_none() && c.pergunta.is_some();
         let mut fechar = false;
@@ -219,6 +265,10 @@ impl Falada {
                 });
                 ui.add_space(4.0);
                 ui.label(RichText::new(&texto).size(13.5).color(if erro { cores().erro } else { cores().texto }));
+                if let Some(r) = &rodape {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(r).size(11.5).color(cores().suave));
+                }
                 if !ouvido.is_empty() {
                     ui.add_space(4.0);
                     let quem = if escrito { "Você escreveu" } else { "Você disse" };
@@ -242,9 +292,7 @@ impl Falada {
             c.responder(sim);
             self.balao = None;
         } else if fechar {
-            c.cancelar();
-            c.calar();
-            c.pergunta = None;
+            c.encerrar();
             self.balao = None;
         }
         // Sem animação: um quadro só, na hora de sumir.
@@ -277,7 +325,7 @@ mod testes {
         let mut f = Falada::default();
         f.ajustar(Some(&perfil), &egui::Context::default());
         assert!(f.ligada() && !f.ouve());
-        f.alternar(0.0);
+        f.alternar();
         assert!(!f.microfone_aberto());
         // Sem texto, nada vai ao núcleo.
         f.rascunho = "   ".into();
@@ -291,7 +339,7 @@ mod testes {
     fn desligada_nao_faz_nada() {
         let mut f = Falada::default();
         assert!(!f.ligada() && !f.microfone_aberto());
-        f.alternar(0.0);
+        f.alternar();
         assert!(f.receber(0.0).is_empty());
     }
 }

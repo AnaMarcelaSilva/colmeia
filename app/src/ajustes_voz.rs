@@ -137,7 +137,7 @@ pub fn mostrar(ui: &mut egui::Ui, d: &mut AjustesVoz) -> Resultado {
     tema::cabecalho(
         ui,
         "Comandos falados e voz da abelha",
-        "Fale com a abelha para rodar e parar projetos, abrir e encerrar tarefas e saber o que espera por você. Os comandos rodam neste computador, sem tokens, e o áudio não é gravado.",
+        "Chame a abelha e ela diz, numerada, o que espera você e o que está trabalhando; responda com o número para abrir, responder ou concluir. Os comandos rodam neste computador, sem tokens, e o áudio não é gravado.",
     );
     egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
         comandos(ui, d);
@@ -166,7 +166,7 @@ fn comandos(ui: &mut egui::Ui, d: &mut AjustesVoz) {
         ui,
         "Comandos falados",
         &format!(
-            "Clique na abelha (ou {}) e fale: \u{201c}rodar a loja web\u{201d}, \u{201c}parar…\u{201d}, \u{201c}abrir a tarefa…\u{201d}, \u{201c}encerrar a tarefa…\u{201d}, \u{201c}como está a tarefa…?\u{201d} ou \u{201c}o que espera por mim?\u{201d}. O microfone fecha sozinho na pausa. Parar e encerrar pedem confirmação. O resumo da abelha fica no botão direito.",
+            "Clique na abelha (ou {}): ela mostra e fala a lista do que importa agora (\u{201c}1. teste: o Claude Code espera você\u{201d}) e o microfone abre. Diga o pedido com o número: \u{201c}abrir a um\u{201d}, \u{201c}responder a um\u{201d} (abre com o ditado ligado), \u{201c}concluir a dois\u{201d}, \u{201c}enviar para revisão a dois\u{201d}, \u{201c}rodar a três\u{201d} ou \u{201c}parar a três\u{201d} (o projeto da tarefa), \u{201c}próxima\u{201d}, \u{201c}repetir\u{201d} ou \u{201c}fechar\u{201d}. Os pedidos com o nome (\u{201c}rodar a loja web\u{201d}) também valem. Concluir e parar pedem confirmação. O resumo da abelha fica no botão direito.",
             crate::falada::ATALHO
         ),
     );
@@ -279,7 +279,7 @@ fn ouvir_o_nome(ui: &mut egui::Ui, d: &mut AjustesVoz) -> bool {
         ui,
         "Ouvir o nome (opcional)",
         &format!(
-            "A abelha fixa fica ouvindo \u{201c}{nome}\u{201d} para abrir o microfone sem clique: diga o nome e o comando. O microfone fica aberto o tempo todo, com a abelha de fone (o microfone aceso), e o som só passa pela memória."
+            "A abelha fixa fica ouvindo \u{201c}{nome}\u{201d} para ser chamada sem clique: diga o nome, ouça a lista e diga o pedido com o número. O microfone fica aberto o tempo todo, com a abelha de fone (o microfone aceso), e o som só passa pela memória."
         ),
     );
     let Some(n) = d.nome.clone() else {

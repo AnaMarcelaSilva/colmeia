@@ -108,6 +108,7 @@ type Servidor struct {
 	kokoro   *pacoteVoz
 	// A pergunta de cada perfil esperando o "sim" (veja comandovoz.go).
 	confirmacoes confirmacoes
+	listas       listas
 	// A pergunta livre com IA de cada perfil em andamento (veja pergunta.go).
 	perguntando perguntando
 }

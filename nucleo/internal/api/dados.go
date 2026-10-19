@@ -223,6 +223,8 @@ func (s *Servidor) pedirAbertura(w http.ResponseWriter, r *http.Request) {
 	var pedido struct {
 		TarefaID int64 `json:"tarefa_id"`
 		AgenteID int64 `json:"agente_id"`
+		// Ditar: o "responder" falado; a janela liga o ditado na caixa do agente.
+		Ditar bool `json:"ditar"`
 	}
 	if err := ler(r, &pedido); err != nil {
 		responderErro(w, err)
@@ -259,7 +261,7 @@ func (s *Servidor) pedirAbertura(w http.ResponseWriter, r *http.Request) {
 	}
 	janelas := s.Avisos.Janelas(id)
 	if janelas > 0 {
-		s.Avisos.Publicar(id, map[string]any{"tipo": "tela.abrir", "tarefa_id": pedido.TarefaID, "agente_id": pedido.AgenteID})
+		s.Avisos.Publicar(id, map[string]any{"tipo": "tela.abrir", "tarefa_id": pedido.TarefaID, "agente_id": pedido.AgenteID, "ditar": pedido.Ditar && pedido.AgenteID != 0})
 	}
 	responderJSON(w, map[string]any{"janelas": janelas})
 }

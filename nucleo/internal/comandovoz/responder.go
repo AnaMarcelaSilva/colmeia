@@ -53,6 +53,9 @@ const (
 	AcaoParar    TipoAcao = "parar"
 	AcaoEncerrar TipoAcao = "encerrar"
 	AcaoAbrir    TipoAcao = "abrir"
+	AcaoRevisao  TipoAcao = "revisao"
+	// AcaoResponder abre a tarefa com o ditado ligado para o agente.
+	AcaoResponder TipoAcao = "responder"
 )
 
 // Acao é o que a API executa: na hora ou depois do "sim".
@@ -60,6 +63,7 @@ type Acao struct {
 	Tipo       TipoAcao
 	ExecucaoID int64
 	TarefaID   int64
+	AgenteID   int64
 	// Feito é a frase para quando a ação deu certo.
 	Feito string
 }
@@ -70,6 +74,8 @@ type Resposta struct {
 	Texto     string
 	Acao      *Acao
 	Confirmar bool
+	// Ouvir: a resposta pede outra frase (o microfone abre de novo depois dela).
+	Ouvir bool
 }
 
 // Ajuda é o que a abelha diz quando não entende.
@@ -303,7 +309,7 @@ func qualExecucao(dito string, q Quadro) (Execucao, Projeto, bool, *Resposta) {
 			for _, e := range p.Execucoes {
 				ns = append(ns, e.Nome)
 			}
-			return Execucao{}, p, false, &Resposta{Texto: fmt.Sprintf("O projeto %s tem %s configurações: %s. Diga qual, por exemplo: %s.", p.Nome, numero(len(ns), false), lista(ns), ns[0])}
+			return Execucao{}, p, false, &Resposta{Texto: fmt.Sprintf("O projeto %s tem %s configurações: %s. Diga qual, por exemplo: %s.", p.Nome, numero(len(ns), true), lista(ns), ns[0])}
 		}
 	}
 	if !temExec {

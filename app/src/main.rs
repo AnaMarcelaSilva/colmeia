@@ -32,6 +32,7 @@ mod tarefa;
 mod teclas;
 mod tema;
 mod terminal;
+mod visivel;
 mod voz;
 
 use std::collections::{HashMap, HashSet};
@@ -223,6 +224,10 @@ struct Colmeia {
     sem_abelha: bool,
     /// A janela estava minimizada no último quadro (o núcleo avisa a abelha fixa).
     minimizada: bool,
+    /// No X11 a visibilidade vem de uma thread que escuta a janela (o egui
+    /// não tem quadro ao minimizar): `Some(true)` com ela, `None` antes de tentar.
+    vigia_janela: Option<bool>,
+    perfil_atual: visivel::PerfilAtual,
     tema: tema::Escolha,
     favo: tema::Favo,
     gradiente: tema::Gradiente,
@@ -239,7 +244,7 @@ struct Colmeia {
     primeira_carga: bool,
     /// A tarefa (e o agente) pedida na linha de comando pela abelha fixa,
     /// aberta quando o primeiro retrato chegar.
-    abrir_ao_carregar: Option<(i64, Option<i64>)>,
+    abrir_ao_carregar: Option<(i64, Option<i64>, bool)>,
     registro: registro::Registro,
     /// A apresentação da daily ou da sprint, por cima de tudo (a tela de
     /// baixo fica guardada para a volta).
@@ -356,6 +361,8 @@ impl Colmeia {
             quadro: quadro::Quadro::default(),
             sem_abelha: std::env::var("COLMEIA_SEM_ABELHA").is_ok_and(|v| v == "1"),
             minimizada: false,
+            vigia_janela: None,
+            perfil_atual: Default::default(),
             tema: escolha,
             favo: tema::Favo::default(),
             gradiente: tema::Gradiente::default(),
@@ -420,7 +427,7 @@ impl Colmeia {
             // Aberta pela abelha fixa: entra direto no perfil e abre a tarefa.
             if let Some(perfil) = pedido.perfil.and_then(|id| api::perfis().ok()?.into_iter().find(|p| p.id == id)) {
                 app.entrar(perfil, &cc.egui_ctx);
-                app.abrir_ao_carregar = pedido.tarefa.map(|t| (t, pedido.agente));
+                app.abrir_ao_carregar = pedido.tarefa.map(|t| (t, pedido.agente, pedido.ditar));
             }
             return app;
         }
@@ -582,8 +589,11 @@ impl Colmeia {
                         self.primeira_carga = false;
                         self.escopo = self.modelo.projetos.first().map_or(Escopo::Perfil, |p| Escopo::Projeto(p.id));
                         self.carregar_branches();
-                        if let Some((tarefa, agente)) = self.abrir_ao_carregar.take() {
+                        if let Some((tarefa, agente, ditar)) = self.abrir_ao_carregar.take() {
                             self.abrir_tarefa(tarefa, agente);
+                            if ditar {
+                                self.ditar_na_tarefa(tarefa, ctx);
+                            }
                         }
                     }
                     if let Escopo::Projeto(id) = self.escopo
@@ -656,8 +666,11 @@ impl Colmeia {
                             api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() },
                         );
                     }
-                    if let dados::Evento::TelaAbrir { tarefa_id, agente_id, .. } = &e {
+                    if let dados::Evento::TelaAbrir { tarefa_id, agente_id, ditar, .. } = &e {
                         self.atender_abertura(*tarefa_id, *agente_id, ctx);
+                        if *ditar && *tarefa_id != 0 {
+                            self.ditar_na_tarefa(*tarefa_id, ctx);
+                        }
                     }
                     if let dados::Evento::LousaMudou { lousa_id, dono, elementos, removidos, agente_id, .. } = &e {
                         self.lousa_mudou(*lousa_id, *dono, elementos.clone(), removidos, *agente_id, agora);
@@ -1873,12 +1886,24 @@ impl Colmeia {
     fn receber_falada(&mut self, ctx: &egui::Context, agora: f64) {
         if self.falada.ouve() && self.dialogo.is_none() && ctx.input_mut(|i| falada::Falada::tirar_atalho(&mut i.events)) {
             self.abelha.resumo_aberto = false;
-            self.falada.alternar(agora);
+            self.falada.alternar();
         }
         for pedido in self.falada.receber(agora) {
             match pedido {
                 falada::Pedido::AbrirTarefa(t) => self.abrir_tarefa(t, None),
+                falada::Pedido::Responder { tarefa, agente } => {
+                    self.abrir_tarefa(tarefa, Some(agente));
+                    self.ditar_na_tarefa(tarefa, ctx);
+                }
             }
+        }
+    }
+
+    /// "Responder" pela voz: o ditado liga na caixa da tarefa aberta (com o
+    /// ditado desligado no perfil, a tarefa só abre).
+    fn ditar_na_tarefa(&mut self, tarefa: i64, ctx: &egui::Context) {
+        if self.perfil.as_ref().is_some_and(|p| p.ditado) && !self.ditado.estado().ouvindo() {
+            self.alternar_ditado(tarefa, false, ctx);
         }
     }
 
@@ -2066,7 +2091,7 @@ impl Colmeia {
                 // Com os comandos falados, o clique é para falar; o resumo fica no botão direito.
                 Acao::Abelha if self.falada.ouve() => {
                     self.abelha.resumo_aberto = false;
-                    self.falada.alternar(ctx.input(|i| i.time));
+                    self.falada.alternar();
                     abelha_clicada = true;
                 }
                 Acao::Abelha | Acao::ResumoDaAbelha => {
@@ -2992,12 +3017,16 @@ fn formatar_vazao(b: u64) -> String {
 }
 
 impl eframe::App for Colmeia {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let agora = ui.input(|i| i.time);
         self.medir(agora);
-        // Minimizar ou voltar chega como evento da janela (há um quadro nessa hora).
+        self.perfil_atual.store(self.perfil.as_ref().map_or(0, |p| p.id), std::sync::atomic::Ordering::Relaxed);
+        if self.vigia_janela.is_none() {
+            self.vigia_janela = Some(visivel::vigiar(frame, self.perfil_atual.clone()).is_ok());
+        }
+        // Fora do X11, minimizar ou voltar chega como evento da janela (há um quadro nessa hora).
         let minimizada = ui.input(|i| i.viewport().minimized.unwrap_or(false));
-        if minimizada != self.minimizada {
+        if self.vigia_janela == Some(false) && minimizada != self.minimizada {
             self.minimizada = minimizada;
             if let Some(p) = &self.perfil {
                 eventos::avisar_minimizada(p.id, minimizada);
@@ -3427,13 +3456,15 @@ fn main() -> eframe::Result {
     eframe::run_native("colmeia", opcoes, Box::new(move |cc| Ok(Box::new(Colmeia::new(cc, problema, pedido)))))
 }
 
-/// `--perfil N [--tarefa M [--agente A]]`: a abelha fixa abre a Colmeia já
-/// numa tarefa quando não há janela aberta. O resto é ignorado.
+/// `--perfil N [--tarefa M [--agente A] [--ditar]]`: a abelha fixa abre a
+/// Colmeia já numa tarefa quando não há janela aberta (com o ditado ligado,
+/// no "responder" falado). O resto é ignorado.
 #[derive(Default, Debug, PartialEq)]
 struct PedidoDeAbertura {
     perfil: Option<i64>,
     tarefa: Option<i64>,
     agente: Option<i64>,
+    ditar: bool,
 }
 
 impl PedidoDeAbertura {
@@ -3445,6 +3476,10 @@ impl PedidoDeAbertura {
                 "--perfil" => &mut pedido.perfil,
                 "--tarefa" => &mut pedido.tarefa,
                 "--agente" => &mut pedido.agente,
+                "--ditar" => {
+                    pedido.ditar = true;
+                    continue;
+                }
                 _ => continue,
             };
             *campo = argumentos.next_if(|v| v.parse::<i64>().is_ok_and(|n| n > 0)).and_then(|v| v.parse().ok());
@@ -3454,6 +3489,7 @@ impl PedidoDeAbertura {
         }
         if pedido.tarefa.is_none() {
             pedido.agente = None;
+            pedido.ditar = false;
         }
         pedido
     }
@@ -3468,14 +3504,16 @@ mod testes {
     #[test]
     fn pedido_de_abertura_pela_linha_de_comando() {
         let ler = |linha: &str| PedidoDeAbertura::da_linha(linha.split_whitespace().map(String::from));
-        assert_eq!(ler("--perfil 2 --tarefa 7 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: Some(7), agente: Some(3) });
-        assert_eq!(ler("--perfil 2"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        assert_eq!(ler("--perfil 2 --tarefa 7 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: Some(7), agente: Some(3), ditar: false });
+        assert_eq!(ler("--perfil 2"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None, ditar: false });
         // Sem perfil, nada; agente sem tarefa, só o perfil; números estranhos são ignorados.
         assert_eq!(ler("--tarefa 7"), PedidoDeAbertura::default());
-        assert_eq!(ler("--perfil 2 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        assert_eq!(ler("--perfil 2 --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None, ditar: false });
         assert_eq!(ler("--perfil -1 --tarefa x"), PedidoDeAbertura::default());
-        assert_eq!(ler("--perfil 2 --tarefa --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None });
+        assert_eq!(ler("--perfil 2 --tarefa --agente 3"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None, ditar: false });
         assert_eq!(ler(""), PedidoDeAbertura::default());
+        assert_eq!(ler("--perfil 2 --tarefa 7 --agente 3 --ditar"), PedidoDeAbertura { perfil: Some(2), tarefa: Some(7), agente: Some(3), ditar: true });
+        assert_eq!(ler("--perfil 2 --ditar"), PedidoDeAbertura { perfil: Some(2), tarefa: None, agente: None, ditar: false });
     }
 
     #[test]

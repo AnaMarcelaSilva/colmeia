@@ -316,18 +316,30 @@ pub fn balao(ui: &mut Ui, rect: Rect, nome: &str, aviso: &Aviso, resta: f32) -> 
 
 const ALTURA_BALAO_VOZ: f32 = 128.0;
 /// A resposta da pergunta livre pode ser longa: o balão cresce até estas linhas.
-const LINHAS_BALAO_VOZ: usize = 9;
+const LINHAS_BALAO_VOZ: usize = 12;
 const ALTURA_LINHA: f32 = 18.0;
 /// Quantas letras cabem numa linha do balão, por alto (só para a altura).
 const LETRAS_POR_LINHA: usize = 44;
 
-fn linhas_da_resposta(texto: &str) -> usize {
-    texto.chars().count().div_ceil(LETRAS_POR_LINHA).clamp(2, LINHAS_BALAO_VOZ)
+/// O rodapé (letra menor) cabe mais letras por linha.
+const LETRAS_POR_LINHA_RODAPE: usize = 52;
+const ALTURA_LINHA_RODAPE: f32 = 15.0;
+
+/// As linhas do texto, por alto: cada linha dele (a lista vem uma por item)
+/// quebra a cada `letras`.
+fn linhas_de(texto: &str, letras: usize) -> usize {
+    texto.split('\n').map(|l| l.chars().count().div_ceil(letras).max(1)).sum()
 }
 
-/// A altura do balão da voz para a resposta: duas linhas, ou mais se ela for longa.
-pub fn altura_balao_voz(texto: &str) -> f32 {
-    ALTURA_BALAO_VOZ + (linhas_da_resposta(texto) - 2) as f32 * ALTURA_LINHA
+fn linhas_da_resposta(texto: &str) -> usize {
+    linhas_de(texto, LETRAS_POR_LINHA).clamp(2, LINHAS_BALAO_VOZ)
+}
+
+/// A altura do balão da voz: a resposta (ou a lista) em duas linhas ou mais
+/// e, com a lista, o rodapé (no lugar do que foi ouvido) em uma ou mais.
+pub fn altura_balao_voz(texto: &str, rodape: &str) -> f32 {
+    let extra = if rodape.is_empty() { 0.0 } else { (linhas_de(rodape, LETRAS_POR_LINHA_RODAPE) - 1) as f32 * ALTURA_LINHA_RODAPE };
+    ALTURA_BALAO_VOZ + (linhas_da_resposta(texto) - 2) as f32 * ALTURA_LINHA + extra
 }
 
 /// O que o balão da voz pede.
@@ -341,6 +353,8 @@ pub enum PedidoVoz {
 /// O que a abelha está fazendo com o comando falado, ou a resposta.
 pub struct Fala<'a> {
     pub texto: &'a str,
+    /// Embaixo da lista: o que acontece agora ou o que dá para dizer.
+    pub rodape: &'a str,
     pub ouvido: &'a str,
     /// A frase foi escrita no resumo, não falada.
     pub escrito: bool,
@@ -374,7 +388,11 @@ pub fn balao_voz(ui: &mut Ui, rect: Rect, nome: &str, f: &Fala) -> Option<Pedido
     // O que foi dito vem logo abaixo da resposta (a altura do balão é estimada antes).
     let fim = dentro.top() + 22.0 + g.size().y.max(2.0 * ALTURA_LINHA);
     ui.painter().galley(pos2(dentro.left(), dentro.top() + 22.0), g, TEXTO);
-    if !f.ouvido.is_empty() {
+    if !f.rodape.is_empty() {
+        let job = egui::text::LayoutJob::simple(f.rodape.to_owned(), FontId::proportional(11.5), SUAVE, largura);
+        let g = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(dentro.left(), fim + 4.0), g, SUAVE);
+    } else if !f.ouvido.is_empty() {
         let quem = if f.escrito { "Você escreveu" } else { "Você disse" };
         let y = fim + 4.0;
         linha(ui, pos2(dentro.left(), y), &format!("{quem}: \u{201c}{}\u{201d}", f.ouvido), FontId::proportional(11.5), SUAVE, largura);
