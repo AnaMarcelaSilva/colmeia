@@ -9,6 +9,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 - **Notas resumidas:** cada nota mostra o começo, com negrito e código desenhados em vez dos símbolos, e "Ver tudo" abre o resto. As sugestões dos agentes continuam inteiras, para você ler antes de aprovar.
 - **Trocar de workspace leva a página junto:** clicar em outro quadrado do trilho mostra a mesma página dele (a lousa ou o conhecimento) ou o quadro dele, sem ficar no workspace anterior.
 - **Árvore da barra lateral mais clara:** todo projeto tem o mesmo peso, aberto ou não, as tarefas entram mais e uma guia desce do projeto até o que é dele, com espaço entre um projeto e outro.
+- **Cartão da abelha fixa mais caprichado:** a mesma fonte da Colmeia, botões com tamanho e cantos iguais, "Desafixar" mais discreto, a tarefa em destaque alinhada com o botão dela e um fio separando os botões do resto.
 
 ### Novo
 

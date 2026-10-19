@@ -2,19 +2,27 @@
 //! do resumo e o balão. Sempre escuros, com a borda roxa da marca: ficam por
 //! cima de qualquer janela, em qualquer tema.
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use std::sync::Arc;
+
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 use crate::resumo::{Aviso, Contagem, Tipo};
 
 pub const FUNDO: Color32 = Color32::from_rgba_premultiplied(0x16, 0x14, 0x1f, 0xf5);
 const BORDA: Color32 = Color32::from_rgb(0x3a, 0x35, 0x50);
+const BORDA_CLARA: Color32 = Color32::from_rgb(0x5a, 0x55, 0x6e);
 const DESTAQUE: Color32 = Color32::from_rgb(0xae, 0x8f, 0xf7);
+const DESTAQUE_CLARO: Color32 = Color32::from_rgb(0xc0, 0xa7, 0xfa);
 const TEXTO: Color32 = Color32::from_rgb(0xec, 0xe9, 0xf5);
 const SUAVE: Color32 = Color32::from_rgb(0xa2, 0x9d, 0xb5);
 const ERRO: Color32 = Color32::from_rgb(0xf4, 0x70, 0x7c);
 const ALERTA: Color32 = Color32::from_rgb(0xf1, 0xb6, 0x5f);
 const OK: Color32 = Color32::from_rgb(0x6f, 0xd4, 0x9b);
-const RAIO: u8 = 14;
+const RAIO: u8 = 12;
+const RAIO_BOTAO: u8 = 8;
+/// A margem de dentro do resumo.
+const MARGEM: f32 = 16.0;
+const ALTURA_DESTAQUE: f32 = 54.0;
 
 pub const LARGURA_CARTAO: f32 = 320.0;
 
@@ -37,19 +45,37 @@ pub fn altura_balao_medida(ctx: &egui::Context, aviso: &Aviso) -> f32 {
         job.wrap.max_rows = 2;
         ctx.fonts_mut(|f| f.layout_job(job)).rows.len().clamp(1, 2)
     };
-    let titulo = medir(&aviso.titulo, FontId::proportional(14.0));
+    let titulo = medir(&aviso.titulo, forte(14.0));
     let detalhe = (!aviso.detalhe.trim().is_empty()).then(|| medir(&aviso.detalhe, FontId::proportional(12.5)));
     altura_com(titulo, detalhe)
 }
 
 /// A altura do resumo: com ou sem a tarefa em destaque e a caixa para escrever à abelha.
+/// Cabeçalho e contagem (60), o meio, o fio (16 + 1 + 12) e os botões com a margem de baixo.
 pub fn altura_resumo(com_destaque: bool, com_caixa: bool) -> f32 {
-    let base = if com_destaque { 196.0 } else { 150.0 };
-    if com_caixa { base + ALTURA_CAIXA } else { base }
+    let meio = if com_destaque { ALTURA_DESTAQUE } else { 18.0 };
+    let caixa = if com_caixa { 10.0 + ALTURA_CAIXA } else { 0.0 };
+    MARGEM + 60.0 + meio + caixa + 29.0 + ALTURA_BOTAO + 12.0
 }
 
 /// A caixa do resumo para escrever à abelha (com os comandos ou a pergunta livre).
-const ALTURA_CAIXA: f32 = 40.0;
+const ALTURA_CAIXA: f32 = 34.0;
+
+/// A mesma Inter da Colmeia, regular e seminegrito. As fontes do egui ficam
+/// de reserva para os símbolos que ela não tem.
+pub fn instalar_fontes(ctx: &egui::Context) {
+    let mut fontes = egui::FontDefinitions::default();
+    fontes.font_data.insert("inter".into(), Arc::new(egui::FontData::from_static(include_bytes!("../../app/fontes/Inter-Regular.ttf"))));
+    fontes.font_data.insert("inter-forte".into(), Arc::new(egui::FontData::from_static(include_bytes!("../../app/fontes/Inter-SemiBold.ttf"))));
+    fontes.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
+    let reserva = fontes.families[&FontFamily::Proportional].clone();
+    fontes.families.insert(FontFamily::Name("forte".into()), std::iter::once("inter-forte".to_owned()).chain(reserva).collect());
+    ctx.set_fonts(fontes);
+}
+
+fn forte(tamanho: f32) -> FontId {
+    FontId::new(tamanho, FontFamily::Name("forte".into()))
+}
 
 fn cor(tipo: Tipo) -> Color32 {
     match tipo {
@@ -114,14 +140,40 @@ fn cartao(pintor: &egui::Painter, rect: Rect, borda: Color32) {
     pintor.rect(rect, CornerRadius::same(RAIO), FUNDO, Stroke::new(1.0, borda), StrokeKind::Inside);
 }
 
-fn botao(ui: &mut Ui, texto: &str, principal: bool) -> egui::Response {
-    let (fundo, letra, borda) = if principal { (DESTAQUE, Color32::from_rgb(0x16, 0x12, 0x24), DESTAQUE) } else { (Color32::TRANSPARENT, TEXTO, BORDA) };
-    let botao = egui::Button::new(egui::RichText::new(texto).color(letra).size(13.0))
-        .fill(fundo)
-        .stroke(Stroke::new(1.0, borda))
-        .corner_radius(CornerRadius::same(16))
-        .min_size(vec2(64.0, ALTURA_BOTAO));
-    ui.add(botao).on_hover_cursor(egui::CursorIcon::PointingHand)
+#[derive(Clone, Copy, PartialEq)]
+enum Estilo {
+    /// Cheio, na cor da marca: a ação principal.
+    Principal,
+    /// Um fundo claro e baixo.
+    Secundario,
+    /// Só o texto, com fundo ao passar o mouse.
+    Discreto,
+}
+
+fn largura_botao(ui: &Ui, texto: &str) -> f32 {
+    let g = ui.painter().layout_no_wrap(texto.to_owned(), forte(13.0), Color32::PLACEHOLDER);
+    (g.size().x + 28.0).max(64.0).round()
+}
+
+/// Um botão desenhado aqui: 14 px de cada lado do texto e os cantos de 8.
+fn botao(ui: &mut Ui, texto: &str, estilo: Estilo, altura: f32) -> egui::Response {
+    let largura = largura_botao(ui, texto);
+    let (rect, r) = ui.allocate_exact_size(vec2(largura, altura), Sense::click());
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let em_cima = r.hovered();
+    let (fundo, letra) = match estilo {
+        Estilo::Principal => (if em_cima { DESTAQUE_CLARO } else { DESTAQUE }, TINTA_ESCURA),
+        Estilo::Secundario => (Color32::from_white_alpha(if em_cima { 26 } else { 14 }), TEXTO),
+        Estilo::Discreto => (if em_cima { Color32::from_white_alpha(14) } else { Color32::TRANSPARENT }, if em_cima { TEXTO } else { SUAVE }),
+    };
+    let pintor = ui.painter();
+    pintor.rect_filled(rect, CornerRadius::same(RAIO_BOTAO), fundo);
+    if r.has_focus() {
+        pintor.rect_stroke(rect, CornerRadius::same(RAIO_BOTAO), Stroke::new(1.5, DESTAQUE_CLARO), StrokeKind::Outside);
+    }
+    let g = pintor.layout_no_wrap(texto.to_owned(), forte(13.0), Color32::PLACEHOLDER);
+    pintor.galley((rect.center() - g.size() / 2.0).round(), g, letra);
+    r
 }
 
 /// O "x" de fechar no canto do cartão (28 px de área para o clique).
@@ -163,15 +215,15 @@ pub enum Pedido {
 pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, destaque: Option<&Aviso>, rascunho: Option<&mut String>) -> Option<Pedido> {
     let mut pedido = None;
     cartao(ui.painter(), rect, BORDA);
-    let dentro = rect.shrink(14.0);
+    let dentro = rect.shrink(MARGEM);
     let largura = dentro.width();
-    linha(ui, dentro.left_top(), nome, FontId::proportional(14.5), TEXTO, largura - 30.0);
-    if fechar(ui, pos2(dentro.right() - 6.0, dentro.top() + 9.0), egui::Id::new("fechar-resumo")) {
+    linha(ui, dentro.left_top(), nome, forte(14.5), TEXTO, largura - 32.0);
+    if fechar(ui, pos2(dentro.right() - 8.0, dentro.top() + 9.0), egui::Id::new("fechar-resumo")) {
         pedido = Some(Pedido::Fechar);
     }
 
-    // "2 esperam você · 1 trabalhando · 0 com erro", cada número na cor dele.
-    let y = dentro.top() + 30.0;
+    // "2 esperam você · 1 trabalhando · 0 com erro", o número na cor dele quando passa de zero.
+    let y = dentro.top() + 28.0;
     if ligada {
         let partes = [
             (c.esperam, if c.esperam == 1 { "espera você" } else { "esperam você" }, ALERTA),
@@ -181,9 +233,10 @@ pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, de
         let mut job = egui::text::LayoutJob::default();
         for (i, (n, texto, cor)) in partes.into_iter().enumerate() {
             if i > 0 {
-                job.append(" · ", 0.0, egui::TextFormat::simple(FontId::proportional(12.5), SUAVE));
+                job.append("  ·  ", 0.0, egui::TextFormat::simple(FontId::proportional(12.5), BORDA_CLARA));
             }
-            job.append(&n.to_string(), 0.0, egui::TextFormat::simple(FontId::proportional(12.5), if n > 0 { cor } else { SUAVE }));
+            let numero = if n > 0 { egui::TextFormat::simple(forte(12.5), cor) } else { egui::TextFormat::simple(FontId::proportional(12.5), SUAVE) };
+            job.append(&n.to_string(), 0.0, numero);
             job.append(&format!(" {texto}"), 0.0, egui::TextFormat::simple(FontId::proportional(12.5), SUAVE));
         }
         let g = ui.painter().layout_job(job);
@@ -192,42 +245,45 @@ pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, de
         linha(ui, pos2(dentro.left(), y), "Sem ligação com o núcleo", FontId::proportional(12.5), SUAVE, largura);
     }
 
-    let mut topo = y + 28.0;
+    let mut topo = dentro.top() + 60.0;
     if let Some(d) = destaque {
-        let caixa = Rect::from_min_size(pos2(dentro.left(), topo), vec2(largura, 48.0));
-        ui.painter().rect_filled(caixa, CornerRadius::same(10), cor(d.tipo).gamma_multiply(0.10));
-        ui.painter().circle_filled(pos2(caixa.left() + 12.0, caixa.top() + 15.0), 4.0, cor(d.tipo));
+        let caixa = Rect::from_min_size(pos2(dentro.left(), topo), vec2(largura, ALTURA_DESTAQUE));
+        ui.painter().rect(caixa, CornerRadius::same(10), Color32::from_white_alpha(7), Stroke::new(1.0, Color32::from_white_alpha(10)), StrokeKind::Inside);
+        ui.painter().circle_filled(pos2(caixa.left() + 15.0, caixa.top() + 17.0), 3.5, cor(d.tipo));
         let acao = if d.tipo == Tipo::Erro { "Ver o erro" } else { "Abrir" };
-        let largura_botao = 76.0;
-        let texto = largura - 24.0 - largura_botao - 8.0;
-        linha(ui, pos2(caixa.left() + 24.0, caixa.top() + 7.0), &d.titulo, FontId::proportional(13.0), TEXTO, texto);
-        linha(ui, pos2(caixa.left() + 24.0, caixa.top() + 26.0), &d.detalhe, FontId::proportional(11.5), SUAVE, texto);
-        let lugar = Rect::from_min_size(pos2(caixa.right() - largura_botao - 8.0, caixa.center().y - 14.0), vec2(largura_botao, 28.0));
-        let clicou = ui.scope_builder(UiBuilder::new().max_rect(lugar), |ui| botao(ui, acao, false).clicked()).inner;
+        let largura_acao = largura_botao(ui, acao);
+        let texto = largura - 26.0 - largura_acao - 22.0;
+        linha(ui, pos2(caixa.left() + 26.0, caixa.top() + 9.0), &d.titulo, forte(13.0), TEXTO, texto);
+        linha(ui, pos2(caixa.left() + 26.0, caixa.top() + 29.0), &d.detalhe, FontId::proportional(12.0), SUAVE, texto);
+        let lugar = Rect::from_min_size(pos2(caixa.right() - largura_acao - 10.0, caixa.center().y - 14.0), vec2(largura_acao, 28.0));
+        let clicou = ui.scope_builder(UiBuilder::new().max_rect(lugar), |ui| botao(ui, acao, Estilo::Secundario, 28.0).clicked()).inner;
         if clicou {
             pedido = Some(Pedido::Abrir { tarefa: d.tarefa, agente: d.agente });
         }
-        topo = caixa.bottom() + 12.0;
+        topo = caixa.bottom();
     } else {
-        linha(ui, pos2(dentro.left(), topo + 2.0), "Nada precisa de você agora.", FontId::proportional(12.5), SUAVE, largura);
-        topo += 26.0;
+        linha(ui, pos2(dentro.left(), topo), "Nada precisa de você agora.", FontId::proportional(12.5), SUAVE, largura);
+        topo += 18.0;
     }
 
     if let Some(texto) = rascunho {
-        let caixa = Rect::from_min_size(pos2(dentro.left(), topo), vec2(largura, 30.0));
+        let caixa = Rect::from_min_size(pos2(dentro.left(), topo + 10.0), vec2(largura, ALTURA_CAIXA));
         if caixa_para_a_abelha(ui, caixa, nome, texto) {
             pedido = Some(Pedido::Escrever);
         }
-        topo += ALTURA_CAIXA;
+        topo = caixa.bottom();
     }
 
-    let rodape = Rect::from_min_max(pos2(dentro.left(), topo), pos2(dentro.right(), topo + ALTURA_BOTAO));
+    // Um fio de ponta a ponta separa os botões do que está acima.
+    let fio = topo + 16.0;
+    ui.painter().hline(rect.x_range().shrink(1.0), fio + 0.5, Stroke::new(1.0, Color32::from_white_alpha(10)));
+    let rodape = Rect::from_min_max(pos2(dentro.left(), fio + 13.0), pos2(dentro.right(), fio + 13.0 + ALTURA_BOTAO));
     ui.scope_builder(UiBuilder::new().max_rect(rodape).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-        if botao(ui, "Abrir a Colmeia", true).clicked() {
+        if botao(ui, "Abrir a Colmeia", Estilo::Principal, ALTURA_BOTAO).clicked() {
             pedido = Some(Pedido::AbrirColmeia);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if botao(ui, "Desafixar", false).on_hover_text("A abelha sai da área de trabalho").clicked() {
+            if botao(ui, "Desafixar", Estilo::Discreto, ALTURA_BOTAO).on_hover_text("A abelha sai da área de trabalho").clicked() {
                 pedido = Some(Pedido::Desafixar);
             }
         });
@@ -237,7 +293,7 @@ pub fn resumo(ui: &mut Ui, rect: Rect, nome: &str, ligada: bool, c: Contagem, de
 
 /// Uma linha para escrever à abelha; Enter (ou a seta) manda.
 fn caixa_para_a_abelha(ui: &mut Ui, caixa: Rect, nome: &str, texto: &mut String) -> bool {
-    ui.painter().rect(caixa, CornerRadius::same(8), Color32::from_white_alpha(6), Stroke::new(1.0, BORDA), StrokeKind::Inside);
+    ui.painter().rect(caixa, CornerRadius::same(RAIO_BOTAO), Color32::from_white_alpha(6), Stroke::new(1.0, BORDA), StrokeKind::Inside);
     let campo = Rect::from_min_max(caixa.min + vec2(10.0, 0.0), pos2(caixa.right() - 34.0, caixa.bottom()));
     let resposta = ui
         .scope_builder(UiBuilder::new().max_rect(campo).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
@@ -293,7 +349,7 @@ pub fn balao(ui: &mut Ui, rect: Rect, nome: &str, aviso: &Aviso, resta: f32) -> 
     }
     let mut y = dentro.top() + 24.0;
     ui.painter().circle_filled(pos2(dentro.left() + 5.0, y + 9.5), 4.5, cor(aviso.tipo));
-    y += paragrafo(ui, pos2(dentro.left() + 16.0, y), &aviso.titulo, FontId::proportional(14.0), TEXTO, largura - 16.0);
+    y += paragrafo(ui, pos2(dentro.left() + 16.0, y), &aviso.titulo, forte(14.0), TEXTO, largura - 16.0);
     if !aviso.detalhe.trim().is_empty() {
         y += 4.0 + paragrafo(ui, pos2(dentro.left() + 16.0, y + 4.0), &aviso.detalhe, FontId::proportional(12.5), SUAVE, largura - 16.0);
     }
@@ -302,10 +358,10 @@ pub fn balao(ui: &mut Ui, rect: Rect, nome: &str, aviso: &Aviso, resta: f32) -> 
     ui.scope_builder(UiBuilder::new().max_rect(botoes).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let acao = if aviso.tipo == Tipo::Erro { "Ver o erro" } else { "Abrir" };
-        if botao(ui, acao, true).clicked() {
+        if botao(ui, acao, Estilo::Principal, ALTURA_BOTAO).clicked() {
             pedido = Some(Pedido::Abrir { tarefa: aviso.tarefa, agente: aviso.agente });
         }
-        if botao(ui, "Depois", false).clicked() {
+        if botao(ui, "Depois", Estilo::Discreto, ALTURA_BOTAO).clicked() {
             pedido = Some(Pedido::Fechar);
         }
     });
@@ -400,15 +456,16 @@ pub fn balao_voz(ui: &mut Ui, rect: Rect, nome: &str, f: &Fala) -> Option<Pedido
     if f.pergunta || f.abrir.is_some() {
         let botoes = Rect::from_min_size(pos2(dentro.left(), dentro.bottom() - ALTURA_BOTAO), vec2(largura, ALTURA_BOTAO));
         ui.scope_builder(UiBuilder::new().max_rect(botoes).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             if f.pergunta {
-                if botao(ui, "Sim", true).clicked() {
+                if botao(ui, "Sim", Estilo::Principal, ALTURA_BOTAO).clicked() {
                     pedido = Some(PedidoVoz::Sim);
                 }
-                if botao(ui, "Não", false).clicked() {
+                if botao(ui, "Não", Estilo::Secundario, ALTURA_BOTAO).clicked() {
                     pedido = Some(PedidoVoz::Nao);
                 }
             } else if let Some(t) = f.abrir
-                && botao(ui, "Abrir", true).clicked()
+                && botao(ui, "Abrir", Estilo::Principal, ALTURA_BOTAO).clicked()
             {
                 pedido = Some(PedidoVoz::Abrir(t));
             }

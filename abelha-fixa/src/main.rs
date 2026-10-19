@@ -656,6 +656,7 @@ fn main() -> eframe::Result {
         opcoes,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            tela::instalar_fontes(&cc.egui_ctx);
             let (envio, recebe) = mpsc::channel();
             ligacao::iniciar(perfil, cc.egui_ctx.clone(), envio.clone());
             Ok(Box::new(Fixa {
