@@ -17,7 +17,7 @@ cpal = "0.18"
 whisper-rs = "0.16"
 # A voz da abelha: o ONNX Runtime carregado do arquivo que o núcleo baixou
 # (load-dynamic), sem baixar nada na compilação nem crescer o programa.
-ort = { version = "=2.0.0-rc.14", default-features = false, features = ["load-dynamic", "std"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # malloc_trim: devolver ao sistema a memória dos modelos que saíram.
