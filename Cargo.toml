@@ -11,7 +11,7 @@ repository = "https://github.com/AnaMarcelaSilva/colmeia"
 rust-version = "1.88"
 
 [workspace.dependencies]
-eframe = "0.36"
+eframe = "0.37"
 
 [profile.release]
 lto = "thin"
