@@ -98,6 +98,7 @@ type Sessao struct {
 	mu        sync.Mutex
 	liberado  *sync.Cond
 	historico []byte
+	tela      *tela // a grade do terminal, para ler o texto como está na tela
 	// escritos conta os bytes que já passaram pelo histórico; corte é a
 	// contagem na última escrita da tela (ou no eco dela). O detector olha só
 	// o que veio depois do corte: um pedido já respondido e o eco do que você
@@ -124,7 +125,15 @@ type Sessao struct {
 func NovaSessao(id int64, pty Pty, bytes *atomic.Int64) *Sessao {
 	s := &Sessao{ID: id, pty: pty, fim: make(chan struct{}), lido: make(chan struct{}), clientes: map[*Cliente]struct{}{}, bytes: bytes}
 	s.liberado = sync.NewCond(&s.mu)
+	s.tela = novaTela(TamanhoPadrao)
 	return s
+}
+
+// DefinirTamanho conta à grade o tamanho com que o terminal foi aberto.
+func (s *Sessao) DefinirTamanho(t Tamanho) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tela.redimensionar(t)
 }
 
 // Acompanhar liga o acompanhamento de atividade: a sessão passa a avisar
@@ -178,6 +187,24 @@ func (s *Sessao) ultimos(n int) []byte {
 	return append([]byte(nil), s.historico[inicio:]...)
 }
 
+// Recente devolve o fim do histórico (até n bytes), tudo o que está na tela,
+// sem o corte do detector: é o que a abelha fixa mostra como texto.
+func (s *Sessao) Recente(n int) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inicio := len(s.historico) - min(n, len(s.historico))
+	return append([]byte(nil), s.historico[inicio:]...)
+}
+
+// LinhasRecentes devolve as últimas `linhas` linhas do terminal como texto
+// puro, como estão na tela: sem cor, com o cursor e as reescritas já
+// resolvidos pela grade. Serve para ler fora da Colmeia, onde não há emulador.
+func (s *Sessao) LinhasRecentes(linhas int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tela.texto(linhas)
+}
+
 // congestionado diz se alguma tela está atrasada demais. Chamar com mu travado.
 func (s *Sessao) congestionado() bool {
 	for c := range s.clientes {
@@ -228,6 +255,7 @@ func (s *Sessao) guardar(b []byte) {
 	}
 	s.historico = append(s.historico, b...)
 	s.escritos += int64(len(b))
+	s.tela.alimentar(b)
 	s.olharColagem(b)
 	// O eco da digitação e o redesenho logo depois de uma escrita também
 	// ficam antes do corte (a tela das ferramentas redesenha a caixa de texto
@@ -342,10 +370,45 @@ func (s *Sessao) Desconectar(c *Cliente) {
 }
 
 // Escrever manda a digitação ao programa. O eco que volta logo depois não
-// conta como trabalho do agente.
+// conta como trabalho do agente. O Ctrl+Z (0x1a) nunca chega: o Claude
+// Code e os outros se suspendem com ele, e aqui não há shell para trazer
+// o programa de volta; o terminal ficaria mudo até o agente ser removido.
 func (s *Sessao) Escrever(dados []byte) (int, error) {
 	s.marcarEntrada()
+	dados = SemSuspender(dados)
+	if len(dados) == 0 {
+		return 0, nil
+	}
 	return s.pty.Write(dados)
+}
+
+// SemSuspender tira o Ctrl+Z (0x1a) da digitação.
+func SemSuspender(dados []byte) []byte {
+	if !bytes.Contains(dados, []byte{0x1a}) {
+		return dados
+	}
+	limpo := make([]byte, 0, len(dados))
+	for _, b := range dados {
+		if b != 0x1a {
+			limpo = append(limpo, b)
+		}
+	}
+	return limpo
+}
+
+// pausaAntesDoEnter separa o texto do Enter: colados no mesmo instante, o
+// programa pode ler o Enter como parte do texto.
+const pausaAntesDoEnter = 80 * time.Millisecond
+
+// Enviar escreve o texto como uma mensagem: entre as marcas de colagem, se o
+// programa as pediu, e o Enter um instante depois.
+func (s *Sessao) Enviar(texto string) error {
+	if _, err := s.Escrever(Colagem(texto, s.ColagemLigada())); err != nil {
+		return err
+	}
+	time.Sleep(pausaAntesDoEnter)
+	_, err := s.Escrever([]byte("\r"))
+	return err
 }
 
 // Variáveis que um Claude Code põe nos programas que ele abre. Se a Colmeia
@@ -406,6 +469,9 @@ func (s *Sessao) Redimensionar(colunas, linhas uint16) {
 		return
 	}
 	s.marcarEntrada()
+	s.mu.Lock()
+	s.tela.redimensionar(Tamanho{colunas, linhas})
+	s.mu.Unlock()
 	s.pty.Redimensionar(colunas, linhas)
 }
 
@@ -526,6 +592,20 @@ func (g *Gerente) Quantidade() int {
 	return len(g.sessoes)
 }
 
+// Rodando conta os terminais com o programa ainda aberto (Quantidade conta
+// também os parados que a tela continua vendo).
+func (g *Gerente) Rodando() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for _, s := range g.sessoes {
+		if !s.Encerrada() {
+			n++
+		}
+	}
+	return n
+}
+
 // FecharTodos encerra todos os terminais, ao desligar o núcleo.
 func (g *Gerente) FecharTodos() {
 	g.mu.Lock()
@@ -557,11 +637,14 @@ func (s *Sessao) UltimaEntrada() time.Time {
 // as marcas apareceriam cruas e cada linha viraria uma mensagem: as linhas
 // vão juntas, separadas por espaço.
 func Colagem(texto string, modoColagem bool) []byte {
-	if !strings.ContainsAny(texto, "\r\n") {
-		return []byte(texto)
-	}
+	// Com o modo de colagem, qualquer texto vai entre as marcas: sem elas, o
+	// Claude Code toma uma rajada de caracteres por colagem e o Enter que
+	// vem logo atrás vira quebra de linha em vez de enviar.
 	if modoColagem {
 		return []byte("\x1b[200~" + texto + "\x1b[201~")
+	}
+	if !strings.ContainsAny(texto, "\r\n") {
+		return []byte(texto)
 	}
 	linhas := strings.FieldsFunc(texto, func(r rune) bool { return r == '\n' || r == '\r' })
 	for i := range linhas {

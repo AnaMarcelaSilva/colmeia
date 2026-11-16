@@ -140,7 +140,7 @@ fn descartar_pedidos(acordado: &Receiver<()>) {
 }
 
 /// O nome desta janela para o núcleo: com ele, ela diz depois que minimizou
-/// (a abelha fixa se esconde só com uma janela à vista).
+/// ou perdeu o foco (a abelha fixa se esconde só com uma janela em uso).
 pub fn nome_da_janela() -> &'static str {
     static NOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NOME.get_or_init(|| {
@@ -149,8 +149,9 @@ pub fn nome_da_janela() -> &'static str {
     })
 }
 
-/// A janela minimizou ou voltou: o núcleo avisa a abelha fixa. Numa thread
-/// (a tela não espera a rede); só quando muda.
+/// A janela saiu de vista (minimizou, foi para outra área de trabalho ou
+/// perdeu o foco) ou voltou: o núcleo avisa a abelha fixa. Numa thread (a
+/// tela não espera a rede); só quando muda.
 pub fn avisar_minimizada(perfil: i64, minimizada: bool) {
     std::thread::spawn(move || {
         let corpo = serde_json::json!({ "janela": nome_da_janela(), "minimizada": minimizada }).to_string();

@@ -109,8 +109,11 @@ func TestAmbienteLimpoTiraSoAsVariaveisDeSessao(t *testing.T) {
 }
 
 func TestColagem(t *testing.T) {
-	if string(Colagem("git status", true)) != "git status" {
-		t.Error("uma linha não leva marca de colagem")
+	if string(Colagem("git status", true)) != "\x1b[200~git status\x1b[201~" {
+		t.Error("com o modo de colagem, até uma linha vai entre as marcas")
+	}
+	if string(Colagem("git status", false)) != "git status" {
+		t.Error("sem o modo de colagem, uma linha vai crua")
 	}
 	if string(Colagem("um\ndois", true)) != "\x1b[200~um\ndois\x1b[201~" {
 		t.Error("várias linhas vão entre as marcas de colagem")
@@ -139,5 +142,17 @@ func TestModoDeColagemPelaSaida(t *testing.T) {
 	s.guardar([]byte("\x1b[?2004l"))
 	if s.ColagemLigada() {
 		t.Error("não desligou")
+	}
+}
+
+func TestCtrlZNuncaChegaAoPrograma(t *testing.T) {
+	if got := SemSuspender([]byte("abc")); string(got) != "abc" {
+		t.Fatalf("texto comum mudou: %q", got)
+	}
+	if got := SemSuspender([]byte{'a', 0x1a, 'b', 0x1a}); string(got) != "ab" {
+		t.Fatalf("o Ctrl+Z ficou: %q", got)
+	}
+	if got := SemSuspender([]byte{0x1a}); len(got) != 0 {
+		t.Fatalf("só o Ctrl+Z devia sumir: %q", got)
 	}
 }

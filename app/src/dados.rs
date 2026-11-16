@@ -245,6 +245,8 @@ pub struct Tarefa {
     pub coluna: Coluna,
     /// A última mudança de coluna foi do núcleo, não sua.
     pub coluna_auto: bool,
+    /// O dia local em que entrou no Concluído (vazio fora dele ou num núcleo antigo).
+    pub concluida_dia: String,
     pub branch: String,
     /// Onde os agentes trabalham: a pasta do projeto ou a cópia isolada da tarefa.
     pub pasta: String,
@@ -272,6 +274,7 @@ impl Tarefa {
             titulo: String::new(),
             coluna: Coluna::Backlog,
             coluna_auto: false,
+            concluida_dia: String::new(),
             branch: String::new(),
             pasta: String::new(),
             em_copia: false,
@@ -289,10 +292,13 @@ impl Tarefa {
     /// Troca os campos vindos do núcleo, mantendo os agentes.
     fn atualizar(&mut self, t: api::Tarefa, projeto: &Projeto) {
         let em_copia = t.local == "copia" && !t.copia.is_empty();
+        // Uma tarefa transferida chega com outro projeto: o cartão muda de quadro.
+        self.projeto_id = t.projeto_id;
         self.projeto = projeto.nome.clone();
         self.titulo = t.titulo;
         self.coluna = Coluna::da_chave(&t.coluna);
         self.coluna_auto = t.coluna_auto;
+        self.concluida_dia = t.concluida_dia;
         self.branch = t.branch;
         self.pasta = if em_copia { t.copia } else { projeto.caminho.clone() };
         self.em_copia = em_copia;
@@ -341,6 +347,8 @@ pub struct Modelo {
     pub sugestoes: std::collections::HashMap<i64, usize>,
     /// Muda a cada mudança na base de conhecimento: a tela aberta lê de novo.
     pub versao_conhecimento: u64,
+    /// Sobe a cada evento das rotinas do perfil (a tela de rotinas busca de novo).
+    pub versao_rotinas: u64,
 }
 
 /// O uso que os agentes do Claude Code mandam pela statusLine: o contexto de
@@ -484,6 +492,12 @@ pub enum Evento {
         #[serde(default)]
         tarefa_id: i64,
     },
+    /// Uma tarefa saiu de uma sprint (ou voltou): a sprint busca de novo.
+    #[serde(rename = "sprint.fora")]
+    SprintFora { seq: u64 },
+    /// A fala de um assunto mudou: a sprint busca de novo.
+    #[serde(rename = "assunto.texto")]
+    AssuntoTexto { seq: u64 },
     /// Qualquer mudança de um pedido ao agente, com o pedido inteiro.
     #[serde(rename = "pedido.criado", alias = "pedido.entregue", alias = "pedido.respondido", alias = "pedido.cancelado", alias = "pedido.falhou")]
     PedidoMudou { seq: u64, pedido: api::Pedido },
@@ -545,6 +559,37 @@ pub enum Evento {
         seq: u64,
         #[serde(default)]
         conexao_id: i64,
+    },
+    /// A montagem de uma tarefa para a reunião mudou (a simples ou a com IA).
+    #[serde(rename = "montagem.mudou")]
+    MontagemMudou {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+    },
+    /// A pauta da reunião mudou (a ordem ou um visto): a página busca de novo.
+    #[serde(rename = "pauta.mudou")]
+    PautaMudou { seq: u64 },
+    /// A daily do dia foi apresentada: a próxima começa dali.
+    #[serde(rename = "daily.apresentada")]
+    DailyApresentada { seq: u64 },
+    /// O montador com IA começou (ou terminou) a montagem de uma tarefa.
+    #[serde(rename = "montagem.montando")]
+    MontagemMontando {
+        seq: u64,
+        #[serde(default)]
+        tarefa_id: i64,
+        #[serde(default)]
+        montando: bool,
+    },
+    /// A opção do montador da reunião do perfil mudou.
+    #[serde(rename = "perfil.montador")]
+    PerfilMontador {
+        seq: u64,
+        #[serde(default)]
+        perfil_id: i64,
+        #[serde(default)]
+        ligado: bool,
     },
     /// A opção "Mostrar tempo dos agentes" do perfil mudou (nesta ou em outra tela).
     #[serde(rename = "perfil.tempo_agentes")]
@@ -610,6 +655,13 @@ pub enum Evento {
         #[serde(default)]
         erro: String,
     },
+    /// A versão nova mudou de estado (achada, baixando, pronta, reiniciando).
+    #[serde(rename = "atualizacao")]
+    Atualizacao {
+        seq: u64,
+        #[serde(flatten)]
+        estado: api::EstadoAtualizacao,
+    },
     /// A abelha fixa pediu para mostrar uma tarefa (0: só a janela).
     #[serde(rename = "tela.abrir")]
     TelaAbrir {
@@ -632,6 +684,10 @@ pub enum Evento {
     /// busca a lista; `sugestoes` é o selo do workspace, já contado.
     #[serde(rename = "conhecimento.mudou")]
     ConhecimentoMudou { seq: u64, workspace_id: i64, sugestoes: usize },
+    /// Uma rotina do workspace foi criada, editada ou removida, ou uma
+    /// rodada dela começou ou terminou: a tela de rotinas busca de novo.
+    #[serde(rename = "rotina.criada", alias = "rotina.atualizada", alias = "rotina.removida", alias = "rodada.comecou", alias = "rodada.terminou")]
+    RotinaMudou { seq: u64 },
     /// Uma configuração de execução do Play começou ou terminou (fora da
     /// corrente: não entra na linha do tempo).
     #[serde(rename = "comando.iniciou")]
@@ -650,6 +706,21 @@ pub enum Evento {
     },
     #[serde(rename = "comando.removido")]
     ComandoRemovido { seq: u64, comando_id: i64, projeto_id: i64 },
+    /// Um agente propôs uma configuração do Play (entra na linha do tempo).
+    #[serde(rename = "comando.proposto")]
+    ComandoProposto {
+        seq: u64,
+        projeto_id: i64,
+        #[serde(default)]
+        projeto_nome: String,
+        #[serde(default)]
+        nome: String,
+        #[serde(default)]
+        quem: String,
+    },
+    /// Você aceitou a proposta: ela passa a rodar como qualquer outra.
+    #[serde(rename = "comando.aceito")]
+    ComandoAceito { seq: u64, projeto_id: i64 },
     #[serde(other)]
     Desconhecido,
 }
@@ -675,6 +746,8 @@ impl Evento {
             | Evento::AnexoRemovido { seq, .. }
             | Evento::NotaAtualizada { seq, .. }
             | Evento::DailyFora { seq, .. }
+            | Evento::SprintFora { seq, .. }
+            | Evento::AssuntoTexto { seq, .. }
             | Evento::PedidoMudou { seq, .. }
             | Evento::NavegadorAberto { seq, .. }
             | Evento::NavegadorFechado { seq, .. }
@@ -683,19 +756,28 @@ impl Evento {
             | Evento::BancoAprovacao { seq, .. }
             | Evento::ConexaoMudou { seq, .. }
             | Evento::BancoConsulta { seq, .. }
+            | Evento::MontagemMudou { seq, .. }
+            | Evento::PautaMudou { seq, .. }
+            | Evento::DailyApresentada { seq, .. }
+            | Evento::MontagemMontando { seq, .. }
+            | Evento::PerfilMontador { seq, .. }
             | Evento::PerfilTempoAgentes { seq, .. }
             | Evento::PerfilMascote { seq, .. }
             | Evento::PerfilAbelhaFixa { seq, .. }
             | Evento::PerfilDitado { seq, .. }
             | Evento::PerfilVoz { seq, .. }
             | Evento::VozModelo { seq, .. }
+            | Evento::Atualizacao { seq, .. }
             | Evento::TelaAbrir { seq, .. }
             | Evento::WorkspaceRecolhido { seq, .. }
             | Evento::WorkspaceMudou { seq, .. }
             | Evento::ConhecimentoMudou { seq, .. }
+            | Evento::RotinaMudou { seq, .. }
             | Evento::ComandoIniciou { seq, .. }
             | Evento::ComandoTerminou { seq, .. }
-            | Evento::ComandoRemovido { seq, .. } => *seq,
+            | Evento::ComandoRemovido { seq, .. }
+            | Evento::ComandoProposto { seq, .. }
+            | Evento::ComandoAceito { seq, .. } => *seq,
             Evento::Recarregar | Evento::Desconhecido => 0,
         }
     }
@@ -708,9 +790,9 @@ impl Evento {
             Evento::AnexoAdicionado { na_lousa: true, .. } => false,
             // O pedido em si não entra; a consulta (aprovada ou não) entra pelo banco.consulta.
             Evento::BancoAprovacao { .. } | Evento::WorkspaceRecolhido { .. } => false,
-            Evento::WorkspaceMudou { .. } | Evento::ConhecimentoMudou { .. } => false,
+            Evento::WorkspaceMudou { .. } | Evento::ConhecimentoMudou { .. } | Evento::RotinaMudou { .. } => false,
             Evento::PerfilMascote { .. } | Evento::PerfilAbelhaFixa { .. } | Evento::TelaAbrir { .. } => false,
-            Evento::PerfilDitado { .. } | Evento::PerfilVoz { .. } | Evento::VozModelo { .. } => false,
+            Evento::PerfilDitado { .. } | Evento::PerfilVoz { .. } | Evento::VozModelo { .. } | Evento::Atualizacao { .. } => false,
             Evento::ComandoIniciou { .. } | Evento::ComandoTerminou { .. } | Evento::ComandoRemovido { .. } => false,
             _ => !matches!(
                 self,
@@ -788,18 +870,28 @@ impl Modelo {
             | Evento::AnexoRemovido { .. }
             | Evento::NotaAtualizada { .. }
             | Evento::DailyFora { .. }
+            | Evento::SprintFora { .. }
+            | Evento::AssuntoTexto { .. }
             | Evento::NavegadorCaptura { .. }
             // O Play cuida (veja execucao.rs).
             | Evento::ComandoIniciou { .. }
             | Evento::ComandoTerminou { .. }
             | Evento::ComandoRemovido { .. }
+            | Evento::ComandoProposto { .. }
+            | Evento::ComandoAceito { .. }
             // A tela principal aplica no perfil (e o registro busca de novo).
+            | Evento::MontagemMudou { .. }
+            | Evento::PautaMudou { .. }
+            | Evento::DailyApresentada { .. }
+            | Evento::MontagemMontando { .. }
+            | Evento::PerfilMontador { .. }
             | Evento::PerfilTempoAgentes { .. }
             | Evento::PerfilMascote { .. }
             | Evento::PerfilAbelhaFixa { .. }
             | Evento::PerfilDitado { .. }
             | Evento::PerfilVoz { .. }
             | Evento::VozModelo { .. }
+            | Evento::Atualizacao { .. }
             | Evento::TelaAbrir { .. }
             // A lousa aberta aplica (veja lousa::Lousa::aplicar).
             | Evento::LousaMudou { .. } => {}
@@ -865,6 +957,7 @@ impl Modelo {
                 // Na mesma ordem do núcleo: o nome novo pode mudar o lugar.
                 self.projetos.sort_by(|a, b| (&a.workspace, &a.nome).cmp(&(&b.workspace, &b.nome)));
             }
+            Evento::RotinaMudou { .. } => self.versao_rotinas += 1,
             Evento::ConhecimentoMudou { workspace_id, sugestoes, .. } => {
                 self.versao_conhecimento += 1;
                 if sugestoes == 0 {
@@ -1037,6 +1130,7 @@ pub fn gerar_demo(quantidade: usize) -> Vec<Tarefa> {
         titulo: titulo.into(),
         coluna,
         coluna_auto: false,
+        concluida_dia: String::new(),
         branch: branch.into(),
         pasta: String::new(),
         em_copia: true,
@@ -1120,6 +1214,19 @@ mod testes {
     }
 
     #[test]
+    fn versao_nova_chega_pelo_evento_sem_mexer_no_quadro() {
+        let e = evento(
+            r#"{"tipo":"atualizacao","seq":9,"estado":"disponivel","atual":"0.4.0","versao":"0.5.0","notas":"- novo","instalavel":true,"abertos":2,"procurar":true}"#,
+        );
+        let Evento::Atualizacao { seq, estado } = &e else { panic!("{e:?}") };
+        assert_eq!((*seq, estado.versao.as_str(), estado.abertos, estado.tem_novidade()), (9, "0.5.0", 2, true));
+        assert!(!e.entra_na_linha());
+        let mut m = modelo();
+        assert!(m.aplicar(e).is_empty());
+        assert_eq!(m.tarefas.len(), 1);
+    }
+
+    #[test]
     fn uso_chega_pelo_quadro_e_pelos_eventos() {
         let mut m = modelo();
         let quadro = r#"{"seq":5,"projetos":[],"tarefas":[],"agentes":[],
@@ -1165,6 +1272,28 @@ mod testes {
         assert_eq!(m.tarefas.iter().find(|t| t.id == 11).unwrap().coluna, Coluna::Concluido);
         m.aplicar(evento(r#"{"tipo":"tarefa.removida","seq":8,"tarefa_id":11,"projeto_id":1}"#));
         assert_eq!(m.tarefas.len(), 1);
+    }
+
+    #[test]
+    fn tarefa_transferida_muda_de_quadro() {
+        let mut m = modelo();
+        m.projetos.push(Projeto {
+            id: 2,
+            nome: "erp".into(),
+            workspace_id: 1,
+            workspace: "W".into(),
+            workspace_icone: String::new(),
+            conhecimento_auto: false,
+            caminho: "/tmp/erp".into(),
+            sem_git: false,
+            branch_padrao: "main".into(),
+        });
+        m.aplicar(evento(r#"{"tipo":"tarefa.criada","seq":6,"tarefa":{"id":11,"projeto_id":1,"titulo":"Corrigir filtro","coluna":"trabalhando","branch":"main"},"origem":"voce"}"#));
+        // O núcleo manda a transferência como uma atualização com o projeto novo.
+        let efeitos = m.aplicar(evento(r#"{"tipo":"tarefa.atualizada","seq":7,"tarefa":{"id":11,"projeto_id":2,"titulo":"Corrigir filtro","coluna":"trabalhando","branch":""},"origem":"voce"}"#));
+        assert!(efeitos.is_empty());
+        let t = m.tarefas.iter().find(|t| t.id == 11).unwrap();
+        assert_eq!((t.projeto_id, t.projeto.as_str(), t.pasta.as_str(), t.branch.as_str()), (2, "erp", "/tmp/erp", ""));
     }
 
     #[test]
@@ -1333,6 +1462,10 @@ mod testes {
         assert!(matches!(nota, Evento::NotaAtualizada { agente_id: 7, .. }));
         let fora = evento(r#"{"tipo":"daily.fora","seq":13,"tarefa_id":10,"dia":"2026-10-06","fora":true}"#);
         assert!(matches!(fora, Evento::DailyFora { tarefa_id: 10, .. }) && fora.entra_na_linha());
+        let fora = evento(r#"{"tipo":"sprint.fora","seq":13,"tarefa_id":10,"sprint_id":2,"fora":true}"#);
+        assert!(matches!(fora, Evento::SprintFora { seq: 13 }) && fora.entra_na_linha());
+        let texto = evento(r#"{"tipo":"assunto.texto","seq":14,"sprint_id":2,"assunto_id":5}"#);
+        assert!(matches!(texto, Evento::AssuntoTexto { seq: 14 }) && texto.entra_na_linha());
         m.aplicar(evento(r#"{"tipo":"tarefa.removida","seq":13,"tarefa_id":10}"#));
         assert!(m.pedidos.is_empty());
     }

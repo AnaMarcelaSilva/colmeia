@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/ferramentas"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/git"
@@ -30,6 +31,8 @@ func (s *Servidor) rotasAgentes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agentes/{id}/iniciar", s.iniciarAgente)
 	mux.HandleFunc("DELETE /v1/agentes/{id}", s.removerAgente)
 	mux.HandleFunc("GET /v1/agentes/{id}/terminal", s.terminalDoAgente)
+	mux.HandleFunc("GET /v1/agentes/{id}/texto", s.textoDoAgente)
+	mux.HandleFunc("POST /v1/agentes/{id}/entrada", s.entradaDoAgente)
 }
 
 // agenteComEstado diz à tela se o terminal do agente está rodando, em que
@@ -158,11 +161,94 @@ func (s *Servidor) removerAgente(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	if err := s.removerAgentePorID(r.Context(), id); err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{"ok": true})
+}
+
+// removerAgentePorID fecha o agente e o apaga, deixando os eventos dele.
+func (s *Servidor) removerAgentePorID(ctx context.Context, id int64) error {
 	s.Agentes.Fechar(id)
 	// Antes de apagar o agente: os pedidos dele falham e o token sai.
 	s.limparMCP(id)
-	s.falharPedidosDoAgente(r.Context(), id, motivoDaFalha(terminal.PelaRemocao))
-	if err := s.Banco.RemoverAgente(r.Context(), id); err != nil {
+	s.falharPedidosDoAgente(ctx, id, motivoDaFalha(terminal.PelaRemocao))
+	return s.Banco.RemoverAgente(ctx, id)
+}
+
+// removerAgentesDaTarefa remove todos os agentes da tarefa (ao concluí-la).
+func (s *Servidor) removerAgentesDaTarefa(ctx context.Context, tarefa int64) error {
+	agentes, err := s.Banco.ListarAgentes(ctx, tarefa)
+	if err != nil {
+		return err
+	}
+	for _, a := range agentes {
+		if err := s.removerAgentePorID(ctx, a.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// textoDoAgente: GET /v1/agentes/{id}/texto?linhas=40 devolve as últimas
+// linhas do terminal como texto puro, para quem lê fora da Colmeia (a abelha
+// fixa). Sem o agente rodando, "rodando" vem falso e as linhas vazias.
+func (s *Servidor) textoDoAgente(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	linhas, _ := strconv.Atoi(r.URL.Query().Get("linhas"))
+	if linhas <= 0 || linhas > 200 {
+		linhas = 40
+	}
+	sessao, ok := s.Agentes.Pegar(id)
+	if !ok {
+		responderJSON(w, map[string]any{"rodando": false, "linhas": []string{}})
+		return
+	}
+	estado, motivo, _ := sessao.Estado()
+	responderJSON(w, map[string]any{"rodando": true, "linhas": sessao.LinhasRecentes(linhas), "estado": estado, "motivo": motivo})
+}
+
+// entradaDoAgente: POST /v1/agentes/{id}/entrada com {"texto": "...",
+// "enter": true} escreve no terminal do agente, como digitar: com enter, o
+// texto vai como uma mensagem; sem, só as teclas (um "1" escolhe a opção 1).
+func (s *Servidor) entradaDoAgente(w http.ResponseWriter, r *http.Request) {
+	id, err := idDaRota(r)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	var pedido struct {
+		Texto string `json:"texto"`
+		Enter bool   `json:"enter"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if len(pedido.Texto) > 4000 {
+		responderErro(w, dados.ErrInvalido{Motivo: "o texto pode ter no máximo 4000 caracteres"})
+		return
+	}
+	if claudecode.Controle(pedido.Texto, true) {
+		responderErro(w, dados.ErrInvalido{Motivo: "o texto tem caracteres de controle"})
+		return
+	}
+	sessao, ok := s.Agentes.Pegar(id)
+	if !ok {
+		responderErro(w, dados.ErrInvalido{Motivo: "o agente não está rodando"})
+		return
+	}
+	if pedido.Enter {
+		err = sessao.Enviar(pedido.Texto)
+	} else {
+		_, err = sessao.Escrever([]byte(pedido.Texto))
+	}
+	if err != nil {
 		responderErro(w, err)
 		return
 	}
@@ -298,12 +384,19 @@ func (s *Servidor) abrirTerminal(ctx context.Context, a dados.Agente, tamanho te
 	if err != nil {
 		return err
 	}
-	pty, err := terminal.Iniciar(comando, env, pasta, tamanho.OuPadrao())
+	// Sem tamanho no pedido (a abelha fixa, um cliente qualquer), vale o
+	// da última tela: o programa desenha logo ao abrir e um desenho feito
+	// em outra largura embaralha quando a Colmeia mostrar o terminal.
+	if !tamanho.Valido() {
+		tamanho = s.tamanhoDaTela()
+	}
+	pty, err := terminal.Iniciar(comando, env, pasta, tamanho)
 	if err != nil {
 		s.limparMCP(a.ID)
 		return fmt.Errorf("abrindo o terminal: %w", err)
 	}
 	sessao := terminal.NovaSessao(a.ID, pty, s.Bytes)
+	sessao.DefinirTamanho(tamanho)
 	sessao.Acompanhar(a.Ferramenta, s.Tempos)
 	s.guardarContexto(contexto)
 	s.Agentes.Adicionar(sessao)

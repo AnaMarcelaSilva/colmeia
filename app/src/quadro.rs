@@ -14,9 +14,15 @@ use crate::terminal::TerminalAgente;
 
 const ESPACO: f32 = 10.0;
 const CABECALHO: f32 = 46.0;
+/// O vão entre a borda da coluna e os cartões, dos dois lados.
+const MARGEM_COLUNA: f32 = 7.0;
 const RODAPE: f32 = 24.0;
 const VAZIA: f32 = 80.0;
 const LINK_HISTORICO: f32 = 32.0;
+/// O título do cartão vai em até duas linhas antes das reticências; cada
+/// linha a mais que a primeira alonga o cartão.
+const LINHAS_TITULO: usize = 2;
+const LINHA_TITULO: f32 = 18.0;
 /// Quanto um cartão fora do destaque do resumo fica visível.
 const APAGADO: f32 = 0.32;
 
@@ -27,6 +33,10 @@ pub enum Acao {
     Moveu(i64, Coluna),
     /// Pediram para remover a tarefa (menu do botão direito ou do "⋯").
     Remover(i64),
+    /// Pediram para renomear a tarefa (menu do botão direito ou do "⋯").
+    Renomear(i64),
+    /// Levar a tarefa para outro projeto do perfil.
+    Transferir(i64),
     /// O "+" do cabeçalho: uma tarefa nova que já entra nesta coluna.
     NovaNaColuna(Coluna),
     /// "Mais N no Histórico", no fim do Concluído.
@@ -134,8 +144,17 @@ pub fn resumir<'a>(tarefas: impl Iterator<Item = &'a Tarefa>, terminais: &HashMa
 
 /// A tarefa terminou hoje: um agente dela terminou hoje (a data vem do
 /// núcleo) ou você a soltou no Concluído agora há pouco.
+/// Concluída hoje: você acabou de soltar no Concluído, ou o dia em que ela
+/// entrou lá (pelo núcleo) é hoje. Num núcleo antigo, sem esse dia, vale o
+/// dia em que algum agente terminou.
 fn de_hoje(t: &Tarefa, hoje: &str, agora: &HashSet<i64>) -> bool {
-    agora.contains(&t.id) || t.agentes.iter().any(|a| a.fim.as_ref().is_some_and(|f| f.data == hoje))
+    if agora.contains(&t.id) {
+        return true;
+    }
+    if !t.concluida_dia.is_empty() {
+        return t.concluida_dia == hoje;
+    }
+    t.agentes.iter().any(|a| a.fim.as_ref().is_some_and(|f| f.data == hoje))
 }
 
 /// A etapa da tarefa no caminho que ela anda sozinha (0: Trabalhando ⇄
@@ -168,14 +187,33 @@ fn tem_rodape(t: &Tarefa, grupo: Option<Grupo>) -> bool {
     anda_sozinha(t).is_some() || matches!(grupo, Some(Grupo::Espera | Grupo::Erro)) || t.coluna == Coluna::Revisao
 }
 
-fn altura_cartao(t: &Tarefa, com_projeto: bool, frase: bool, rodape: bool) -> f32 {
+fn altura_cartao(t: &Tarefa, com_projeto: bool, frase: bool, rodape: bool, linhas_titulo: usize) -> f32 {
     let avisos = [mostra_motivo(t), t.erro.is_some(), frase].iter().filter(|a| **a).count() as f32;
     let projeto = if com_projeto { 16.0 } else { 0.0 };
     let rodape = if rodape { RODAPE } else { 0.0 };
-    66.0 + projeto + 19.0 * avisos + 40.0 * t.agentes.len() as f32 + rodape
+    let titulo = LINHA_TITULO * linhas_titulo.saturating_sub(1) as f32;
+    66.0 + projeto + titulo + 19.0 * avisos + 40.0 * t.agentes.len() as f32 + rodape
+}
+
+/// O título em até `LINHAS_TITULO` linhas, quebrando nas palavras, com
+/// reticências no fim se ainda não couber.
+fn trabalho_do_titulo(titulo: &str, largura: f32, cor: Color32) -> LayoutJob {
+    let mut trabalho = LayoutJob::simple(titulo.to_owned(), forte(13.5), cor, f32::INFINITY);
+    trabalho.wrap = TextWrapping { max_width: largura.max(10.0), max_rows: LINHAS_TITULO, break_anywhere: false, overflow_character: Some('…') };
+    trabalho
+}
+
+/// Quantas linhas o título ocupa no cartão (para a altura dele).
+fn linhas_do_titulo(ui: &egui::Ui, titulo: &str, largura: f32) -> usize {
+    ui.fonts_mut(|f| f.layout_job(trabalho_do_titulo(titulo, largura, Color32::WHITE)).rows.len().max(1))
 }
 
 /// O ícone, a cor e o texto da coluna vazia.
+/// A cor de uma coluna (a do cabeçalho dela no quadro), para quem a cita fora dele.
+pub fn cor_da_coluna(coluna: Coluna) -> Color32 {
+    jeito(coluna).1
+}
+
 fn jeito(coluna: Coluna) -> (Icone, Color32, &'static str) {
     let p = cores();
     match coluna {
@@ -183,7 +221,7 @@ fn jeito(coluna: Coluna) -> (Icone, Color32, &'static str) {
         Coluna::Trabalhando => (Icone::Agente, p.ok, "Nenhum agente rodando agora."),
         Coluna::AguardandoVoce => (Icone::Relogio, p.alerta, "Nada esperando você."),
         Coluna::Revisao => (Icone::Olho, p.destaque, "Arraste para cá o que precisa de revisão."),
-        Coluna::Concluido => (Icone::Check, p.destaque, "Nada concluído hoje."),
+        Coluna::Concluido => (Icone::Check, p.concluido, "Nada concluído hoje."),
     }
 }
 
@@ -313,21 +351,33 @@ pub fn mostrar(ui: &mut egui::Ui, estado: &mut Quadro, tarefas: &mut Vec<Tarefa>
             }
         }
 
-        let mut filho =
-            ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(caixa.left() + 7.0, caixa.top() + CABECALHO), caixa.max - vec2(7.0, 8.0))));
         let grupos: Vec<Option<Grupo>> = visiveis.iter().map(|&i| grupo(&tarefas[i], v.terminais)).collect();
+        let link = v.com_historico && mais_antigas > 0;
+        // Os cartões têm a mesma margem dos dois lados em toda coluna. A
+        // coluna que rola põe a barra fina no vão da direita, ao lado dos
+        // cartões, nunca por cima deles.
+        let largura_cartoes = largura - 2.0 * MARGEM_COLUNA;
         let alturas: Vec<f32> = visiveis
             .iter()
             .zip(&grupos)
-            .map(|(&i, g)| altura_cartao(&tarefas[i], com_projeto, v.frases.contains(&tarefas[i].id), tem_rodape(&tarefas[i], *g)))
+            .map(|(&i, g)| {
+                let t = &tarefas[i];
+                // A altura de cada cartão depende de quantas linhas o título toma nesta largura.
+                altura_cartao(t, com_projeto, v.frases.contains(&t.id), tem_rodape(t, *g), linhas_do_titulo(ui, &t.titulo, largura_cartoes - 28.0))
+            })
             .collect();
-        let link = v.com_historico && mais_antigas > 0;
         let total: f32 =
             alturas.iter().map(|h| h + ESPACO).sum::<f32>() + if visiveis.is_empty() { VAZIA + ESPACO } else { 0.0 } + if link { LINK_HISTORICO } else { 0.0 };
+        let area = Rect::from_min_max(pos2(caixa.left() + MARGEM_COLUNA, caixa.top() + CABECALHO), caixa.max - vec2(MARGEM_COLUNA, 8.0));
+        let rola = total > area.height();
+        let area = if rola { area.with_max_x(caixa.right() - 1.0) } else { area };
+        let mut filho = ui.new_child(UiBuilder::new().max_rect(area));
+        filho.spacing_mut().scroll =
+            egui::style::ScrollStyle { bar_width: 4.0, bar_inner_margin: MARGEM_COLUNA - 5.0, bar_outer_margin: 0.0, ..egui::style::ScrollStyle::solid() };
         egui::ScrollArea::vertical().id_salt(("rolagem", i)).auto_shrink(false).show_viewport(&mut filho, |ui, janela| {
+            let largura = largura_cartoes;
             ui.set_height(total);
             let origem = ui.max_rect().min;
-            let largura = ui.available_width();
             let mut y = 0.0;
             for ((&indice, &h), g) in visiveis.iter().zip(&alturas).zip(&grupos) {
                 // Virtualização: pula o que está fora da parte visível.
@@ -435,10 +485,19 @@ fn etiqueta_da_branch(pintor: &egui::Painter, pos: Pos2, branch: &str, largura: 
                 }
             }
         }
-        None => {
-            tema::etiqueta(pintor, pos, branch, FontId::monospace(11.0), p.etiquetas[3]);
-        }
+        None => etiqueta_cortada(pintor, pos, branch, FontId::monospace(11.0), p.etiquetas[3], largura),
     }
+}
+
+/// Como `tema::etiqueta`, mas o texto é cortado com reticências para a
+/// etiqueta caber na largura (uma branch comprida não sai do cartão).
+fn etiqueta_cortada(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, cor: Color32, largura: f32) {
+    let mut trabalho = LayoutJob::simple_singleline(texto.to_owned(), fonte, cor);
+    trabalho.wrap = TextWrapping { max_width: (largura - 12.0).max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galeria = pintor.layout_job(trabalho);
+    let rect = Rect::from_min_size(pos, vec2(galeria.size().x + 12.0, 19.0));
+    pintor.rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), cor.gamma_multiply(0.14));
+    pintor.galley(rect.center() - galeria.size() / 2.0, galeria, cor);
 }
 
 /// O trilho mínimo de "anda sozinha": Trabalho · Revisão · Concluído.
@@ -524,8 +583,10 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, grupo: Option<Grupo>, v: &V
         linha_cortada(pintor, pos2(x, y), rotulo, FontId::proportional(11.5), p.suave, largura);
         y += 16.0;
     }
-    linha_cortada(pintor, pos2(x, y), &t.titulo, forte(13.5), p.texto, largura);
-    y += 22.0;
+    let titulo = pintor.layout_job(trabalho_do_titulo(&t.titulo, largura, p.texto));
+    let linhas = titulo.rows.len().max(1);
+    pintor.galley(pos2(x, y), titulo, p.texto);
+    y += 22.0 + LINHA_TITULO * (linhas - 1) as f32;
 
     // O número da tarefa e o tipo pela branch.
     let numero = pintor.layout_no_wrap(format!("#{}", t.id), FontId::proportional(11.5), p.suave);
@@ -649,10 +710,23 @@ fn cartao(ui: &mut egui::Ui, rect: Rect, t: &Tarefa, grupo: Option<Grupo>, v: &V
             *acao = Some(Acao::AbrirTarefa(t.id));
             ui.close();
         }
+        if tema::opcao_menu_com(ui, "Renomear…", None, pode_mudar) {
+            *acao = Some(Acao::Renomear(t.id));
+            ui.close();
+        }
+        if tema::opcao_menu_com(ui, "Transferir para outro projeto…", None, pode_mudar) {
+            *acao = Some(Acao::Transferir(t.id));
+            ui.close();
+        }
         if let Some((rotulo, _, coluna)) = passo
             && tema::opcao_menu_com(ui, rotulo, None, pode_mudar)
         {
             *acao = Some(Acao::Moveu(t.id, coluna));
+            ui.close();
+        }
+        // Concluir direto, de qualquer coluna, sem passar pela Revisão.
+        if t.coluna != Coluna::Concluido && passo.is_none_or(|(_, _, c)| c != Coluna::Concluido) && tema::opcao_menu_com(ui, "Concluir", None, pode_mudar) {
+            *acao = Some(Acao::Moveu(t.id, Coluna::Concluido));
             ui.close();
         }
         if tema::opcao_menu_com(ui, "Remover tarefa…", None, pode_mudar) {
@@ -714,6 +788,12 @@ mod testes {
         assert!(de_hoje(&t, "2026-10-16", &agora));
         let sem_agente = tarefa(Coluna::Concluido, Vec::new());
         assert!(de_hoje(&sem_agente, "2026-10-16", &HashSet::from([sem_agente.id])));
+        // Com o dia da conclusão vindo do núcleo, é ele que manda, não o fim do agente.
+        t.concluida_dia = "2026-10-15".into();
+        assert!(!de_hoje(&t, "2026-10-16", &agora));
+        t.concluida_dia = "2026-10-16".into();
+        t.agentes[0].fim.as_mut().unwrap().data = "2026-10-15".into();
+        assert!(de_hoje(&t, "2026-10-16", &agora));
     }
 
     #[test]

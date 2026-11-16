@@ -39,10 +39,8 @@ pub enum Acao {
     LimparHistorico,
     /// "A seleção tem 3 instruções" e afins: um aviso só no painel.
     Avisar(String),
-    /// O texto mudou com o autocompletar ligado: sugerir para o cursor (em bytes).
+    /// O texto mudou: sugerir para o cursor (em bytes).
     Sugerir(usize),
-    /// Ligar ou desligar o autocompletar (fica no perfil).
-    Autocompletar(bool),
 }
 
 /// O popup de sugestões aberto no editor.
@@ -191,9 +189,9 @@ impl Console {
         }
     }
 
-    /// A barra do console: o banco, o limite e o tempo, o modo da conexão e
-    /// o autocompletar à esquerda; Executar (ou Cancelar) à direita.
-    pub fn barra(&mut self, ui: &mut egui::Ui, conexao: &api::ConexaoBanco, bancos: &[String], autocompletar: bool, agora: f64, acoes: &mut Vec<Acao>) {
+    /// A barra do console: o banco, o limite e o tempo e o modo da conexão à
+    /// esquerda; Executar (ou Cancelar) à direita.
+    pub fn barra(&mut self, ui: &mut egui::Ui, conexao: &api::ConexaoBanco, bancos: &[String], agora: f64, acoes: &mut Vec<Acao>) {
         let p = cores();
         let estreita = ui.available_width() < 760.0;
         ui.horizontal(|ui| {
@@ -255,15 +253,6 @@ impl Console {
             } else {
                 "Só leitura: alterações são recusadas pelo núcleo. Muda em Editar conexão."
             });
-            let dica = if autocompletar {
-                "Sugere palavras do SQL e os nomes já abertos na árvore (Tab ou Enter aceita, Esc fecha, Ctrl+Espaço chama). Fica no perfil."
-            } else {
-                "Desligado: nenhuma sugestão é calculada. Ligar sugere palavras do SQL e os nomes já abertos na árvore, sem IA. Fica no perfil."
-            };
-            if tema::chip_alternar(ui, "Autocompletar", autocompletar).on_hover_text(dica).clicked() {
-                acoes.push(Acao::Autocompletar(!autocompletar));
-                self.sugestoes = None;
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(r) = &self.executando {
                     if !estreita {
@@ -307,7 +296,9 @@ impl Console {
 
     /// O editor: Ctrl+Enter executa a seleção ou a instrução sob o cursor;
     /// Esc cancela a execução. O realce só refaz o layout quando o texto muda.
-    pub fn editor(&mut self, ui: &mut egui::Ui, area: Rect, dialeto: &str, autocompletar: bool, agora: f64, acoes: &mut Vec<Acao>) {
+    /// As sugestões (palavras do SQL e nomes da árvore, sem IA) vêm sempre:
+    /// Tab ou Enter aceita, Esc fecha, Ctrl+Espaço chama.
+    pub fn editor(&mut self, ui: &mut egui::Ui, area: Rect, dialeto: &str, agora: f64, acoes: &mut Vec<Acao>) {
         let p = cores();
         let id = id_editor();
         let ctx = ui.ctx().clone();
@@ -323,9 +314,6 @@ impl Console {
             estado.store(&ctx, id);
         }
         let com_foco = ctx.memory(|m| m.has_focus(id));
-        if !autocompletar {
-            self.sugestoes = None;
-        }
         // As teclas do popup vêm antes do campo (senão o Tab e o Enter entram no texto).
         if self.sugestoes.is_some() && (com_foco || self.tinha_foco) {
             self.teclas_do_popup(&ctx);
@@ -415,7 +403,7 @@ impl Console {
                             .layouter(&mut layouter)
                             .show(ui);
                         self.tinha_foco = saida.response.has_focus();
-                        if autocompletar && let Some(r) = saida.cursor_range {
+                        if let Some(r) = saida.cursor_range {
                             let cursor = sql::byte_do_caractere(&self.texto, r.primary.index.0);
                             let chamou = com_foco && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Space));
                             if saida.response.changed() || chamou {
@@ -1021,8 +1009,7 @@ impl Console {
         };
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(corpo.shrink2(vec2(12.0, 4.0))));
         let mut inserir = None;
-        egui::ScrollArea::vertical().id_salt("historico-banco").auto_shrink(false).show_rows(&mut filho, 48.0, lista.len(), |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+        tema::linhas_coladas(&mut filho, egui::ScrollArea::vertical().id_salt("historico-banco").auto_shrink(false), 48.0, lista.len(), |ui, faixa| {
             for i in faixa {
                 let c = &lista[i];
                 let largura = ui.available_width() - registro::MARGEM_ROLAGEM;

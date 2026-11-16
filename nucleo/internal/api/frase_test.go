@@ -72,7 +72,7 @@ func TestFrasePedidaAoAgente(t *testing.T) {
 	// Revisão com o agente rodando: o pedido da frase entra no terminal dele.
 	pedirComo(t, tokenTela, "PATCH", srv.URL+"/v1/tarefas/1", map[string]string{"coluna": "revisao"})
 	eventos.esperar("escrevendo a frase", frase(true))
-	esperarAte(t, "o pedido no terminal", func() bool { return strings.Contains(lerArquivo(linhas), "frase curta para eu falar na reunião") })
+	esperarAte(t, "o pedido no terminal", func() bool { return strings.Contains(lerArquivo(linhas), "Grave a nota da daily para a reunião") })
 	if _, quadro := pedirComo(t, tokenTela, "GET", srv.URL+"/v1/perfis/1/quadro", nil); len(quadro["frases"].([]any)) != 1 {
 		t.Errorf("frases no quadro: %v", quadro["frases"])
 	}
@@ -105,6 +105,16 @@ func TestFraseSemRespostaNoPrazo(t *testing.T) {
 	eventos.esperar("desistiu de esperar", frase(false))
 	if d, s := notaDeHoje(t, servidor, 1); d != "Concluí a tarefa “Nova tela de pedidos”. O último pedido foi: “trocar a cor do botão de salvar”." || s != d {
 		t.Errorf("frase montada: %q / %q", d, s)
+	}
+	// Você concluiu: depois da frase (aqui, do prazo), os agentes saem.
+	for i := 0; i < 50; i++ {
+		if ag, _ := servidor.Banco.ListarAgentes(context.Background(), 1); len(ag) == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if ag, _ := servidor.Banco.ListarAgentes(context.Background(), 1); len(ag) != 0 {
+		t.Errorf("os agentes ficaram depois de concluir: %v", ag)
 	}
 	if abertos, _ := servidor.Banco.PedidosAbertos(context.Background(), 1); len(abertos) != 0 {
 		t.Errorf("o pedido sem resposta ficou aberto: %v", abertos)

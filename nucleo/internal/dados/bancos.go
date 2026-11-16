@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS conexoes_banco (
 	ssl_ca TEXT NOT NULL DEFAULT '',
 	escrita INTEGER NOT NULL DEFAULT 0,
 	agentes INTEGER NOT NULL DEFAULT 0,
+	agentes_livre INTEGER NOT NULL DEFAULT 0,
+	agentes_escrita INTEGER NOT NULL DEFAULT 0,
 	chave_segredo TEXT NOT NULL,
 	senha TEXT NOT NULL DEFAULT 'nenhuma' CHECK (senha IN ('chaveiro', 'memoria', 'nenhuma')),
 	criada_em TEXT NOT NULL,
@@ -104,6 +106,10 @@ type ConexaoBanco struct {
 	Escrita bool `json:"escrita"`
 	// Agentes: os agentes do perfil podem pedir consultas (você aprova cada uma).
 	Agentes bool `json:"agentes"`
+	// AgentesLivre: as consultas dos agentes rodam sem pedir, até você desmarcar.
+	AgentesLivre bool `json:"agentes_livre"`
+	// AgentesEscrita: os agentes também alteram dados (exige Escrita na conexão).
+	AgentesEscrita bool `json:"agentes_escrita"`
 	// ChaveSegredo é a conta no chaveiro ("conexao:<uuid>"): aleatória, para
 	// uma instância de teste nunca tocar nas entradas de outra.
 	ChaveSegredo string `json:"-"`
@@ -127,6 +133,9 @@ type CamposConexao struct {
 	SSLCA   string `json:"ssl_ca"`
 	Escrita bool   `json:"escrita"`
 	Agentes bool   `json:"agentes"`
+	// Só valem com Agentes; AgentesEscrita só com Escrita.
+	AgentesLivre   bool `json:"agentes_livre"`
+	AgentesEscrita bool `json:"agentes_escrita"`
 }
 
 func semControle(campo, valor string, maximo int) (string, error) {
@@ -176,6 +185,12 @@ func ValidarConexao(c CamposConexao) (CamposConexao, error) {
 	if err = umDe("ssl", c.SSL, ModosSSL); err != nil {
 		return c, err
 	}
+	if !c.Agentes {
+		c.AgentesLivre, c.AgentesEscrita = false, false
+	}
+	if c.AgentesEscrita && !c.Escrita {
+		return c, ErrInvalido{"para os agentes alterarem dados, a conexão precisa permitir alterações"}
+	}
 	if c.Tipo == "sqlite" {
 		if c.Arquivo, err = arquivoValido("O arquivo do SQLite", strings.TrimSpace(c.Arquivo)); err != nil {
 			return c, err
@@ -224,11 +239,11 @@ func novaChaveSegredo() string {
 	return fmt.Sprintf("conexao:%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-const colunasConexao = `id, perfil_id, pasta, nome, tipo, host, porta, usuario, banco, arquivo, ssl, ssl_ca, escrita, agentes, chave_segredo, senha, criada_em, atualizada_em`
+const colunasConexao = `id, perfil_id, pasta, nome, tipo, host, porta, usuario, banco, arquivo, ssl, ssl_ca, escrita, agentes, agentes_livre, agentes_escrita, chave_segredo, senha, criada_em, atualizada_em`
 
 func escanearConexao(l escaneavel, c *ConexaoBanco) error {
 	return l.Scan(&c.ID, &c.PerfilID, &c.Pasta, &c.Nome, &c.Tipo, &c.Host, &c.Porta, &c.Usuario, &c.Banco, &c.Arquivo, &c.SSL, &c.SSLCA,
-		&c.Escrita, &c.Agentes, &c.ChaveSegredo, &c.Senha, &c.CriadaEm, &c.AtualizadaEm)
+		&c.Escrita, &c.Agentes, &c.AgentesLivre, &c.AgentesEscrita, &c.ChaveSegredo, &c.Senha, &c.CriadaEm, &c.AtualizadaEm)
 }
 
 func eventoConexao(acao string, c ConexaoBanco) map[string]any {
@@ -278,12 +293,14 @@ func (b *Banco) CriarConexao(ctx context.Context, perfil int64, campos CamposCon
 	momento := agora()
 	c := ConexaoBanco{PerfilID: perfil, Pasta: campos.Pasta, Nome: campos.Nome, Tipo: campos.Tipo, Host: campos.Host, Porta: campos.Porta,
 		Usuario: campos.Usuario, Banco: campos.Banco, Arquivo: campos.Arquivo, SSL: campos.SSL, SSLCA: campos.SSLCA, Escrita: campos.Escrita,
-		Agentes: campos.Agentes, ChaveSegredo: novaChaveSegredo(), Senha: onde, CriadaEm: momento, AtualizadaEm: momento}
+		Agentes: campos.Agentes, AgentesLivre: campos.AgentesLivre, AgentesEscrita: campos.AgentesEscrita,
+		ChaveSegredo: novaChaveSegredo(), Senha: onde, CriadaEm: momento, AtualizadaEm: momento}
 	err = b.emTransacao(ctx, func(tx *transacao) error {
 		r, err := tx.ExecContext(ctx, `INSERT INTO conexoes_banco (perfil_id, pasta, nome, tipo, host, porta, usuario, banco, arquivo, ssl, ssl_ca,
-			escrita, agentes, chave_segredo, senha, criada_em, atualizada_em) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			escrita, agentes, agentes_livre, agentes_escrita, chave_segredo, senha, criada_em, atualizada_em)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.PerfilID, c.Pasta, c.Nome, c.Tipo, c.Host, c.Porta, c.Usuario, c.Banco, c.Arquivo, c.SSL, c.SSLCA, c.Escrita, c.Agentes,
-			c.ChaveSegredo, c.Senha, c.CriadaEm, c.AtualizadaEm)
+			c.AgentesLivre, c.AgentesEscrita, c.ChaveSegredo, c.Senha, c.CriadaEm, c.AtualizadaEm)
 		if err != nil {
 			return traduzir(err)
 		}
@@ -312,9 +329,11 @@ func (b *Banco) AtualizarConexao(ctx context.Context, id int64, campos CamposCon
 		}
 		c.Pasta, c.Nome, c.Host, c.Porta, c.Usuario, c.Banco, c.Arquivo = campos.Pasta, campos.Nome, campos.Host, campos.Porta, campos.Usuario, campos.Banco, campos.Arquivo
 		c.SSL, c.SSLCA, c.Escrita, c.Agentes, c.AtualizadaEm = campos.SSL, campos.SSLCA, campos.Escrita, campos.Agentes, agora()
+		c.AgentesLivre, c.AgentesEscrita = campos.AgentesLivre, campos.AgentesEscrita
 		if _, err := tx.ExecContext(ctx, `UPDATE conexoes_banco SET pasta = ?, nome = ?, host = ?, porta = ?, usuario = ?, banco = ?, arquivo = ?,
-			ssl = ?, ssl_ca = ?, escrita = ?, agentes = ?, atualizada_em = ? WHERE id = ?`,
-			c.Pasta, c.Nome, c.Host, c.Porta, c.Usuario, c.Banco, c.Arquivo, c.SSL, c.SSLCA, c.Escrita, c.Agentes, c.AtualizadaEm, id); err != nil {
+			ssl = ?, ssl_ca = ?, escrita = ?, agentes = ?, agentes_livre = ?, agentes_escrita = ?, atualizada_em = ? WHERE id = ?`,
+			c.Pasta, c.Nome, c.Host, c.Porta, c.Usuario, c.Banco, c.Arquivo, c.SSL, c.SSLCA, c.Escrita, c.Agentes, c.AgentesLivre, c.AgentesEscrita,
+			c.AtualizadaEm, id); err != nil {
 			return traduzir(err)
 		}
 		return registrar(ctx, tx, "banco.conexao", Escopo{Perfil: c.PerfilID}, eventoConexao("alterada", c))

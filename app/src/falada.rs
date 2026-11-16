@@ -65,7 +65,9 @@ impl Falada {
     /// Liga ou desliga conforme o perfil (os comandos, a pergunta livre, a
     /// voz da abelha e o efeito).
     pub fn ajustar(&mut self, perfil: Option<&api::Perfil>, ctx: &egui::Context) {
-        let Some(p) = perfil.filter(|p| p.voz.voz_comandos || p.voz.voz_ia) else {
+        // Com os comandos guardados (canal::voz::COMANDOS_FALADOS), fica só a pergunta escrita.
+        let comandos = canal::voz::COMANDOS_FALADOS && perfil.is_some_and(|p| p.voz.voz_comandos);
+        let Some(p) = perfil.filter(|p| comandos || (canal::voz::PERGUNTA_LIVRE && p.voz.voz_ia)) else {
             self.desligar();
             return;
         };
@@ -74,12 +76,12 @@ impl Falada {
         }
         let ctx = ctx.clone();
         let c = self.conversa.get_or_insert_with(|| Conversa::nova(p.id, Arc::new(move || ctx.request_repaint())));
-        c.falar = p.voz.voz_abelha;
+        c.falar = canal::voz::COMANDOS_FALADOS && p.voz.voz_abelha;
         c.efeito = p.voz.voz_efeito;
-        if !p.voz.voz_comandos {
+        if !comandos {
             c.cancelar();
         }
-        self.comandos = p.voz.voz_comandos;
+        self.comandos = comandos;
     }
 
     pub fn desligar(&mut self) {
@@ -324,6 +326,11 @@ mod testes {
         let perfil: api::Perfil = serde_json::from_value(serde_json::json!({ "id": 1, "nome": "Pessoal", "tema": "escuro", "voz_ia": true })).unwrap();
         let mut f = Falada::default();
         f.ajustar(Some(&perfil), &egui::Context::default());
+        // Guardada (canal::voz::PERGUNTA_LIVRE), a opção ligada no perfil não liga nada.
+        if !canal::voz::PERGUNTA_LIVRE {
+            assert!(!f.ligada() && f.rascunho.is_empty());
+            return;
+        }
         assert!(f.ligada() && !f.ouve());
         f.alternar();
         assert!(!f.microfone_aberto());

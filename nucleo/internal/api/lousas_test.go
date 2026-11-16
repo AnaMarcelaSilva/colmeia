@@ -248,4 +248,34 @@ func TestAgenteNaLousaDaTarefa(t *testing.T) {
 	if !strings.Contains(string(bruto), "Claude Code (dev) acrescentou 3 itens à lousa") || strings.Contains(string(bruto), marcador) {
 		t.Errorf("linha do tempo: %s", bruto)
 	}
+	// Apaga pelo id: a nota e a ligação dela saem, a tela fica sabendo e a
+	// linha do tempo conta.
+	idNota := int64(r["elementos"].([]any)[1].(map[string]any)["id"].(float64))
+	status, r = pedirComo(t, token, "DELETE", srv.URL+"/v1/agente/lousa/elementos", map[string]any{"ids": []int64{idNota}})
+	if status != http.StatusOK || len(r["removidos"].([]any)) != 2 {
+		t.Fatalf("apagar: %d %v", status, r)
+	}
+	aviso = tela.esperar("lousa.mudou com removidos", func(m map[string]any) bool { return m["tipo"] == "lousa.mudou" && len(m["removidos"].([]any)) > 0 })
+	if len(aviso["removidos"].([]any)) != 2 || aviso["agente_id"] == nil {
+		t.Errorf("aviso da remoção: %v", aviso)
+	}
+	if status, _ := pedirComo(t, token, "DELETE", srv.URL+"/v1/agente/lousa/elementos", map[string]any{"ids": []int64{idNota}}); status != http.StatusBadRequest {
+		t.Errorf("apagar de novo: %d", status)
+	}
+	// Tudo: a lousa da tarefa fica vazia; a da tarefa 2 não é tocada.
+	status, r = pedirComo(t, token, "DELETE", srv.URL+"/v1/agente/lousa/elementos", map[string]any{"tudo": true})
+	if status != http.StatusOK || len(r["removidos"].([]any)) != 2 {
+		t.Errorf("apagar tudo: %d %v", status, r)
+	}
+	if _, r := pedirComo(t, token, "GET", srv.URL+"/v1/agente/lousa", nil); len(r["elementos"].([]any)) != 0 {
+		t.Errorf("sobrou na lousa: %v", r)
+	}
+	if _, r := pedirComo(t, tokenTela, "GET", srv.URL+"/v1/lousas/2", nil); len(r["elementos"].([]any)) != 1 {
+		t.Errorf("a lousa da tarefa 2 mudou: %v", r)
+	}
+	_, linha = pedirComo(t, tokenTela, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo", nil)
+	bruto, _ = json.Marshal(linha)
+	if !strings.Contains(string(bruto), "Claude Code (dev) apagou 4 itens da lousa") {
+		t.Errorf("linha do tempo depois de apagar: %s", bruto)
+	}
 }

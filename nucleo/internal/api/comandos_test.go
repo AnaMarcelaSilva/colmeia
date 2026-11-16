@@ -124,3 +124,103 @@ func TestPlayDoProjeto(t *testing.T) {
 		t.Errorf("rodar removida: %d", status)
 	}
 }
+
+// O agente propõe um Play (no projeto da tarefa ou em outro do workspace),
+// que não roda até a tela aceitar; a tela ouve a proposta e a aceitação, e
+// a lista por workspace traz os dois projetos.
+func TestPlayPropostoPeloAgente(t *testing.T) {
+	claudeQueAnota(t)
+	srv, servidor := servidorComAgentes(t)
+	pasta := montarTarefas(t, srv.URL)
+	os.MkdirAll(filepath.Join(pasta, "app"), 0o755)
+	outra := t.TempDir()
+	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/workspaces/1/projetos", map[string]string{"nome": "loja-api", "caminho": outra})
+	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	dir := filepath.Join(servidor.DirCanal, "agentes")
+	esperarAte(t, "o token do agente", func() bool { return len(lerArquivo(filepath.Join(dir, "1.token"))) == 64 })
+	token := lerArquivo(filepath.Join(dir, "1.token"))
+	tela := ouvirComo(t, tokenTela, srv.URL, "1")
+	tela.proxima()
+
+	// Sem nada ainda.
+	status, r := pedirComo(t, token, "GET", srv.URL+"/v1/agente/comandos", nil)
+	if status != http.StatusOK || len(r["comandos"].([]any)) != 0 || r["projeto"] != "loja-web" {
+		t.Fatalf("lista vazia: %d %v", status, r)
+	}
+	// Propõe no projeto da tarefa e em outro do workspace; um projeto de fora
+	// e um segredo são recusados.
+	status, r = pedirComo(t, token, "POST", srv.URL+"/v1/agente/comandos", map[string]any{
+		"nome": "app", "comando": "echo app", "pasta": "app", "ambiente": []map[string]string{{"nome": "DNS", "valor": ""}}})
+	if status != http.StatusOK || r["proposta"] != true || r["projeto"] != "loja-web" {
+		t.Fatalf("propor: %d %v", status, r)
+	}
+	aviso := tela.esperar("proposta", tipo("comando.proposto"))
+	if aviso["nome"] != "app" || aviso["quem"] != "Claude Code (dev)" || aviso["projeto_id"] != float64(1) || aviso["tarefa_id"] != float64(1) {
+		t.Errorf("aviso da proposta: %v", aviso)
+	}
+	if status, r := pedirComo(t, token, "POST", srv.URL+"/v1/agente/comandos", map[string]any{"nome": "api", "comando": "echo api", "projeto": "Loja-API"}); status != http.StatusOK || r["projeto"] != "loja-api" {
+		t.Errorf("propor em outro projeto: %d %v", status, r)
+	}
+	if status, r := pedirComo(t, token, "POST", srv.URL+"/v1/agente/comandos", map[string]any{"nome": "x", "comando": "ls", "projeto": "outro"}); status != http.StatusBadRequest || !strings.Contains(r["erro"].(string), "loja-api") {
+		t.Errorf("projeto de fora: %d %v", status, r)
+	}
+	if status, _ := pedirComo(t, token, "POST", srv.URL+"/v1/agente/comandos", map[string]any{"nome": "x", "comando": "ls", "ambiente": []map[string]string{{"nome": "TOKEN", "valor": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}}); status != http.StatusBadRequest {
+		t.Errorf("segredo: %d", status)
+	}
+	if status, _ := pedirComo(t, token, "POST", srv.URL+"/v1/agente/comandos", map[string]any{"nome": "app", "comando": "ls"}); status != http.StatusBadRequest {
+		t.Errorf("nome repetido: %d", status)
+	}
+	// A proposta aparece na lista do projeto e na do workspace, sem rodar.
+	status, lista := pedirListaComo(t, tokenTela, srv.URL+"/v1/workspaces/1/comandos")
+	if status != http.StatusOK || len(lista) != 2 || lista[0]["projeto_nome"] != "loja-api" || lista[1]["nome"] != "app" || lista[1]["proposta"] != true || lista[1]["proposta_por"] != "Claude Code (dev)" {
+		t.Fatalf("lista do workspace: %d %v", status, lista)
+	}
+	id := int(lista[1]["id"].(float64))
+	if status, r := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/comandos/"+itoa(id)+"/rodar", nil); status != http.StatusBadRequest || !strings.Contains(r["erro"].(string), "aceite") {
+		t.Errorf("rodar a proposta: %d %v", status, r)
+	}
+	// A tela não cria com origem agente; o agente lista as duas propostas sem os valores.
+	if status, _ := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/projetos/1/comandos", map[string]any{"nome": "y", "comando": "ls", "origem": "agente"}); status != http.StatusBadRequest {
+		t.Errorf("origem agente pela tela: %d", status)
+	}
+	status, r = pedirComo(t, token, "GET", srv.URL+"/v1/agente/comandos", nil)
+	comandos := r["comandos"].([]any)
+	if status != http.StatusOK || len(comandos) != 2 || comandos[1].(map[string]any)["proposta"] != true || comandos[1].(map[string]any)["ambiente"] != nil {
+		t.Errorf("lista do agente: %d %v", status, r)
+	}
+	// Aceita: vira uma configuração comum, roda, e a tela ouve.
+	if status, r := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/comandos/"+itoa(id)+"/aceitar", nil); status != http.StatusOK || r["proposta"] != false || r["origem"] != "agente" {
+		t.Fatalf("aceitar: %d %v", status, r)
+	}
+	if aviso := tela.esperar("aceito", tipo("comando.aceito")); aviso["comando_id"] != float64(id) || aviso["quem"] != "Claude Code (dev)" {
+		t.Errorf("aviso do aceite: %v", aviso)
+	}
+	if status, _ := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/comandos/"+itoa(id)+"/aceitar", nil); status != http.StatusBadRequest {
+		t.Errorf("aceitar de novo: %d", status)
+	}
+	if status, r := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/comandos/"+itoa(id)+"/rodar", nil); status != http.StatusOK || r["rodando"] != true {
+		t.Errorf("rodar depois de aceitar: %d %v", status, r)
+	}
+	tela.esperar("fim", tipo("comando.terminou"))
+	// A linha do tempo conta a proposta e o aceite.
+	status, linha := pedirComo(t, tokenTela, "GET", srv.URL+"/v1/perfis/1/linha-do-tempo", nil)
+	bruto, _ := json.Marshal(linha)
+	if status != http.StatusOK || !strings.Contains(string(bruto), "propôs o Play “app” em loja-web") || !strings.Contains(string(bruto), "aceitou o Play “app”") {
+		t.Errorf("linha do tempo: %d %s", status, bruto)
+	}
+}
+
+// pedirListaComo faz um GET com o token da tela que responde uma lista.
+func pedirListaComo(t *testing.T, token, url string) (int, []map[string]any) {
+	t.Helper()
+	r, _ := http.NewRequest("GET", url, nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	resposta, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resposta.Body.Close()
+	var lista []map[string]any
+	json.NewDecoder(resposta.Body).Decode(&lista)
+	return resposta.StatusCode, lista
+}

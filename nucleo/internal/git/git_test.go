@@ -97,3 +97,40 @@ func TestLeituraComLimiteESemBase(t *testing.T) {
 		t.Errorf("sem git: %v", err)
 	}
 }
+
+func TestUltimaTagECommitsDesde(t *testing.T) {
+	raiz := repositorioDeTeste(t)
+	ctx := context.Background()
+	// Sem tag: nomes vazios, sem erro.
+	if nome, data, err := UltimaTag(ctx, raiz); err != nil || nome != "" || data != "" {
+		t.Fatalf("sem tag: %q %q %v", nome, data, err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", raiz, "-c", "user.email=teste@exemplo", "-c", "user.name=Teste"}, args...)...)
+		if saida, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, saida)
+		}
+	}
+	git("tag", "v1.0.0")
+	git("commit", "-q", "--allow-empty", "-m", "corrige o desconto")
+	git("commit", "-q", "--allow-empty", "-m", "melhora a lista")
+	nome, data, err := UltimaTag(ctx, raiz)
+	if err != nil || nome != "v1.0.0" || len(data) != 10 {
+		t.Fatalf("última tag: %q %q %v", nome, data, err)
+	}
+	lista, mais, err := CommitsDesde(ctx, raiz, nome, 10)
+	if err != nil || mais || len(lista) != 2 || lista[0].Mensagem != "melhora a lista" || lista[1].Mensagem != "corrige o desconto" {
+		t.Fatalf("commits desde a tag: %v %v %v", lista, mais, err)
+	}
+	// Só o que ficou depois da tag e até o máximo.
+	if lista, mais, _ := CommitsDesde(ctx, raiz, nome, 1); len(lista) != 1 || !mais {
+		t.Fatalf("máximo: %v %v", lista, mais)
+	}
+	// Uma referência que parece opção ou intervalo não passa ao git.
+	for _, ruim := range []string{"--output=/tmp/x", "a..b", ""} {
+		if _, _, err := CommitsDesde(ctx, raiz, ruim, 10); err == nil {
+			t.Errorf("aceitou %q", ruim)
+		}
+	}
+}

@@ -17,8 +17,8 @@ func TestAgenteMoveAPropriaTarefaSoAPedido(t *testing.T) {
 	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
 	token := lerArquivo(servidor.DirCanal + "/agentes/1.token")
 
-	// Só Revisão e Concluído, só a tarefa do agente e só com o token dele.
-	for _, ruim := range []map[string]any{{"coluna": "trabalhando"}, {"coluna": "backlog"}, {"coluna": "aguardando"}, {"coluna": "concluido", "tarefa": 2}, {"coluna": "revisao", "x": 1}} {
+	// Só as colunas do quadro, só tarefas do projeto do agente e só com o token dele.
+	for _, ruim := range []map[string]any{{"coluna": "feito"}, {"coluna": ""}, {"coluna": "concluido", "tarefa": 999}, {"coluna": "revisao", "x": 1}} {
 		if status, _ := pedirComo(t, token, "POST", srv.URL+"/v1/agente/coluna", ruim); status != http.StatusBadRequest {
 			t.Errorf("aceitou %v: %d", ruim, status)
 		}

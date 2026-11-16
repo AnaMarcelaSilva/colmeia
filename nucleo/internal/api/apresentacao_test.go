@@ -244,4 +244,28 @@ func TestTirarDaDaily(t *testing.T) {
 	if n, deck := slides("tipo=daily"); n != 1 || deck["fora"] != nil {
 		t.Errorf("depois de trazer de volta: %d slides, fora %v", n, deck["fora"])
 	}
+
+	// Uma tarefa removida segue na daily pelo histórico e também sai dela.
+	pedir(t, "POST", srv.URL+"/v1/projetos/1/tarefas", map[string]string{"titulo": "Criar play"})
+	pedir(t, "POST", srv.URL+"/v1/tarefas/2/agentes", map[string]string{"ferramenta": "shell", "papel": "dev"})
+	if status, _ := pedir(t, "DELETE", srv.URL+"/v1/tarefas/2", nil); status != http.StatusOK {
+		t.Fatalf("remover a tarefa: %d", status)
+	}
+	if n, _ := slides("tipo=daily"); n != 2 {
+		t.Fatalf("daily com a tarefa removida: %d slides", n)
+	}
+	if status, _ := pedir(t, "PUT", srv.URL+"/v1/tarefas/2/daily", map[string]any{"dia": hoje, "fora": true}); status != http.StatusNoContent {
+		t.Fatalf("tirar a tarefa removida: %d", status)
+	}
+	n, deck = slides("tipo=daily")
+	fora, _ = deck["fora"].([]any)
+	if n != 1 || len(fora) != 1 || fora[0].(map[string]any)["titulo"] != "Criar play" || fora[0].(map[string]any)["projeto"] == "" {
+		t.Errorf("deck sem a tarefa removida: %d slides, fora %v", n, deck["fora"])
+	}
+	if status, _ := pedir(t, "PUT", srv.URL+"/v1/tarefas/2/daily", map[string]any{"dia": hoje, "fora": false}); status != http.StatusNoContent {
+		t.Fatalf("trazer a tarefa removida de volta: %d", status)
+	}
+	if n, deck := slides("tipo=daily"); n != 2 || deck["fora"] != nil {
+		t.Errorf("tarefa removida de volta: %d slides, fora %v", n, deck["fora"])
+	}
 }

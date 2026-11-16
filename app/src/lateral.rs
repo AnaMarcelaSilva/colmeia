@@ -1,10 +1,10 @@
 //! A barra lateral: o trilho com os workspaces em quadrados e, ao lado, o
-//! painel flutuante do workspace aberto, com os projetos, as tarefas em
-//! andamento e os agentes em árvore; no pé dele, a abelha e o uso. A barra
+//! painel flutuante do workspace aberto, com os projetos (uma linha fechado,
+//! um cartão aberto, com as tarefas em andamento e as bolinhas dos agentes);
+//! no pé dele, a abelha e o uso. A barra
 //! só mostra e pede: o que é clicado volta como `Acao` para a tela principal.
 
-use std::collections::HashSet;
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::collections::HashMap;
 
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Id, Layout, Rect, RectAlign, Response, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2};
 
@@ -16,22 +16,34 @@ use crate::tema::{self, EstadoVisual, Icone, cores};
 
 /// Largura do trilho.
 pub const TRILHO: f32 = 64.0;
-/// Largura do painel e o vão até o cartão do conteúdo.
+/// Largura do painel (a menor, que é também a padrão; a borda direita
+/// arrasta até `PAINEL_MAX`) e o vão até o cartão do conteúdo.
 const PAINEL: f32 = 292.0;
+const PAINEL_MAX: f32 = 560.0;
 const VAO: f32 = 10.0;
 /// Abrir e recolher o painel: curto, e só o tempo da transição pede quadros.
 const ANIMACAO_PAINEL: f32 = 0.2;
 /// As linhas da árvore têm altura fixa: a altura de um ramo aberto se sabe
 /// antes de desenhar, e abrir e fechar anima sem medir nada.
 const ALTURA_PROJETO: f32 = 32.0;
-const ALTURA_TAREFA: f32 = 30.0;
-const ALTURA_AGENTE: f32 = 28.0;
+/// O cabeçalho do projeto aberto, as tarefas abaixo dele e a linha do
+/// que ficou de fora.
+const ALTURA_CABECA: f32 = 34.0;
+const ALTURA_TAREFA: f32 = 28.0;
 const ALTURA_RESTO: f32 = 24.0;
-/// O quanto a tarefa entra em relação ao projeto: a seta dela fica à direita
-/// da guia que desce do projeto.
-const RECUO_TAREFA: f32 = 16.0;
+/// O respiro em cima e embaixo das tarefas, no ramo aberto.
+const MARGEM_CARTAO: f32 = 4.0;
+/// A bolinha do agente na linha da tarefa.
+const RAIO_BOLINHA: f32 = 9.0;
+/// A área de clique da bolinha, maior que ela.
+const ALVO_BOLINHA: f32 = 24.0;
+/// A coluna da árvore: o centro do quadradinho do projeto, por onde desce o
+/// fio com os pontos das tarefas, e onde começam o nome do projeto e os
+/// títulos das tarefas (alinhados).
+const X_FIO: f32 = 21.0;
+const X_NOME: f32 = 40.0;
 /// O espaço entre um projeto e o seguinte.
-const ENTRE_PROJETOS: f32 = 4.0;
+const ENTRE_PROJETOS: f32 = 6.0;
 /// O bloco da abelha com o uso, no pé do painel.
 const ALTURA_USO: f32 = 92.0;
 
@@ -46,6 +58,8 @@ pub enum Lugar {
     Lousa(i64),
     /// A base de conhecimento do workspace.
     Conhecimento(i64),
+    /// As rotinas do workspace.
+    Rotinas(i64),
     Banco,
 }
 
@@ -80,6 +94,8 @@ pub struct Vista<'a> {
     pub icones: &'a crate::icones::Icones,
     /// Sugestões dos agentes na base de conhecimento, por workspace.
     pub sugestoes: &'a std::collections::HashMap<i64, usize>,
+    /// A versão nova: um botão no trilho quando há uma.
+    pub atualizacao: &'a api::EstadoAtualizacao,
 }
 
 /// O que foi pedido na barra.
@@ -92,6 +108,8 @@ pub enum Acao {
     Lousa(i64),
     /// A base de conhecimento do workspace.
     Conhecimento(i64),
+    /// As rotinas do workspace.
+    Rotinas(i64),
     /// O nome e a imagem do workspace.
     EditarWorkspace(i64),
     Bancos,
@@ -128,6 +146,10 @@ pub enum Acao {
     Voz,
     /// Abrir a opção da pergunta livre com IA (à parte: usa tokens).
     PerguntaIA,
+    /// Ver a versão nova e atualizar.
+    Atualizacao,
+    /// Procurar versão nova ao abrir a Colmeia (vale para a instalação).
+    ProcurarAtualizacao(bool),
 }
 
 #[derive(Default)]
@@ -195,7 +217,6 @@ pub struct Medida {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum No {
     Projeto(i64),
-    Tarefa(i64),
 }
 
 pub struct Lateral {
@@ -209,18 +230,79 @@ pub struct Lateral {
     /// O workspace do que estava na tela no quadro anterior: quando ele
     /// muda (abriu uma tarefa de outro workspace), o painel acompanha.
     foco_anterior: Option<i64>,
-    /// Os nós trocados à mão; o resto fica no padrão (aberto o que anda).
-    trocados: HashSet<No>,
+    /// O painel fechou porque você foi para todos os projetos: ele volta
+    /// sozinho quando você entra num workspace de novo (uma tarefa dele).
+    fechado_pelo_geral: bool,
+    /// O que você abriu ou fechou à mão; o resto fica no padrão (aberto o
+    /// que pede você ou trabalha). Um projeto fechado à mão abre de novo
+    /// quando volta a rodar.
+    escolhas: HashMap<No, bool>,
+    /// O padrão de cada nó no quadro anterior, para notar quando ele muda.
+    padrao_anterior: HashMap<No, bool>,
     uso: Uso,
     /// De onde o `uso` foi montado: o agente em foco, a versão do uso e o
     /// minuto (um limite que voltou some sem esperar evento).
     uso_de: Option<(i64, u64, i64)>,
+    /// A largura do painel que você escolheu arrastando a borda.
+    largura_painel: f32,
 }
 
 impl Default for Lateral {
     fn default() -> Self {
-        Lateral { aberto: true, vazio: false, workspace: None, foco_anterior: None, trocados: HashSet::new(), uso: Uso::default(), uso_de: None }
+        Lateral {
+            aberto: true,
+            vazio: false,
+            workspace: None,
+            foco_anterior: None,
+            fechado_pelo_geral: false,
+            escolhas: HashMap::new(),
+            padrao_anterior: HashMap::new(),
+            uso: Uso::default(),
+            uso_de: None,
+            largura_painel: ler_largura().unwrap_or(PAINEL),
+        }
     }
+}
+
+/// Onde fica a largura do painel: na pasta de dados da Colmeia, como a
+/// posição da abelha fixa.
+fn arquivo_largura() -> Option<std::path::PathBuf> {
+    let pasta = if let Some(d) = std::env::var_os("COLMEIA_DADOS") {
+        std::path::PathBuf::from(d)
+    } else if cfg!(windows) {
+        std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Colmeia").join("dados")
+    } else if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
+        std::path::PathBuf::from(d).join("colmeia")
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local").join("share").join("colmeia")
+    };
+    Some(pasta.join("lateral-largura"))
+}
+
+fn ler_largura() -> Option<f32> {
+    if cfg!(test) {
+        return None;
+    }
+    let texto = std::fs::read_to_string(arquivo_largura()?).ok()?;
+    texto.trim().parse::<f32>().ok().filter(|l| l.is_finite()).map(|l| l.clamp(PAINEL, PAINEL_MAX))
+}
+
+fn gravar_largura(largura: f32) {
+    if cfg!(test) {
+        return;
+    }
+    if let Some(caminho) = arquivo_largura() {
+        if let Some(pasta) = caminho.parent() {
+            let _ = std::fs::create_dir_all(pasta);
+        }
+        let _ = std::fs::write(caminho, format!("{}", largura.round()));
+    }
+}
+
+/// A largura que cabe: entre a padrão e `PAINEL_MAX`, sem passar de 40% da
+/// janela (o quadro precisa de lugar).
+fn largura_que_cabe(desejada: f32, janela: f32) -> f32 {
+    desejada.clamp(PAINEL, PAINEL_MAX.min(janela * 0.4).max(PAINEL))
 }
 
 /// Um workspace como o trilho mostra: tirado dos projetos, na ordem deles.
@@ -256,7 +338,8 @@ impl Lateral {
 
     /// A largura de agora: o painel entra e sai aos poucos.
     pub fn largura(&self, ctx: &egui::Context) -> f32 {
-        TRILHO + self.abertura(ctx) * (PAINEL + VAO)
+        let janela = ctx.content_rect().width();
+        TRILHO + self.abertura(ctx) * (largura_que_cabe(self.largura_painel, janela) + VAO)
     }
 
     /// O painel aparece, ainda que só em parte (abrindo ou recolhendo).
@@ -304,6 +387,10 @@ impl Lateral {
         if foco != self.foco_anterior {
             if foco.is_some() {
                 self.workspace = foco;
+                if self.fechado_pelo_geral {
+                    self.aberto = true;
+                    self.fechado_pelo_geral = false;
+                }
             }
             self.foco_anterior = foco;
         }
@@ -312,14 +399,30 @@ impl Lateral {
         }
     }
 
-    fn aberto_no(&self, no: No, padrao: bool) -> bool {
-        padrao != self.trocados.contains(&no)
+    /// Todos os projetos não pertencem a um workspace: o painel do anterior
+    /// recolhe, para a lateral não dizer um lugar e o quadro outro.
+    fn ir_para_todos(&mut self, saida: &mut Saida) {
+        if self.aberto {
+            self.aberto = false;
+            self.fechado_pelo_geral = true;
+        }
+        saida.acoes.push(Acao::Escopo(Escopo::Perfil));
     }
 
-    fn trocar(&mut self, no: No) {
-        if !self.trocados.remove(&no) {
-            self.trocados.insert(no);
+    /// Aberto ou fechado: a sua escolha, se houver; senão o padrão. Quando o
+    /// padrão passa de fechado para aberto (começou a rodar), um fechado à
+    /// mão esquece a escolha e abre; quando passa para fechado, a sua escolha
+    /// fica como está.
+    fn aberto_no(&mut self, no: No, padrao: bool) -> bool {
+        let antes = self.padrao_anterior.insert(no, padrao);
+        if padrao && antes == Some(false) && self.escolhas.get(&no) == Some(&false) {
+            self.escolhas.remove(&no);
         }
+        self.escolhas.get(&no).copied().unwrap_or(padrao)
+    }
+
+    fn trocar(&mut self, no: No, aberto: bool) {
+        self.escolhas.insert(no, !aberto);
     }
 
     // O trilho
@@ -345,7 +448,7 @@ impl Lateral {
         let (logo, resposta) = ui.allocate_exact_size(vec2(TRILHO, 28.0), Sense::click());
         tema::logo(ui.painter(), logo.center(), 12.0);
         if resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Todos os projetos").clicked() {
-            saida.acoes.push(Acao::Escopo(Escopo::Perfil));
+            self.ir_para_todos(saida);
         }
         ui.add_space(4.0);
 
@@ -363,7 +466,10 @@ impl Lateral {
                     let espera = abelha::esperando(v.tarefas.iter().filter(|t| g.projetos.iter().any(|p| p.id == t.projeto_id)));
                     let quadrado = quadrado_do_workspace(ui, g, ativo, espera);
                     if quadrado.clicked() {
-                        if ativo {
+                        self.fechado_pelo_geral = false;
+                        // Nos bancos, o painel mostra as conexões: o clique
+                        // no workspace leva ao quadro dele em vez de fechar.
+                        if ativo && v.lugar != Lugar::Banco {
                             self.aberto = false;
                         } else {
                             self.workspace = Some(g.id);
@@ -386,6 +492,10 @@ impl Lateral {
                                 saida.acoes.push(Acao::Conhecimento(g.id));
                                 ui.close();
                             }
+                            if tema::opcao_menu_com(ui, "Rotinas", None, true) {
+                                saida.acoes.push(Acao::Rotinas(g.id));
+                                ui.close();
+                            }
                         });
                     }
                 }
@@ -398,7 +508,7 @@ impl Lateral {
 
         let todos = v.escopo == Escopo::Perfil && v.lugar == Lugar::Quadro;
         if botao_do_trilho(&mut ui, Icone::Grade, todos, 0).on_hover_text("Todos os projetos").clicked() {
-            saida.acoes.push(Acao::Escopo(Escopo::Perfil));
+            self.ir_para_todos(saida);
         }
         if !v.demo && botao_do_trilho(&mut ui, Icone::Banco, v.lugar == Lugar::Banco, v.pedidos_banco).on_hover_text("Bancos de dados (Ctrl+Shift+K)").clicked()
         {
@@ -468,6 +578,19 @@ impl Lateral {
             });
         }
 
+        if v.atualizacao.tem_novidade() {
+            let dica = match v.atualizacao.estado.as_str() {
+                "baixando" => "Baixando a versão nova".to_string(),
+                "pronta" => "A versão nova entra quando os agentes fecharem".to_string(),
+                "erro" => "A atualização não terminou".to_string(),
+                _ => format!("Versão {} disponível", v.atualizacao.versao),
+            };
+            let botao = botao_do_trilho(ui, Icone::Atualizar, true, 0).on_hover_text(dica);
+            if botao.clicked() {
+                saida.acoes.push(Acao::Atualizacao);
+            }
+        }
+
         let tema_atual = botao_do_trilho(ui, Icone::Tema, false, 0);
         let tema_atual = dica_fora_do_menu(tema_atual, &format!("Tema: {}", v.tema.nome()));
         egui::Popup::menu(&tema_atual).align(RectAlign::RIGHT_END).gap(10.0).show(|ui| {
@@ -523,14 +646,27 @@ impl Lateral {
                 saida.acoes.push(Acao::Ditado);
                 ui.close();
             }
-            let comandos = if v.perfil.is_some_and(|p| p.voz.voz_comandos) { "ligados" } else { "desligados" };
-            if tema::opcao_menu_com(ui, "Comandos falados e voz da abelha", Some(comandos), pode) {
-                saida.acoes.push(Acao::Voz);
-                ui.close();
+            if canal::voz::COMANDOS_FALADOS {
+                let comandos = if v.perfil.is_some_and(|p| p.voz.voz_comandos) { "ligados" } else { "desligados" };
+                if tema::opcao_menu_com(ui, "Comandos falados e voz da abelha", Some(comandos), pode) {
+                    saida.acoes.push(Acao::Voz);
+                    ui.close();
+                }
             }
-            let pergunta = if v.perfil.is_some_and(|p| p.voz.voz_ia) { "ligada" } else { "usa tokens" };
-            if tema::opcao_menu_com(ui, "Pergunta livre com IA", Some(pergunta), pode) {
-                saida.acoes.push(Acao::PerguntaIA);
+            // A pergunta livre com IA está guardada (canal::voz::PERGUNTA_LIVRE).
+            if canal::voz::PERGUNTA_LIVRE {
+                let pergunta = if v.perfil.is_some_and(|p| p.voz.voz_ia) { "ligada" } else { "usa tokens" };
+                if tema::opcao_menu_com(ui, "Pergunta livre com IA", Some(pergunta), pode) {
+                    saida.acoes.push(Acao::PerguntaIA);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            let procurar = v.atualizacao.procurar;
+            let texto = "Procurar versão nova ao abrir";
+            let clicou = if pode { tema::opcao_menu(ui, texto, procurar) } else { tema::opcao_menu_com(ui, texto, Some("desligado"), false) };
+            if clicou {
+                saida.acoes.push(Acao::ProcurarAtualizacao(!procurar));
                 ui.close();
             }
         });
@@ -540,6 +676,7 @@ impl Lateral {
             let dica = if self.aberto { "Recolher o painel" } else { "Abrir o painel" };
             if botao_do_trilho(ui, Icone::Painel, !self.aberto, 0).on_hover_text(dica).clicked() {
                 self.aberto = !self.aberto;
+                self.fechado_pelo_geral = false;
             }
         }
 
@@ -571,7 +708,9 @@ impl Lateral {
         let t = self.abertura(ui.ctx());
         // Recolhendo, o painel escorrega 12 px para baixo do trilho e some.
         let x = area.left() + TRILHO - (1.0 - t) * 12.0;
-        let rect = Rect::from_min_max(pos2(x, area.top() + tema::MARGEM_MOLDURA), pos2(x + PAINEL, area.bottom() - tema::MARGEM_MOLDURA));
+        let largura = largura_que_cabe(self.largura_painel, ui.ctx().content_rect().width());
+        let rect = Rect::from_min_max(pos2(x, area.top() + tema::MARGEM_MOLDURA), pos2(x + largura, area.bottom() - tema::MARGEM_MOLDURA));
+        self.borda_de_arrastar(ui, rect, t);
         let recorte = Rect::from_min_max(pos2(area.left() + TRILHO, area.top()), area.max);
         let mut ui = ui.new_child(UiBuilder::new().id_salt("painel").max_rect(rect).layout(Layout::top_down(Align::Min)));
         ui.shrink_clip_rect(recorte);
@@ -599,6 +738,43 @@ impl Lateral {
             bloco_do_uso(&mut ui, uso, abelha, &self.uso, v, saida);
         } else {
             barras_de_uso(&ui, Rect::from_min_max(pos2(uso.left() + 10.0, uso.bottom() - 30.0), uso.max - vec2(10.0, 8.0)), &self.uso);
+        }
+    }
+
+    /// A borda direita do painel: arrastar alarga ou estreita (nunca menos
+    /// que a largura padrão), dois cliques voltam à padrão. A pega fica no
+    /// vão entre o painel e o quadro, e o fio só acende com o mouse em cima.
+    fn borda_de_arrastar(&mut self, ui: &mut Ui, rect: Rect, t: f32) {
+        if t < 1.0 {
+            return;
+        }
+        let p = cores();
+        let pega = Rect::from_min_max(pos2(rect.right() - 3.0, rect.top() + 18.0), pos2(rect.right() + VAO - 2.0, rect.bottom() - 18.0));
+        let resposta = ui.interact(pega, Id::new("lateral-borda"), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        let janela = ui.ctx().content_rect().width();
+        if resposta.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            let atual = largura_que_cabe(self.largura_painel, janela);
+            self.largura_painel = largura_que_cabe(atual + resposta.drag_delta().x, janela);
+        }
+        if resposta.drag_stopped() {
+            gravar_largura(self.largura_painel);
+        }
+        if resposta.double_clicked() {
+            self.largura_painel = PAINEL;
+            gravar_largura(PAINEL);
+        }
+        let forca = tema::transicao(ui, Id::new("lateral-borda-fio"), resposta.hovered() || resposta.dragged());
+        if forca > 0.0 {
+            let x = rect.right() + VAO / 2.0 - 1.0;
+            ui.painter().with_clip_rect(ui.ctx().content_rect()).vline(
+                x,
+                (rect.top() + 24.0)..=(rect.bottom() - 24.0),
+                Stroke::new(2.0, p.destaque.gamma_multiply(forca * 0.8)),
+            );
+        }
+        if resposta.hovered() && !resposta.dragged() {
+            resposta.on_hover_text("Arraste para alargar o painel; dois cliques voltam ao tamanho padrão");
         }
     }
 
@@ -700,6 +876,10 @@ impl Lateral {
             if linha.on_hover_text(dica).clicked() {
                 saida.acoes.push(Acao::Conhecimento(grupo.id));
             }
+            let linha = item(ui, "Rotinas", Some(Icone::Relogio), v.lugar == Lugar::Rotinas(grupo.id));
+            if linha.on_hover_text("Textos que o Claude Code escreve do quadro e dos commits, no horário ou quando você manda").clicked() {
+                saida.acoes.push(Acao::Rotinas(grupo.id));
+            }
             ui.add_space(6.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter().hline(r.x_range().shrink(6.0), r.center().y, Stroke::new(1.0, p.borda));
@@ -731,104 +911,164 @@ impl Lateral {
         let andamento: Vec<&Tarefa> = tarefas.iter().copied().filter(|t| em_andamento(t)).collect();
         let resto = resto_do_projeto(&tarefas);
         let tem_filhos = !andamento.is_empty() || resto.is_some();
-        let aberto = tem_filhos && self.aberto_no(No::Projeto(projeto.id), !andamento.is_empty());
+        // As contagens em tarefas, como a abelha conta: o erro só até você abrir a tarefa.
         let contagem = Contagem {
             espera: abelha::esperando(tarefas.iter().copied()),
-            erro: tarefas.iter().filter(|t| t.erro.is_some()).count(),
-            rodando: if v.rodando { tarefas.iter().flat_map(|t| &t.agentes).filter(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando).count() } else { 0 },
+            erro: tarefas.iter().filter(|t| t.erro.is_some() && !t.erro_visto).count(),
+            trabalhando: if v.rodando {
+                tarefas.iter().filter(|t| t.agentes.iter().any(|a| a.ativo && a.visual() == EstadoVisual::Trabalhando)).count()
+            } else {
+                0
+            },
         };
+        // Abre sozinho enquanto algo pede você ou trabalha; parado, fica em linha.
+        let aberto = tem_filhos && self.aberto_no(No::Projeto(projeto.id), contagem.total() > 0);
         let ativo = v.escopo == Escopo::Projeto(projeto.id) && v.lugar == Lugar::Quadro;
-        let (linha, seta) = linha_do_projeto(ui, projeto, ativo, tem_filhos.then_some(aberto), &contagem);
-        // A seta ou dois cliques na linha abrem e fecham o ramo; o primeiro clique já leva ao quadro.
+        let ctx = ui.ctx().clone();
+        let t = abertura_do_no(&ctx, No::Projeto(projeto.id), aberto);
+
+        // Fechado, uma linha simples; aberto, um cartão com o cabeçalho, as
+        // tarefas em andamento e o que ficou de fora. No meio da transição o
+        // cartão cresce a partir do cabeçalho.
+        let (linha, seta) = if t <= 0.0 {
+            linha_do_projeto(ui, projeto, ativo, tem_filhos, &contagem)
+        } else {
+            let corpo = andamento.len() as f32 * ALTURA_TAREFA + if resto.is_some() { ALTURA_RESTO } else { 0.0 } + MARGEM_CARTAO * 2.0;
+            let (linha, seta) = cabeca_do_cartao(ui, projeto, ativo, &contagem);
+            recolhivel(ui, t, corpo, |ui| {
+                // O fio da árvore desce do quadradinho do projeto e passa
+                // pelos pontos das tarefas; termina no centro da última.
+                let topo = ui.cursor().top();
+                if !andamento.is_empty() {
+                    let fim = topo + MARGEM_CARTAO + (andamento.len() as f32 - 0.5) * ALTURA_TAREFA;
+                    ui.painter().vline(ui.max_rect().left() + X_FIO, (topo - 4.0)..=fim, Stroke::new(1.0, cores().borda));
+                }
+                ui.add_space(MARGEM_CARTAO);
+                for tarefa in &andamento {
+                    self.linha_da_tarefa(ui, tarefa, v, saida);
+                }
+                if let Some(texto) = &resto {
+                    let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_RESTO), Sense::click());
+                    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver no quadro do projeto");
+                    let cor = tema::cor_animada(ui, resposta.id.with("cor"), resposta.hovered(), cores().suave, cores().texto);
+                    ui.painter().text(rect.left_center() + vec2(X_NOME, 0.0), egui::Align2::LEFT_CENTER, texto, FontId::proportional(11.5), cor);
+                    if resposta.clicked() {
+                        saida.acoes.push(Acao::Escopo(Escopo::Projeto(projeto.id)));
+                    }
+                }
+            });
+            (linha, seta)
+        };
+        // A seta ou dois cliques na linha abrem e fecham; o primeiro clique já leva ao quadro.
         if seta.is_some_and(|s| s.clicked()) || (tem_filhos && linha.double_clicked()) {
-            self.trocar(No::Projeto(projeto.id));
+            self.trocar(No::Projeto(projeto.id), aberto);
         } else if linha.clicked() {
             saida.acoes.push(Acao::Escopo(Escopo::Projeto(projeto.id)));
         }
         if !v.demo {
             linha.context_menu(|ui| {
                 ui.set_min_width(240.0);
+                if !projeto.caminho.is_empty() {
+                    tema::opcao_menu_com(ui, &projeto.caminho, None, false);
+                }
                 if tema::opcao_menu_com(ui, "Remover da Colmeia…", None, v.pode) {
                     saida.acoes.push(Acao::RemoverProjeto { id: projeto.id, nome: projeto.nome.clone() });
                     ui.close();
                 }
             });
         }
-        if !tem_filhos {
-            return;
-        }
-
-        // A altura do ramo aberto: as tarefas, os agentes das abertas (que
-        // também podem estar abrindo) e a linha do resto.
-        let ctx = ui.ctx().clone();
-        let aberturas: Vec<f32> = andamento
-            .iter()
-            .map(|t| {
-                let aberta = !t.agentes.is_empty() && self.aberto_no(No::Tarefa(t.id), true);
-                abertura_do_no(&ctx, No::Tarefa(t.id), aberta)
-            })
-            .collect();
-        let altura = andamento.iter().zip(&aberturas).map(|(t, a)| ALTURA_TAREFA + a * t.agentes.len() as f32 * ALTURA_AGENTE).sum::<f32>()
-            + if resto.is_some() { ALTURA_RESTO } else { 0.0 };
-        let t = abertura_do_no(&ctx, No::Projeto(projeto.id), aberto);
-        let topo = ui.cursor().min.y;
-        let x_guia = ui.max_rect().left() + 14.0;
-        recolhivel(ui, t, altura, |ui| {
-            for (tarefa, abertura) in andamento.iter().zip(&aberturas) {
-                self.ramo_da_tarefa(ui, tarefa, *abertura, v, saida);
-            }
-            if let Some(texto) = &resto {
-                let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_RESTO), Sense::click());
-                let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver no quadro do projeto");
-                let cor = tema::cor_animada(ui, resposta.id.with("cor"), resposta.hovered(), cores().suave, cores().texto);
-                ui.painter().text(rect.left_center() + vec2(RECUO_TAREFA + 36.0, 0.0), egui::Align2::LEFT_CENTER, texto, FontId::proportional(11.5), cor);
-                if resposta.clicked() {
-                    saida.acoes.push(Acao::Escopo(Escopo::Projeto(projeto.id)));
-                }
-            }
-        });
-        // A guia que desce do projeto junta o que é dele.
-        let fundo = ui.cursor().min.y;
-        if fundo - topo > 8.0 {
-            ui.painter().vline(x_guia, (topo + 2.0)..=(fundo - 8.0), Stroke::new(1.0, cores().borda.gamma_multiply(t)));
-        }
     }
 
-    fn ramo_da_tarefa(&mut self, ui: &mut Ui, tarefa: &Tarefa, abertura: f32, v: &Vista, saida: &mut Saida) {
-        let com_agentes = !tarefa.agentes.is_empty();
-        let aberta = com_agentes && self.aberto_no(No::Tarefa(tarefa.id), true);
+    /// Uma tarefa em andamento dentro do cartão: o ponto de estado, o título,
+    /// o que ela pede (e desde quando) e as bolinhas dos agentes à direita.
+    /// A linha abre a tarefa; a bolinha, a tarefa já no agente dela.
+    fn linha_da_tarefa(&mut self, ui: &mut Ui, tarefa: &Tarefa, v: &Vista, saida: &mut Saida) {
+        let p = cores();
+        let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_TAREFA), Sense::click());
+        let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
         let ativa = matches!(v.lugar, Lugar::Tarefa { id, .. } if id == tarefa.id);
-        let (linha, seta) = linha_da_tarefa(ui, tarefa, ativa, com_agentes.then_some(aberta));
-        if seta.is_some_and(|s| s.clicked()) || (com_agentes && linha.double_clicked()) {
-            self.trocar(No::Tarefa(tarefa.id));
-        } else if linha.clicked() {
+        // O realce começa depois do fio, para a árvore seguir inteira.
+        let dentro = Rect::from_min_max(pos2(rect.left() + X_NOME - 8.0, rect.top()), rect.max);
+        fundo_do_item(ui, &resposta, dentro, ativa, resposta.hovered());
+
+        // As bolinhas, da direita para a esquerda, sobrepostas de leve. Quem
+        // pede você vem primeiro e fica por cima; com mais de quatro, três e "+N".
+        let mut agentes: Vec<&AgenteTela> = tarefa.agentes.iter().collect();
+        agentes.sort_by_key(|a| !a.visual().pede_voce());
+        let (mostrados, escondidos) = if agentes.len() > 4 { (&agentes[..3], agentes.len() - 3) } else { (&agentes[..], 0) };
+        let mut direita = dentro.right() - 8.0;
+        let mut clicada = None;
+        if escondidos > 0 {
+            let centro = pos2(direita - RAIO_BOLINHA, rect.center().y);
+            ui.painter().circle(centro, RAIO_BOLINHA, p.superficie_alta, Stroke::new(1.5, p.borda));
+            ui.painter().text(centro, egui::Align2::CENTER_CENTER, format!("+{escondidos}"), tema::forte(9.0), p.suave);
+            direita -= RAIO_BOLINHA * 2.0 + 3.0;
+        }
+        for (i, agente) in mostrados.iter().enumerate().rev() {
+            let centro = pos2(direita - RAIO_BOLINHA, rect.center().y);
+            let area = Rect::from_center_size(centro, vec2(ALVO_BOLINHA, ALVO_BOLINHA));
+            let r = ui.interact(area, resposta.id.with(("bolinha", agente.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let focado = matches!(v.lugar, Lugar::Tarefa { id, foco } if id == tarefa.id && foco == agente.id);
+            bolinha_do_agente(ui.painter(), centro, agente, focado || r.hovered());
+            if r.on_hover_text(format!("{} · {}", agente.nome_com_papel(), agente.texto_estado())).clicked() {
+                clicada = Some(agente.id);
+            }
+            direita -= RAIO_BOLINHA * 2.0 - if i > 0 { 5.0 } else { 0.0 };
+        }
+
+        let estado = estado_da_tarefa(tarefa);
+        let x = rect.left() + X_NOME;
+        // O que a tarefa pede e desde quando, na cor do estado, antes das
+        // bolinhas. A hora sai se não sobrar lugar para o título; o aviso
+        // inteiro sai se nem assim couber.
+        if let Some((texto, hora)) = aviso_da_tarefa(tarefa, estado) {
+            let cor = estado.cor();
+            let fonte = FontId::proportional(11.0);
+            let mut g = ui.painter().layout_no_wrap(format!("{texto}{hora}"), fonte.clone(), cor);
+            if !hora.is_empty() && direita - 6.0 - g.size().x - x < 120.0 {
+                g = ui.painter().layout_no_wrap(texto, fonte, cor);
+            }
+            if direita - 6.0 - g.size().x - x >= 90.0 {
+                direita -= g.size().x + 6.0;
+                ui.painter().galley(pos2(direita, rect.center().y - g.size().y / 2.0), g, cor);
+            }
+        }
+        // O ponto fica sobre o fio da árvore: um disco do fundo por baixo
+        // para o fio não atravessar o ponto vazado.
+        let no_fio = pos2(rect.left() + X_FIO, rect.center().y);
+        ui.painter().circle_filled(no_fio, 5.5, cores().superficie);
+        tema::ponto(ui.painter(), no_fio, if estado.pede_voce() { 4.0 } else { 3.5 }, estado);
+        let cor = if estado == EstadoVisual::Parado { p.suave } else { p.texto };
+        let fonte = if estado.pede_voce() { tema::forte(13.0) } else { FontId::proportional(13.0) };
+        // Cortado em qualquer ponto: com o aviso e as bolinhas, o lugar é curto.
+        let titulo = tema::cortar(ui.painter(), &tarefa.titulo, egui::TextFormat::simple(fonte, cor), (direita - 8.0 - x).max(24.0), 1, true);
+        ui.painter().galley(pos2(x, rect.center().y - titulo.size().y / 2.0), titulo, cor);
+
+        if let Some(agente) = clicada {
+            saida.acoes.push(Acao::AbrirTarefa { tarefa: tarefa.id, agente: Some(agente) });
+        } else if resposta.on_hover_text(&tarefa.titulo).clicked() {
             saida.acoes.push(Acao::AbrirTarefa { tarefa: tarefa.id, agente: None });
         }
-        if !com_agentes {
-            return;
-        }
-        recolhivel(ui, abertura, tarefa.agentes.len() as f32 * ALTURA_AGENTE, |ui| {
-            for (i, agente) in tarefa.agentes.iter().enumerate() {
-                let focado = matches!(v.lugar, Lugar::Tarefa { id, foco } if id == tarefa.id && foco == agente.id);
-                if linha_do_agente(ui, agente, focado, i + 1 == tarefa.agentes.len()).clicked() {
-                    saida.acoes.push(Acao::AbrirTarefa { tarefa: tarefa.id, agente: Some(agente.id) });
-                }
-            }
-        });
     }
 }
 
 /// Para onde vai a página quando você escolhe outro workspace no trilho: a
 /// mesma página do workspace novo (lousa ou conhecimento) ou o quadro dele.
-/// Nada muda se a página já é dele ou se é a de bancos.
+/// Dos bancos vai sempre ao quadro do workspace; nas outras páginas, nada
+/// muda se a página já é dele.
 fn ir_para_o_workspace(v: &Vista, workspace: i64) -> Option<Acao> {
-    // O grupo 0 (projetos sem workspace) não tem página própria.
-    if workspace == 0 || v.lugar == Lugar::Banco || workspace_em_foco(v) == Some(workspace) {
+    if v.lugar == Lugar::Banco {
+        // O grupo 0 (projetos sem workspace) não tem quadro próprio.
+        return Some(Acao::Escopo(if workspace == 0 { Escopo::Perfil } else { Escopo::Workspace(workspace) }));
+    }
+    // O grupo 0 não tem página própria.
+    if workspace == 0 || workspace_em_foco(v) == Some(workspace) {
         return None;
     }
     Some(match v.lugar {
         Lugar::Lousa(_) => Acao::Lousa(workspace),
         Lugar::Conhecimento(_) => Acao::Conhecimento(workspace),
+        Lugar::Rotinas(_) => Acao::Rotinas(workspace),
         _ => Acao::Escopo(Escopo::Workspace(workspace)),
     })
 }
@@ -838,7 +1078,7 @@ fn workspace_em_foco(v: &Vista) -> Option<i64> {
     let do_projeto = |id: i64| v.projetos.iter().find(|p| p.id == id).map(|p| p.workspace_id);
     match v.lugar {
         Lugar::Tarefa { id, .. } => v.tarefas.iter().find(|t| t.id == id).and_then(|t| do_projeto(t.projeto_id)),
-        Lugar::Lousa(ws) | Lugar::Conhecimento(ws) => Some(ws),
+        Lugar::Lousa(ws) | Lugar::Conhecimento(ws) | Lugar::Rotinas(ws) => Some(ws),
         Lugar::Quadro | Lugar::Banco => match v.escopo {
             Escopo::Workspace(w) => Some(w),
             Escopo::Projeto(p) => do_projeto(p),
@@ -865,6 +1105,28 @@ fn resto_do_projeto(tarefas: &[&Tarefa]) -> Option<String> {
 }
 
 /// O estado de uma tarefa no ponto da árvore: o mais urgente dos agentes.
+/// O que a tarefa pede, curto, e a hora à parte: ("pede aprovação", " · 14:32").
+/// Só quando pede você; trabalhando ou parada, nada.
+fn aviso_da_tarefa(t: &Tarefa, estado: EstadoVisual) -> Option<(String, String)> {
+    let hora = |h: &str| if h.is_empty() { String::new() } else { format!(" · {h}") };
+    match estado {
+        EstadoVisual::Erro => {
+            let fim = t.agentes.iter().find(|a| a.visual() == EstadoVisual::Erro).and_then(|a| a.fim.as_ref());
+            Some(("com erro".to_string(), hora(fim.map_or("", |f| &f.hora))))
+        }
+        EstadoVisual::SuaVez => {
+            let acao = match t.motivo_acao.as_str() {
+                "" => "esperando você",
+                "quer consultar o banco" => "quer o banco",
+                "espera sua resposta" => "sua vez",
+                outro => outro,
+            };
+            Some((acao.to_string(), hora(&t.motivo_desde)))
+        }
+        _ => None,
+    }
+}
+
 fn estado_da_tarefa(t: &Tarefa) -> EstadoVisual {
     let estados = || t.agentes.iter().map(AgenteTela::visual);
     if t.erro.is_some() || estados().any(|e| e == EstadoVisual::Erro) {
@@ -881,12 +1143,6 @@ fn estado_da_tarefa(t: &Tarefa) -> EstadoVisual {
 /// A letra do quadrado: a primeira letra ou número do nome.
 fn inicial(nome: &str) -> String {
     nome.chars().find(|c| c.is_alphanumeric()).map_or_else(|| "·".to_string(), |c| c.to_uppercase().collect())
-}
-
-/// "Pede aprovação" vira "pede aprovação": na árvore o estado vem depois do nome.
-fn minuscula(texto: &str) -> String {
-    let mut letras = texto.chars();
-    letras.next().map_or_else(String::new, |c| c.to_lowercase().chain(letras).collect())
 }
 
 fn abertura_do_no(ctx: &egui::Context, no: No, aberto: bool) -> f32 {
@@ -1076,9 +1332,9 @@ fn seta_do_ramo(ui: &mut Ui, linha: Rect, x: f32, aberta: bool, id: Id) -> Respo
 }
 
 /// A seta desenhada (a fonte não tem ▸/▾): para a direita fechada, para baixo aberta.
-fn desenhar_seta(ui: &Ui, seta: &Response, aberta: bool) {
+fn desenhar_seta(ui: &Ui, seta: &Response, aberta: bool, forca: f32) {
     let p = cores();
-    let cor = if seta.hovered() { p.texto } else { p.suave };
+    let cor = (if seta.hovered() { p.texto } else { p.suave }).gamma_multiply(forca);
     let c = seta.rect.center();
     let pontas = if aberta {
         vec![c + vec2(-3.5, -2.0), c + vec2(3.5, -2.0), c + vec2(0.0, 2.5)]
@@ -1088,136 +1344,148 @@ fn desenhar_seta(ui: &Ui, seta: &Response, aberta: bool) {
     ui.painter().add(Shape::convex_polygon(pontas, cor, Stroke::NONE));
 }
 
+/// Quantas tarefas do projeto esperam você, pararam com erro (ainda não
+/// aberto) ou têm agente trabalhando. Sempre em tarefas, como a abelha conta.
 struct Contagem {
     espera: usize,
     erro: usize,
-    rodando: usize,
+    trabalhando: usize,
 }
 
-fn linha_do_projeto(ui: &mut Ui, projeto: &Projeto, ativo: bool, aberto: Option<bool>, contagem: &Contagem) -> (Response, Option<Response>) {
+impl Contagem {
+    fn total(&self) -> usize {
+        self.espera + self.erro + self.trabalhando
+    }
+
+    /// A etiqueta do cabeçalho do cartão: o mais urgente primeiro. Sem nada,
+    /// "parado" em cinza, sem fundo.
+    fn etiqueta(&self) -> (String, Color32, bool) {
+        let p = cores();
+        if self.erro > 0 {
+            (format!("{} com erro", self.erro), p.erro, true)
+        } else if self.espera > 0 {
+            (format!("{} {}", self.espera, if self.espera == 1 { "espera você" } else { "esperam você" }), p.alerta, true)
+        } else if self.trabalhando > 0 {
+            (format!("{} trabalhando", self.trabalhando), p.ok, true)
+        } else {
+            ("parado".to_string(), p.suave, false)
+        }
+    }
+
+    /// O que a etiqueta esconde, em cinza antes dela: com erro e espera,
+    /// quantas esperam; com algo pedindo você e trabalho, quantas trabalham.
+    fn segundo(&self) -> Option<String> {
+        if self.erro > 0 && self.espera > 0 {
+            Some(format!("{} {}", self.espera, if self.espera == 1 { "espera" } else { "esperam" }))
+        } else if self.erro + self.espera > 0 && self.trabalhando > 0 {
+            Some(format!("{} trabalhando", self.trabalhando))
+        } else {
+            None
+        }
+    }
+}
+
+/// O quadradinho com a inicial do projeto, na linha fechada.
+fn quadradinho(pintor: &egui::Painter, centro: egui::Pos2, nome: &str) {
+    let p = cores();
+    let rect = Rect::from_center_size(centro, vec2(22.0, 22.0));
+    pintor.rect(rect, CornerRadius::same(6), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+    pintor.text(centro, egui::Align2::CENTER_CENTER, inicial(nome), tema::forte(11.0), p.suave);
+}
+
+/// O projeto fechado: o quadradinho com a inicial, o nome e, à direita, um
+/// ponto quando algo pede você (vermelho com erro, âmbar com espera) e um
+/// verde com agente trabalhando. A seta de abrir aparece com o mouse em cima.
+fn linha_do_projeto(ui: &mut Ui, projeto: &Projeto, ativo: bool, tem_filhos: bool, contagem: &Contagem) -> (Response, Option<Response>) {
     let p = cores();
     let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_PROJETO), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let seta = aberto.map(|a| seta_do_ramo(ui, rect, 4.0, a, resposta.id.with("seta")));
-    let em_cima = resposta.hovered() || seta.as_ref().is_some_and(|s| s.hovered());
+    let em_cima = resposta.hovered();
     fundo_do_item(ui, &resposta, rect, ativo, em_cima);
-    if let (Some(s), Some(a)) = (&seta, aberto) {
-        desenhar_seta(ui, s, a);
-    }
 
-    // À direita: quantos esperam você, quantos com erro e quantos agentes
-    // trabalham; "parado" quando nada anda.
     let pintor = ui.painter();
-    let mut direita = rect.right() - 10.0;
-    let mut numero = |n: usize, cor: Color32, texto: Color32| {
-        let g = pintor.layout_no_wrap(n.to_string(), tema::forte(11.5), texto);
-        direita -= g.size().x;
-        pintor.galley(pos2(direita, rect.center().y - g.size().y / 2.0), g, texto);
-        pintor.circle_filled(pos2(direita - 7.0, rect.center().y), 3.5, cor);
-        direita -= 18.0;
-    };
-    if contagem.rodando > 0 {
-        numero(contagem.rodando, p.ok, p.suave);
+    let mut direita = rect.right() - 12.0;
+    if contagem.erro + contagem.espera > 0 {
+        pintor.circle_filled(pos2(direita - 3.5, rect.center().y), 3.5, if contagem.erro > 0 { p.erro } else { p.alerta });
+        direita -= 15.0;
     }
-    if contagem.erro > 0 {
-        numero(contagem.erro, p.erro, p.erro);
+    if contagem.trabalhando > 0 {
+        pintor.circle_filled(pos2(direita - 3.5, rect.center().y), 3.5, p.ok);
+        direita -= 15.0;
     }
-    if contagem.espera > 0 {
-        numero(contagem.espera, p.alerta, p.alerta);
-    }
-    if contagem.rodando + contagem.erro + contagem.espera == 0 {
-        let g = pintor.layout_no_wrap("parado".into(), FontId::proportional(11.5), p.suave);
-        direita -= g.size().x;
-        pintor.galley(pos2(direita, rect.center().y - g.size().y / 2.0), g, p.suave);
-        direita -= 8.0;
+    // A seta tem o lugar dela sempre que há o que abrir (o nome não pula);
+    // ela só aparece com o mouse em cima.
+    let seta = tem_filhos.then(|| seta_do_ramo(ui, rect, direita - rect.left() - 20.0, false, resposta.id.with("seta")));
+    if let Some(s) = &seta {
+        let mostra = tema::transicao(ui, s.id.with("mostra"), em_cima || s.hovered());
+        if mostra > 0.0 {
+            desenhar_seta(ui, s, false, mostra);
+        }
+        direita -= 22.0;
     }
 
-    // Todo projeto com o mesmo peso, aberto ou não: a árvore se lê pelo recuo.
-    let fonte = tema::forte(13.5);
-    let cor = tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, tema::misturar(p.suave, p.texto, 0.55), p.texto);
-    let x = rect.left() + 26.0;
-    let nome = tema::cortar(ui.painter(), &projeto.nome, egui::TextFormat::simple(fonte, cor), (direita - x).max(24.0), 1, false);
+    quadradinho(ui.painter(), pos2(rect.left() + X_FIO, rect.center().y), &projeto.nome);
+    let fonte = if ativo { tema::forte(13.5) } else { FontId::proportional(13.5) };
+    let cor =
+        tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, if tem_filhos { p.texto } else { tema::misturar(p.suave, p.texto, 0.55) }, p.texto);
+    let x = rect.left() + X_NOME;
+    let nome = tema::cortar(ui.painter(), &projeto.nome, egui::TextFormat::simple(fonte, cor), (direita - 6.0 - x).max(24.0), 1, false);
     ui.painter().galley(pos2(x, rect.center().y - nome.size().y / 2.0), nome, cor);
-    let resposta = if projeto.caminho.is_empty() { resposta } else { resposta.on_hover_text(&projeto.caminho) };
     (resposta, seta)
 }
 
-fn linha_da_tarefa(ui: &mut Ui, tarefa: &Tarefa, ativa: bool, aberta: Option<bool>) -> (Response, Option<Response>) {
+/// O cabeçalho do projeto aberto: a mesma linha do projeto fechado (o
+/// quadradinho, o nome no mesmo lugar e o realce dos outros itens), com a
+/// etiqueta da situação e a seta de fechar à direita. Não há cartão: as
+/// tarefas descem pelo fio da árvore.
+fn cabeca_do_cartao(ui: &mut Ui, projeto: &Projeto, ativo: bool, contagem: &Contagem) -> (Response, Option<Response>) {
     let p = cores();
-    let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_TAREFA), Sense::click());
-    let rect = rect.with_min_x(rect.left() + RECUO_TAREFA);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_CABECA), Sense::click());
     let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let seta = aberta.map(|a| seta_do_ramo(ui, rect, 0.0, a, resposta.id.with("seta")));
-    let em_cima = resposta.hovered() || seta.as_ref().is_some_and(|s| s.hovered());
-    fundo_do_item(ui, &resposta, rect, ativa, em_cima);
-    if let (Some(s), Some(a)) = (&seta, aberta) {
-        desenhar_seta(ui, s, a);
+    let em_cima = resposta.hovered();
+    fundo_do_item(ui, &resposta, rect, ativo, em_cima);
+
+    let seta = seta_do_ramo(ui, rect, rect.width() - 30.0, true, resposta.id.with("seta"));
+    desenhar_seta(ui, &seta, true, 1.0);
+    let (texto, cor, com_fundo) = contagem.etiqueta();
+    let fonte = tema::fonte_etiqueta();
+    let largura_etiqueta = ui.painter().layout_no_wrap(texto.clone(), fonte.clone(), cor).size().x + if com_fundo { 12.0 } else { 0.0 };
+    let x_etiqueta = rect.right() - 32.0 - largura_etiqueta;
+    if com_fundo {
+        tema::etiqueta(ui.painter(), pos2(x_etiqueta, rect.center().y - 9.5), &texto, fonte, cor);
+    } else {
+        ui.painter().text(pos2(x_etiqueta, rect.center().y), egui::Align2::LEFT_CENTER, texto, FontId::proportional(11.5), cor);
     }
-    let estado = estado_da_tarefa(tarefa);
-    tema::ponto(ui.painter(), pos2(rect.left() + 26.0, rect.center().y), 4.0, estado);
-    let numero = ui.painter().layout_no_wrap(format!("#{}", tarefa.id), FontId::proportional(11.5), p.suave);
-    let x = rect.left() + 36.0;
-    let largura = rect.right() - 10.0 - numero.size().x - 8.0 - x;
-    let titulo = tema::cortar(ui.painter(), &tarefa.titulo, egui::TextFormat::simple(FontId::proportional(13.5), p.texto), largura.max(24.0), 1, false);
-    ui.painter().galley(pos2(x, rect.center().y - titulo.size().y / 2.0), titulo, p.texto);
-    ui.painter().galley(pos2(rect.right() - 10.0 - numero.size().x, rect.center().y - numero.size().y / 2.0), numero, p.suave);
-    (resposta.on_hover_text(&tarefa.titulo), seta)
+
+    // O segundo número, em cinza, antes da etiqueta: "3 esperam · [1 com erro]".
+    // Só se sobrar lugar para o nome do projeto.
+    let x = rect.left() + X_NOME;
+    let mut x_livre = x_etiqueta;
+    if let Some(segundo) = contagem.segundo() {
+        let g = ui.painter().layout_no_wrap(format!("{segundo} ·"), FontId::proportional(11.0), p.suave);
+        if x_etiqueta - 5.0 - g.size().x - x >= 80.0 {
+            x_livre = x_etiqueta - 5.0 - g.size().x;
+            ui.painter().galley(pos2(x_livre, rect.center().y - g.size().y / 2.0), g, p.suave);
+        }
+    }
+
+    quadradinho(ui.painter(), pos2(rect.left() + X_FIO, rect.center().y), &projeto.nome);
+    let cor = tema::cor_animada(ui, resposta.id.with("cor"), ativo || em_cima, tema::misturar(p.suave, p.texto, 0.8), p.texto);
+    let nome = tema::cortar(ui.painter(), &projeto.nome, egui::TextFormat::simple(tema::forte(13.5), cor), (x_livre - 8.0 - x).max(24.0), 1, false);
+    ui.painter().galley(pos2(x, rect.center().y - nome.size().y / 2.0), nome, cor);
+    (resposta, Some(seta))
 }
 
-/// O agente na árvore: o cotovelo vindo da guia da tarefa e a pílula com o
-/// ponto de estado, o nome, o papel e o estado.
-fn linha_do_agente(ui: &mut Ui, agente: &AgenteTela, focado: bool, ultimo: bool) -> Response {
+/// A bolinha de um agente: a inicial da ferramenta com o anel na cor do
+/// estado, mais grosso quando ele pede você.
+fn bolinha_do_agente(pintor: &egui::Painter, centro: egui::Pos2, agente: &AgenteTela, realce: bool) {
     let p = cores();
-    let (rect, resposta) = ui.allocate_exact_size(vec2(ui.available_width(), ALTURA_AGENTE), Sense::click());
-    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let pintor = ui.painter();
-    let guia = rect.left() + RECUO_TAREFA + 20.0;
-    let meio = rect.center().y;
-    let traco = Stroke::new(1.0, p.borda);
-    let raio = 6.0;
-    let mut cotovelo = vec![pos2(guia, rect.top())];
-    cotovelo.extend((0..=6).map(|i| {
-        let a = PI - FRAC_PI_2 * i as f32 / 6.0;
-        pos2(guia + raio + raio * a.cos(), meio - raio + raio * a.sin())
-    }));
-    cotovelo.push(pos2(guia + 10.0, meio));
-    pintor.add(Shape::line(cotovelo, traco));
-    if !ultimo {
-        pintor.line_segment([pos2(guia, rect.top()), pos2(guia, rect.bottom())], traco);
-    }
-
-    let pilula = Rect::from_min_max(pos2(guia + 14.0, rect.top() + 1.0), pos2(rect.right(), rect.bottom() - 1.0));
-    let mouse = tema::transicao(ui, resposta.id.with("mouse"), resposta.hovered());
-    let escolhido = tema::transicao(ui, resposta.id.with("ativo"), focado);
-    let redondo = CornerRadius::same((pilula.height() / 2.0) as u8);
-    if mouse > 0.0 {
-        pintor.rect_filled(pilula, redondo, tema::realce_lateral(p).gamma_multiply(mouse * 0.6));
-    }
-    if escolhido > 0.0 {
-        let fundo = p.destaque.gamma_multiply(0.15 * escolhido);
-        pintor.rect(pilula, redondo, fundo, Stroke::new(1.0, p.destaque.gamma_multiply(0.5 * escolhido)), egui::StrokeKind::Inside);
-    }
     let estado = agente.visual();
-    tema::ponto(pintor, pos2(pilula.left() + 12.0, meio), 3.5, estado);
-    let cor_nome = if estado.cheio() { p.texto } else { p.suave };
-    let mut x = pilula.left() + 22.0;
-    let limite = pilula.right() - 10.0;
-    let nome = tema::cortar(pintor, &agente.nome(), egui::TextFormat::simple(FontId::proportional(13.0), cor_nome), (limite - x).max(24.0), 1, false);
-    x += nome.size().x;
-    pintor.galley(pos2(pilula.left() + 22.0, meio - nome.size().y / 2.0), nome, cor_nome);
-    let papel = pintor.layout_no_wrap(agente.papel.clone(), FontId::proportional(12.0), p.suave);
-    if x + 6.0 + papel.size().x <= limite {
-        pintor.galley(pos2(x + 6.0, meio - papel.size().y / 2.0), papel.clone(), p.suave);
-        x += 6.0 + papel.size().x;
-    }
-    let cor_estado = if estado.cheio() { estado.cor() } else { p.suave };
-    let livre = limite - x - 10.0;
-    if livre > 24.0 {
-        let texto = minuscula(&agente.estado_curto().0);
-        let g = tema::cortar(pintor, &texto, egui::TextFormat::simple(FontId::proportional(11.5), cor_estado), livre, 1, false);
-        pintor.galley(pos2(limite - g.size().x, meio - g.size().y / 2.0), g, cor_estado);
-    }
-    resposta.on_hover_text(format!("{} · {}", agente.nome_com_papel(), agente.texto_estado()))
+    let cor = if estado.cheio() { estado.cor() } else { p.suave };
+    let traco = if estado.pede_voce() { 2.0 } else { 1.5 };
+    pintor.circle(centro, RAIO_BOLINHA, if realce { p.realce } else { p.superficie_alta }, Stroke::new(traco, cor));
+    let letra = if estado.cheio() { p.texto } else { p.suave };
+    pintor.text(centro, egui::Align2::CENTER_CENTER, inicial(&agente.nome()), tema::forte(10.0), letra);
 }
 
 /// O pé do painel: a abelha com o estado e a linha de resumo, e embaixo as
@@ -1225,8 +1493,8 @@ fn linha_do_agente(ui: &mut Ui, agente: &AgenteTela, focado: bool, ultimo: bool)
 fn bloco_do_uso(ui: &mut Ui, rect: Rect, abelha: &mut Abelha, uso: &Uso, v: &Vista, saida: &mut Saida) {
     let p = cores();
     let pintor = ui.painter();
-    pintor.rect(rect, CornerRadius::same(14), p.superficie_alta, Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
-    pintor.hline((rect.left() + 14.0)..=(rect.right() - 14.0), rect.top() + 1.5, Stroke::new(1.0, p.luz));
+    // Sem caixa dentro do painel: um fio separa o pé da árvore.
+    pintor.hline((rect.left() + 4.0)..=(rect.right() - 4.0), rect.top() - 4.0, Stroke::new(1.0, p.borda));
 
     let linha = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(rect.width() - 8.0, 48.0));
     let em_cima = ui.rect_contains_pointer(linha) || abelha.resumo_aberto;
@@ -1282,7 +1550,10 @@ fn barras_de_uso(ui: &Ui, rect: Rect, uso: &Uso) {
         }
         let dica = match medida {
             Some(m) => format!("{rotulo} · {:.0}% · {}", m.fracao.clamp(0.0, 1.0) * 100.0, m.detalhe),
-            None => format!("{rotulo}: sem dados por enquanto"),
+            // Os limites da conta só vêm na statusLine depois da primeira
+            // resposta de um agente; ao retomar um agente, ele ainda não os sabe.
+            None if rotulo == "Contexto" => "Contexto: o agente em foco ainda não informou".to_string(),
+            None => format!("{rotulo}: o Claude Code informa depois da primeira resposta de um agente"),
         };
         ui.interact(coluna, Id::new(("uso", i)), Sense::hover()).on_hover_text(dica);
     }

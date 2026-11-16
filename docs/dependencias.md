@@ -26,6 +26,12 @@ O programa da abelha fixa usa as mesmas bibliotecas da tela (eframe, tungstenite
 | raw-window-handle | 0.6 | MIT OR Apache-2.0 OR Zlib | O número da janela no X11 (só no Linux) |
 | libc | 0.2 | MIT OR Apache-2.0 | `flock`: uma abelha só por perfil (só no Unix) |
 
+## Só nos testes da tela
+
+| Crate | Versão | Licença | Para quê |
+| --- | --- | --- | --- |
+| egui_kittest (+ kittest, accesskit_consumer, egui-wgpu, dify, image) | 0.36 | MIT OR Apache-2.0 | As fotos das telas (`app/src/fotos.rs`): desenha cada tela num harness do egui e grava o PNG em `app/tests/fotos`. Dependência de desenvolvimento; não entra no binário |
+
 A tela (`colmeia`) também passou a chamar o x11rb e o raw-window-handle, os mesmos de cima e já no binário dela pelo winit, para saber pelos eventos do X11 quando a janela minimiza, volta ou fica em outra área de trabalho ([decisão 0019](decisoes/0019-lista-numerada-e-gramatica-fechada.md)).
 
 ## A voz (`colmeia-voz`)

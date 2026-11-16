@@ -11,6 +11,20 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use serde::Deserialize;
 
+/// Os comandos falados, a voz da abelha e o ouvir o nome estão guardados por
+/// enquanto: falso, a tela esconde os ajustes e nem a tela nem a abelha fixa
+/// abrem o microfone ou falam, mesmo num perfil que ligou antes. As opções
+/// continuam no núcleo; para voltar, basta trocar para verdadeiro. O ditado
+/// na caixa de mensagem e a pergunta livre escrita não dependem disto.
+pub const COMANDOS_FALADOS: bool = false;
+
+/// A pergunta livre com IA (a que usa tokens) também fica guardada por
+/// enquanto: falso, a tela esconde a opção no menu e nos ajustes, e nem a
+/// tela nem a abelha fixa mandam pergunta ao Claude Code, mesmo num perfil
+/// que ligou antes. A opção continua no núcleo; para voltar, basta trocar
+/// para verdadeiro.
+pub const PERGUNTA_LIVRE: bool = false;
+
 /// O que o `colmeia-voz` responde (veja voz/src/protocolo.rs).
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(tag = "evento", rename_all = "snake_case")]

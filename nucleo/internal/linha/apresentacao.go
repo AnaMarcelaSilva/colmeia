@@ -136,6 +136,13 @@ type Slide struct {
 	// Lousa da tarefa, quando ela tem itens: a tela busca os itens sob
 	// demanda e mostra só leitura, na aba "Lousa" da coluna da direita.
 	Lousa *dados.ResumoLousa `json:"lousa,omitempty"`
+	// Montagem: o tópico, a frase e os cartões da tarefa para a reunião
+	// (a API garante uma para cada tarefa que ainda existe).
+	Montagem *dados.Montagem `json:"montagem,omitempty"`
+	// Ordem na pauta (1 em diante; 0 é a ordem padrão) e se já foi
+	// apresentada nesta reunião.
+	Ordem       int  `json:"ordem,omitempty"`
+	Apresentada bool `json:"apresentada,omitempty"`
 
 	ultimo  time.Time
 	ultErro bool
@@ -173,11 +180,16 @@ type Deck struct {
 	Vazio    bool            `json:"vazio"`
 	// TempoAgentes: os números e os textos podem ter o tempo dos agentes.
 	TempoAgentes bool `json:"tempo_agentes"`
-	// Fora: as tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
+	// Fora: as tarefas tiradas da daily de hoje (na daily) ou da sprint
+	// fixa (na sprint), para trazer de volta.
 	Fora []TarefaFora `json:"fora,omitempty"`
+	// Apresentadas: quantas tarefas já foram marcadas nesta reunião.
+	// FechadaEm: a hora ("09:41") em que a daily de hoje foi apresentada.
+	Apresentadas int    `json:"apresentadas"`
+	FechadaEm    string `json:"fechada_em,omitempty"`
 }
 
-// TarefaFora é uma tarefa tirada da daily de hoje.
+// TarefaFora é uma tarefa tirada da daily de hoje ou da sprint.
 type TarefaFora struct {
 	TarefaID int64  `json:"tarefa_id"`
 	Titulo   string `json:"titulo"`
@@ -267,10 +279,20 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		d.ChaveNota = hoje
 		// O dia anterior já foi escolhido com tudo: tirar uma tarefa não puxa
 		// a daily para um dia mais antigo.
+		// Uma tarefa removida também sai (e volta): o título e o projeto
+		// dela vêm do histórico.
+		projetoDe := map[int64]int64{}
+		for _, item := range itens {
+			if item.TarefaID != 0 && item.ProjetoID != 0 {
+				projetoDe[item.TarefaID] = item.ProjetoID
+			}
+		}
 		itens = c.semForaDaDaily(itens)
 		for id := range c.ForaDaDaily {
 			if t, ok := c.Tarefas[id]; ok {
 				d.Fora = append(d.Fora, TarefaFora{TarefaID: id, Titulo: t.Titulo, Projeto: m.nomeProjeto(t.ProjetoID)})
+			} else if projeto, ok := projetoDe[id]; ok {
+				d.Fora = append(d.Fora, TarefaFora{TarefaID: id, Titulo: m.titulo(id), Projeto: m.nomeProjeto(projeto)})
 			}
 		}
 		sort.Slice(d.Fora, func(i, j int) bool { return d.Fora[i].TarefaID < d.Fora[j].TarefaID })
@@ -286,6 +308,23 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		dias := int(ate.Sub(de).Hours()/24+0.5) + 1
 		d.Periodo = plural(dias, "dia", "dias") + escopo
 		d.ChaveNota = inicio + ".." + fim
+		// As tarefas tiradas desta sprint saem do deck; a lista delas vai
+		// junto, para trazer de volta (uma removida tem o título no histórico).
+		projetoDe := map[int64]int64{}
+		for _, item := range itens {
+			if item.TarefaID != 0 && item.ProjetoID != 0 {
+				projetoDe[item.TarefaID] = item.ProjetoID
+			}
+		}
+		itens = c.semForaDaSprint(itens)
+		for id := range c.ForaDaSprint {
+			if t, ok := c.Tarefas[id]; ok {
+				d.Fora = append(d.Fora, TarefaFora{TarefaID: id, Titulo: cmpOr(c.TitulosSprint[id], t.Titulo), Projeto: m.nomeProjeto(t.ProjetoID)})
+			} else if projeto, ok := projetoDe[id]; ok {
+				d.Fora = append(d.Fora, TarefaFora{TarefaID: id, Titulo: cmpOr(c.TitulosSprint[id], m.titulo(id)), Projeto: m.nomeProjeto(projeto)})
+			}
+		}
+		sort.Slice(d.Fora, func(i, j int) bool { return d.Fora[i].TarefaID < d.Fora[j].TarefaID })
 	}
 	d.De, d.Ate = inicio, fim
 
@@ -394,6 +433,17 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 					texto = "Está esperando sua resposta."
 				}
 				s.brutos = append(s.brutos, bruto{parte: "Hoje", texto: texto})
+			}
+		}
+	}
+
+	// Depois da daily apresentada, a tarefa que concluiu (ou sumiu) sem nada
+	// novo desde então já foi falada: sai. O que ficou aberto continua.
+	if tipo == "daily" && !c.DesdeDaily.IsZero() {
+		for id, s := range slides {
+			atual, existe := c.Tarefas[id]
+			if s.ultimo.Before(c.DesdeDaily) && (!existe || atual.Coluna == "concluido") {
+				delete(slides, id)
 			}
 		}
 	}
@@ -701,6 +751,59 @@ func (d *Deck) Completar(anexos []dados.Anexo, notas, anteriores map[int64]dados
 			s.NotaAnterior = &NotaAnterior{Texto: n.Texto, Periodo: periodoLegivel(n.Periodo)}
 		}
 	}
+}
+
+// CompletarMontagens põe em cada slide a montagem da tarefa.
+func (d *Deck) CompletarMontagens(montagens map[int64]dados.Montagem) {
+	for i := range d.Slides {
+		if m, ok := montagens[d.Slides[i].TarefaID]; ok {
+			d.Slides[i].Montagem = &m
+		}
+	}
+}
+
+// CompletarPauta põe em cada slide a ordem e o visto da pauta e reordena
+// dentro de cada seção: as tarefas com ordem primeiro, na ordem, e as
+// outras depois, como vieram. As seções não mudam de lugar.
+func (d *Deck) CompletarPauta(pauta map[int64]dados.ItemPauta, fechadaEm string) {
+	d.FechadaEm = fechadaEm
+	d.Apresentadas = 0
+	secoes := map[string]int{}
+	chave := func(s *Slide) string { return fmt.Sprintf("%d|%s", s.SecaoID, s.Secao) }
+	posicao := make([]int, len(d.Slides))
+	for i := range d.Slides {
+		s := &d.Slides[i]
+		if item, ok := pauta[s.TarefaID]; ok {
+			s.Ordem, s.Apresentada = item.Ordem, item.ApresentadaEm != ""
+		} else {
+			s.Ordem, s.Apresentada = 0, false
+		}
+		if s.Apresentada {
+			d.Apresentadas++
+		}
+		if _, ok := secoes[chave(s)]; !ok {
+			secoes[chave(s)] = len(secoes)
+		}
+		posicao[i] = i
+	}
+	sort.SliceStable(posicao, func(i, j int) bool {
+		a, b := &d.Slides[posicao[i]], &d.Slides[posicao[j]]
+		if secoes[chave(a)] != secoes[chave(b)] {
+			return secoes[chave(a)] < secoes[chave(b)]
+		}
+		switch {
+		case a.Ordem != 0 && b.Ordem != 0:
+			return a.Ordem < b.Ordem
+		case a.Ordem != 0 || b.Ordem != 0:
+			return a.Ordem != 0
+		}
+		return posicao[i] < posicao[j]
+	})
+	novos := make([]Slide, len(d.Slides))
+	for i, p := range posicao {
+		novos[i] = d.Slides[p]
+	}
+	d.Slides = novos
 }
 
 // CompletarLousas põe em cada slide a lousa da tarefa que tem itens.

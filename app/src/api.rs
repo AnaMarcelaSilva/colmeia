@@ -19,9 +19,9 @@ pub struct Perfil {
     /// na apresentação (desligado por padrão; um núcleo antigo não manda).
     #[serde(default)]
     pub tempo_agentes: bool,
-    /// Sugestões no console de bancos (desligado por padrão).
-    #[serde(default)]
-    pub autocompletar_sql: bool,
+    /// O montador da reunião com IA (ligado por padrão; um núcleo antigo não manda).
+    #[serde(default = "verdadeiro")]
+    pub montador: bool,
     /// O acabamento da abelha (o código de `mascote::Modelo`) e o nome dela.
     #[serde(default)]
     pub mascote_modelo: String,
@@ -165,6 +165,10 @@ pub struct Tarefa {
     /// A última mudança de coluna foi do núcleo (o agente parece esperar você).
     #[serde(default)]
     pub coluna_auto: bool,
+    /// O dia local em que a tarefa entrou no Concluído ("2026-10-21"; vazio
+    /// fora dele ou num núcleo antigo): base do "Concluído só de hoje".
+    #[serde(default)]
+    pub concluida_dia: String,
 }
 
 /// Como um agente terminou.
@@ -435,11 +439,11 @@ fn lista_ou_nulo<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) ->
     Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
 }
 
-/// O texto da daily (os blocos que o núcleo também manda não são usados:
-/// os cartões da página vêm do deck da apresentação).
+/// O resumo da daily do núcleo: a página só usa `vazio` e o tempo (o texto
+/// e os blocos vêm do deck da apresentação; o texto do núcleo fica para a
+/// abelha e a voz).
 #[derive(Clone, Debug, Deserialize)]
 pub struct Daily {
-    pub texto: String,
     pub vazio: bool,
     #[serde(default)]
     pub tempo_agentes: bool,
@@ -625,6 +629,62 @@ pub struct Slide {
     /// A lousa da tarefa, quando tem itens (os itens vêm sob demanda).
     #[serde(default)]
     pub lousa: Option<ResumoLousa>,
+    /// O que a reunião mostra da tarefa: o tópico e a frase do slide e os
+    /// cartões da coluna dela na lousa da reunião (o núcleo manda sempre).
+    #[serde(default)]
+    pub montagem: Option<Montagem>,
+    /// Já foi apresentada nesta reunião (a ordem da pauta já vem aplicada).
+    #[serde(default)]
+    pub apresentada: bool,
+}
+
+/// Um cartão da coluna da tarefa na lousa da reunião: uma nota (título e
+/// texto) ou uma imagem (anexo) com legenda.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Cartao {
+    #[serde(default)]
+    pub titulo: String,
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub imagem: i64,
+    #[serde(default)]
+    pub legenda: String,
+}
+
+/// A montagem de uma tarefa para a reunião (pacote montagem do núcleo).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Montagem {
+    #[serde(default)]
+    pub tarefa_id: i64,
+    #[serde(default)]
+    pub topico: String,
+    #[serde(default)]
+    pub frase: String,
+    #[serde(default, deserialize_with = "lista_ou_nulo")]
+    pub cartoes: Vec<Cartao>,
+    /// "simples" (sem IA) ou "montador" (com IA).
+    #[serde(default)]
+    pub origem: String,
+    #[serde(default)]
+    pub montada_em: String,
+}
+
+impl Montagem {
+    /// A montagem foi feita pelo montador com IA.
+    pub fn com_ia(&self) -> bool {
+        self.origem == "montador"
+    }
+}
+
+/// Refaz a montagem simples agora; com `com_agente`, o montador roda em
+/// seguida e a tela recebe "montagem.mudou".
+pub fn remontar(tarefa: i64, com_agente: bool) -> Result<Montagem, String> {
+    chamar("POST", &format!("/v1/tarefas/{tarefa}/montagem"), Some(json!({ "com_agente": com_agente })))
+}
+
+pub fn definir_montador(perfil: i64, ligado: bool) -> Result<(), String> {
+    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "montador": ligado }))).map(|_| ())
 }
 
 /// A lousa de uma tarefa no slide: o id e quantos itens ela tem.
@@ -665,6 +725,12 @@ pub struct Deck {
     /// As tarefas tiradas da daily de hoje (só na daily), para trazer de volta.
     #[serde(default, deserialize_with = "lista_ou_nulo")]
     pub fora: Vec<TarefaFora>,
+    /// Quantas tarefas já foram marcadas como apresentadas nesta reunião e,
+    /// na daily, a hora ("09:41") em que a de hoje foi apresentada.
+    #[serde(default)]
+    pub apresentadas: usize,
+    #[serde(default)]
+    pub fechada_em: String,
 }
 
 /// Uma tarefa tirada da daily de hoje.
@@ -678,13 +744,71 @@ pub struct TarefaFora {
 
 // Lousa (quadro livre) do workspace e da tarefa.
 
-/// De quem é a lousa: um workspace ou uma tarefa.
+/// De quem é a lousa: um workspace, uma tarefa, a daily de um dia do perfil
+/// ou uma sprint (só um dos quatro). O dia vai como AAAAMMDD (o núcleo fala
+/// "AAAA-MM-DD"), para a chave continuar copiável.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct DonoLousa {
     #[serde(default, skip_serializing_if = "zero")]
     pub workspace_id: i64,
     #[serde(default, skip_serializing_if = "zero")]
     pub tarefa_id: i64,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub perfil_id: i64,
+    #[serde(default, skip_serializing_if = "zero", serialize_with = "dia_para_texto", deserialize_with = "dia_de_texto")]
+    pub dia: i64,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub sprint_id: i64,
+}
+
+impl DonoLousa {
+    pub fn workspace(id: i64) -> DonoLousa {
+        DonoLousa { workspace_id: id, ..Default::default() }
+    }
+
+    pub fn tarefa(id: i64) -> DonoLousa {
+        DonoLousa { tarefa_id: id, ..Default::default() }
+    }
+
+    /// A lousa da daily do dia ("AAAA-MM-DD") do perfil.
+    pub fn daily(perfil: i64, dia: &str) -> DonoLousa {
+        DonoLousa { perfil_id: perfil, dia: dia_como_numero(dia), ..Default::default() }
+    }
+
+    pub fn sprint(id: i64) -> DonoLousa {
+        DonoLousa { sprint_id: id, ..Default::default() }
+    }
+
+    /// A lousa é a de uma daily ou de uma sprint.
+    pub fn da_reuniao(&self) -> bool {
+        self.dia != 0 || self.sprint_id != 0
+    }
+
+    /// O dia como o núcleo fala ("AAAA-MM-DD"), vazio sem dia.
+    pub fn dia_texto(&self) -> String {
+        if self.dia == 0 {
+            return String::new();
+        }
+        format!("{:04}-{:02}-{:02}", self.dia / 10000, self.dia / 100 % 100, self.dia % 100)
+    }
+}
+
+/// "2026-11-13" vira 20261113 (0 se não for uma data).
+pub fn dia_como_numero(dia: &str) -> i64 {
+    let partes: Vec<i64> = dia.split('-').filter_map(|p| p.parse().ok()).collect();
+    match partes[..] {
+        [a, m, d] if (1..=12).contains(&m) && (1..=31).contains(&d) => a * 10000 + m * 100 + d,
+        _ => 0,
+    }
+}
+
+fn dia_para_texto<S: serde::Serializer>(dia: &i64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&DonoLousa { dia: *dia, ..Default::default() }.dia_texto())
+}
+
+fn dia_de_texto<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let texto: Option<String> = Option::deserialize(d)?;
+    Ok(texto.map_or(0, |t| dia_como_numero(&t)))
 }
 
 fn zero(v: &i64) -> bool {
@@ -761,11 +885,14 @@ pub struct ElementoLousa {
     pub de: i64,
     #[serde(default)]
     pub para: i64,
-    /// "voce" ou "agente".
+    /// "voce", "agente" ou "montador" (o núcleo, na lousa da reunião).
     #[serde(default)]
     pub autor: String,
     #[serde(default)]
     pub agente_id: i64,
+    /// A tarefa da peça montada pelo núcleo (0 nas outras).
+    #[serde(default)]
+    pub montagem_de: i64,
     #[serde(default)]
     pub versao: i64,
     #[serde(default)]
@@ -885,7 +1012,16 @@ struct RespostaLote {
 }
 
 pub fn abrir_lousa(dono: DonoLousa) -> Result<LousaAberta, String> {
-    let caminho = if dono.workspace_id != 0 { format!("/v1/workspaces/{}/lousa", dono.workspace_id) } else { format!("/v1/tarefas/{}/lousa", dono.tarefa_id) };
+    if dono.dia != 0 {
+        return chamar("POST", &format!("/v1/perfis/{}/daily/lousa", dono.perfil_id), Some(json!({ "dia": dono.dia_texto() })));
+    }
+    let caminho = if dono.sprint_id != 0 {
+        format!("/v1/sprints/{}/lousa", dono.sprint_id)
+    } else if dono.workspace_id != 0 {
+        format!("/v1/workspaces/{}/lousa", dono.workspace_id)
+    } else {
+        format!("/v1/tarefas/{}/lousa", dono.tarefa_id)
+    };
     chamar("POST", &caminho, None)
 }
 
@@ -1043,10 +1179,6 @@ pub fn definir_tema(perfil: i64, tema: &str) -> Result<(), String> {
 
 pub fn definir_aviso_captura(perfil: i64, mostrar: bool) -> Result<(), String> {
     chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "aviso_captura": mostrar }))).map(|_| ())
-}
-
-pub fn definir_autocompletar_sql(perfil: i64, ligado: bool) -> Result<(), String> {
-    chamar::<Ok>("PATCH", &format!("/v1/perfis/{perfil}"), Some(json!({ "autocompletar_sql": ligado }))).map(|_| ())
 }
 
 pub fn definir_mascote(perfil: i64, modelo: &str, nome: &str) -> Result<(), String> {
@@ -1219,10 +1351,36 @@ pub fn editar_sprint(id: i64, inicio: &str, fim: &str) -> Result<SprintFixa, Str
 }
 
 /// Um assunto da sprint: junta tarefas de projetos diferentes na reunião.
-#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Assunto {
     pub id: i64,
     pub nome: String,
+    /// A fala do assunto na reunião: escrita por você ("voce") ou gerada
+    /// pela IA ("ia", com `texto_tarefas` tarefas). Vazia, sem fala.
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub texto_origem: String,
+    #[serde(default)]
+    pub texto_tarefas: i64,
+}
+
+/// Grava a fala do assunto escrita por você (vazia apaga).
+pub fn texto_do_assunto(id: i64, texto: &str) -> Result<Assunto, String> {
+    chamar("PUT", &format!("/v1/assuntos/{id}/texto"), Some(json!({ "texto": texto })))
+}
+
+/// Pede ao Claude Code a fala do assunto com as tarefas dele que ficaram na
+/// sprint (no recorte da página); espera a resposta.
+pub fn gerar_texto_do_assunto(id: i64, recorte: Recorte) -> Result<Assunto, String> {
+    let caminho = format!("/v1/assuntos/{id}/texto/gerar?{}", recorte.consulta().trim_start_matches('&'));
+    chamar_ate("POST", &caminho, Some(json!({})), std::time::Duration::from_secs(200))
+}
+
+/// Tira a tarefa da sprint fixa (`fora`) ou a traz de volta; a daily e a
+/// linha do tempo continuam com ela.
+pub fn tirar_da_sprint(sprint: i64, tarefa: i64, fora: bool) -> Result<(), String> {
+    sem_conteudo("PUT", &format!("/v1/sprints/{sprint}/fora/{tarefa}"), Some(json!({ "fora": fora })))
 }
 
 pub fn criar_assunto(sprint: i64, nome: &str) -> Result<Assunto, String> {
@@ -1455,6 +1613,37 @@ pub fn gravar_nota(tarefa: i64, tipo: &str, periodo: &str, texto: &str, versao: 
 
 /// Tira a tarefa da daily do `dia` (AAAA-MM-DD) ou, com `fora` falso, traz
 /// de volta. A sprint e a linha do tempo não mudam.
+/// A ordem da pauta de uma reunião (tipo daily ou sprint; chave é a
+/// chave_nota do deck).
+pub fn ordenar_pauta(perfil: i64, tipo: &str, chave: &str, ordem: &[i64]) -> Result<(), String> {
+    let corpo = json!({ "tipo": tipo, "chave": chave, "ordem": ordem }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/perfis/{perfil}/pauta"), Some(&corpo))?;
+    match status {
+        204 => Ok(()),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
+/// Marca (ou desmarca) a tarefa como apresentada na reunião.
+pub fn marcar_apresentada(perfil: i64, tipo: &str, chave: &str, tarefa: i64, apresentada: bool) -> Result<(), String> {
+    let corpo = json!({ "tipo": tipo, "chave": chave, "apresentada": apresentada }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/perfis/{perfil}/pauta/{tarefa}"), Some(&corpo))?;
+    match status {
+        204 => Ok(()),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
+/// "Daily apresentada": fecha a daily do dia; a próxima começa dali.
+pub fn fechar_daily(perfil: i64, dia: &str) -> Result<(), String> {
+    let corpo = json!({ "dia": dia }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/perfis/{perfil}/daily/apresentada"), Some(&corpo))?;
+    match status {
+        200 => Ok(()),
+        _ => Err(serde_json::from_str::<Erro>(&resposta).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
 pub fn tirar_da_daily(tarefa: i64, dia: &str, fora: bool) -> Result<(), String> {
     let corpo = json!({ "dia": dia, "fora": fora }).to_string();
     let (status, resposta) = canal::pedir_com_corpo("PUT", &format!("/v1/tarefas/{tarefa}/daily"), Some(&corpo))?;
@@ -1503,6 +1692,14 @@ pub struct Comando {
     pub campos: CamposComando,
     #[serde(default)]
     pub origem: String,
+    /// Proposta por um agente e ainda não aceita: não roda até você aceitar.
+    #[serde(default)]
+    pub proposta: bool,
+    #[serde(default)]
+    pub proposta_por: String,
+    /// O nome do projeto, na lista por workspace.
+    #[serde(default)]
+    pub projeto_nome: String,
     #[serde(default)]
     pub rodando: bool,
     #[serde(default)]
@@ -1537,6 +1734,11 @@ pub struct Sugestoes {
 
 pub fn comandos(projeto: i64) -> Result<Vec<Comando>, String> {
     chamar::<Option<Vec<Comando>>>("GET", &format!("/v1/projetos/{projeto}/comandos"), None).map(Option::unwrap_or_default)
+}
+
+/// Faz valer a proposta de um agente.
+pub fn aceitar_comando(id: i64) -> Result<Comando, String> {
+    chamar("POST", &format!("/v1/comandos/{id}/aceitar"), None)
 }
 
 pub fn sugestoes_de_comandos(projeto: i64) -> Result<Sugestoes, String> {
@@ -1765,6 +1967,75 @@ pub fn descricao(tarefa: i64) -> Result<Descricao, String> {
     chamar("GET", &format!("/v1/tarefas/{tarefa}/descricao"), None)
 }
 
+/// Os checks do PR, resumidos: "ok", "falhou", "rodando" ou vazio sem checks.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Checks {
+    #[serde(default)]
+    pub resumo: String,
+    #[serde(default)]
+    pub ok: usize,
+    #[serde(default)]
+    pub falhou: usize,
+    #[serde(default)]
+    pub rodando: usize,
+    #[serde(default)]
+    pub total: usize,
+}
+
+/// O PR da branch da tarefa no GitHub (pelo gh).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PullRequest {
+    #[serde(default)]
+    pub numero: i64,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub titulo: String,
+    /// aberto, rascunho, incorporado ou fechado.
+    #[serde(default)]
+    pub estado: String,
+    #[serde(default)]
+    pub checks: Checks,
+}
+
+/// A branch da tarefa no GitHub: se foi enviada, o PR e os checks.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Github {
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub base: String,
+    /// Se há um remoto origin (sem ele, nada a enviar).
+    #[serde(default)]
+    pub origin: bool,
+    /// "dono/repo"; vazio com o origin fora do GitHub.
+    #[serde(default)]
+    pub repositorio: String,
+    #[serde(default)]
+    pub enviada: bool,
+    #[serde(default)]
+    pub a_enviar: usize,
+    #[serde(default)]
+    pub comparar: String,
+    #[serde(default)]
+    pub pulls: String,
+    #[serde(default)]
+    pub gh: bool,
+    #[serde(default)]
+    pub pr: Option<PullRequest>,
+    #[serde(default)]
+    pub aviso: String,
+}
+
+pub fn github(tarefa: i64) -> Result<Github, String> {
+    chamar_ate("GET", &format!("/v1/tarefas/{tarefa}/github"), None, std::time::Duration::from_secs(30))
+}
+
+/// Manda a branch da tarefa ao origin (pode levar um tempo) e traz a situação nova.
+pub fn enviar_ao_github(tarefa: i64) -> Result<Github, String> {
+    chamar_ate("POST", &format!("/v1/tarefas/{tarefa}/github/enviar"), None, std::time::Duration::from_secs(120))
+}
+
 /// A linha do tempo de uma tarefa (a aba da tarefa).
 pub fn linha_da_tarefa(perfil: i64, tarefa: i64, antes: i64) -> Result<PaginaLinha, String> {
     let mut caminho = format!("/v1/perfis/{perfil}/linha-do-tempo?limite=200&tarefa={tarefa}");
@@ -1958,6 +2229,17 @@ pub fn mover_tarefa(tarefa: i64, coluna: &str) -> Result<Tarefa, String> {
     chamar("PATCH", &format!("/v1/tarefas/{tarefa}"), Some(json!({ "coluna": coluna })))
 }
 
+/// A tarefa muda de projeto (do mesmo perfil): notas, lousa, anexos e
+/// histórico vão junto; a branch só segue se existir no destino.
+pub fn transferir_tarefa(tarefa: i64, projeto: i64) -> Result<Tarefa, String> {
+    chamar("PUT", &format!("/v1/tarefas/{tarefa}/projeto"), Some(json!({ "projeto": projeto })))
+}
+
+/// O título da tarefa, em todo lugar (quadro, daily, sprint e histórico).
+pub fn renomear_tarefa(tarefa: i64, titulo: &str) -> Result<Tarefa, String> {
+    chamar("PATCH", &format!("/v1/tarefas/{tarefa}"), Some(json!({ "titulo": titulo })))
+}
+
 pub fn remover_tarefa(tarefa: i64) -> Result<(), String> {
     chamar::<Ok>("DELETE", &format!("/v1/tarefas/{tarefa}"), None).map(|_| ())
 }
@@ -1996,6 +2278,82 @@ pub fn sessoes(tarefa: i64) -> Result<Sessoes, String> {
 }
 
 /// Desliga o núcleo, que encerra os agentes antes (como `colmeia-nucleo --encerrar`).
+/// A versão nova da Colmeia, como o núcleo vê: "atualizada", "disponivel",
+/// "baixando", "pronta", "reiniciando" ou "erro".
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct EstadoAtualizacao {
+    pub estado: String,
+    #[serde(default)]
+    pub atual: String,
+    #[serde(default)]
+    pub versao: String,
+    /// O que mudou, do CHANGELOG da versão.
+    #[serde(default)]
+    pub notas: String,
+    /// Troca os programas sozinha; sem isso, leva à página da versão.
+    #[serde(default)]
+    pub instalavel: bool,
+    #[serde(default)]
+    pub pagina: String,
+    #[serde(default)]
+    pub baixados: i64,
+    #[serde(default)]
+    pub tamanho: i64,
+    #[serde(default)]
+    pub erro: String,
+    /// Procurar ao abrir a Colmeia (vale para a instalação, não só o perfil).
+    #[serde(default)]
+    pub procurar: bool,
+    /// Como foi a última troca, uma vez.
+    #[serde(default)]
+    pub aviso: String,
+    /// Agentes e Play rodando, que reiniciar fecha.
+    #[serde(default)]
+    pub abertos: usize,
+    /// Pedida para quando os agentes fecharem.
+    #[serde(default)]
+    pub ao_fechar: bool,
+}
+
+impl EstadoAtualizacao {
+    /// Há algo para mostrar no trilho.
+    pub fn tem_novidade(&self) -> bool {
+        matches!(self.estado.as_str(), "disponivel" | "baixando" | "pronta" | "erro")
+    }
+}
+
+/// O estado de agora, sem ir à rede (com quantos agentes estão rodando).
+pub fn ver_atualizacao() -> Result<EstadoAtualizacao, String> {
+    chamar("GET", "/v1/atualizacao", None)
+}
+
+/// Pede ao núcleo para olhar a versão mais nova; a resposta chega pelo evento.
+pub fn procurar_atualizacao() -> Result<EstadoAtualizacao, String> {
+    chamar("POST", "/v1/atualizacao/procurar", None)
+}
+
+/// `quando`: "agora" ou "ao_fechar" (quando não sobrar agente rodando).
+pub fn instalar_atualizacao(quando: &str) -> Result<(), String> {
+    match canal::pedir_com_corpo("POST", "/v1/atualizacao/instalar", Some(&json!({ "quando": quando }).to_string()))? {
+        (202, _) => Ok(()),
+        (status, corpo) => Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
+pub fn cancelar_atualizacao() -> Result<(), String> {
+    match canal::pedir_com_corpo("POST", "/v1/atualizacao/cancelar", None)? {
+        (204, _) => Ok(()),
+        (status, corpo) => Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
+pub fn procurar_ao_abrir(ligado: bool) -> Result<(), String> {
+    match canal::pedir_com_corpo("PUT", "/v1/atualizacao/opcoes", Some(&json!({ "procurar": ligado }).to_string()))? {
+        (204, _) => Ok(()),
+        (status, corpo) => Err(serde_json::from_str::<Erro>(&corpo).map(|e| e.erro).unwrap_or_else(|_| erro_sem_corpo(status))),
+    }
+}
+
 pub fn encerrar_nucleo() -> Result<(), String> {
     match canal::pedir_com_corpo("POST", "/v1/encerrar", None)? {
         (202, _) => Ok(()),
@@ -2033,6 +2391,12 @@ pub struct ConexaoBanco {
     pub escrita: bool,
     #[serde(default)]
     pub agentes: bool,
+    /// As consultas dos agentes rodam sem pedir, até você desmarcar.
+    #[serde(default)]
+    pub agentes_livre: bool,
+    /// Os agentes também alteram dados (só com `escrita`).
+    #[serde(default)]
+    pub agentes_escrita: bool,
     /// Onde a senha está: "chaveiro", "memoria" ou "nenhuma".
     #[serde(default)]
     pub senha: String,
@@ -2064,6 +2428,8 @@ pub struct CamposConexao {
     pub ssl_ca: String,
     pub escrita: bool,
     pub agentes: bool,
+    pub agentes_livre: bool,
+    pub agentes_escrita: bool,
 }
 
 /// O resultado do "Testar".
@@ -2442,7 +2808,7 @@ mod testes {
     fn daily_com_blocos_nulos_ainda_e_lida() {
         // Um núcleo da 0.2.0 mandava "blocos":null num projeto sem nada hoje.
         let d: Daily = serde_json::from_str(r#"{"periodo":"Hoje","hoje":{"titulo":"Hoje","blocos":null},"texto":"x","vazio":true}"#).unwrap();
-        assert!(d.vazio && d.texto == "x");
+        assert!(d.vazio && !d.tempo_agentes);
     }
 
     #[test]
@@ -2509,4 +2875,110 @@ mod testes_bancos {
         assert_eq!(v["senha"], "x");
         assert!(corpo_conexao(&c, None, false).get("senha").is_none());
     }
+}
+
+/// Uma rotina do workspace (veja o núcleo: dados.Rotina), com a próxima
+/// rodada da agenda já em texto.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Rotina {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub nome: String,
+    pub pedido: String,
+    #[serde(default)]
+    pub do_quadro: bool,
+    #[serde(default)]
+    pub do_codigo: bool,
+    #[serde(default)]
+    pub dias: i64,
+    #[serde(default)]
+    pub agenda_dias: Vec<u8>,
+    #[serde(default)]
+    pub agenda_hora: String,
+    #[serde(default)]
+    pub ativa: bool,
+    #[serde(default)]
+    pub ultima: Option<Rodada>,
+    #[serde(default)]
+    pub proxima_texto: String,
+}
+
+/// Uma vez que a rotina rodou. `texto` só vem em `rodada(id)`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Rodada {
+    pub id: i64,
+    pub rotina_id: i64,
+    #[serde(default)]
+    pub momento: String,
+    #[serde(default)]
+    pub momento_texto: String,
+    #[serde(default)]
+    pub origem: String,
+    #[serde(default)]
+    pub estado: String,
+    #[serde(default)]
+    pub de: String,
+    #[serde(default)]
+    pub ate: String,
+    #[serde(default)]
+    pub texto: String,
+    #[serde(default)]
+    pub resumo: String,
+    #[serde(default)]
+    pub erro: String,
+}
+
+/// O que a tela manda ao criar ou editar uma rotina.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NovaRotina {
+    pub nome: String,
+    pub pedido: String,
+    pub do_quadro: bool,
+    pub do_codigo: bool,
+    pub dias: i64,
+    pub agenda_dias: Vec<u8>,
+    pub agenda_hora: String,
+    pub ativa: bool,
+}
+
+#[derive(Deserialize)]
+struct ListaRotinas {
+    rotinas: Vec<Rotina>,
+    #[serde(default)]
+    claude: bool,
+}
+
+/// As rotinas do workspace e se o Claude Code está instalado.
+pub fn rotinas(workspace: i64) -> Result<(Vec<Rotina>, bool), String> {
+    chamar::<ListaRotinas>("GET", &format!("/v1/workspaces/{workspace}/rotinas"), None).map(|l| (l.rotinas, l.claude))
+}
+
+pub fn criar_rotina(workspace: i64, nova: &NovaRotina) -> Result<Rotina, String> {
+    chamar("POST", &format!("/v1/workspaces/{workspace}/rotinas"), Some(serde_json::to_value(nova).unwrap_or_default()))
+}
+
+pub fn editar_rotina(id: i64, nova: &NovaRotina) -> Result<Rotina, String> {
+    chamar("PATCH", &format!("/v1/rotinas/{id}"), Some(serde_json::to_value(nova).unwrap_or_default()))
+}
+
+pub fn remover_rotina(id: i64) -> Result<(), String> {
+    chamar::<serde_json::Value>("DELETE", &format!("/v1/rotinas/{id}"), None).map(|_| ())
+}
+
+/// Começa uma rodada; o resultado chega pelo evento rodada.terminou.
+pub fn rodar_rotina(id: i64) -> Result<Rodada, String> {
+    chamar("POST", &format!("/v1/rotinas/{id}/rodar"), None)
+}
+
+#[derive(Deserialize)]
+struct ListaRodadas {
+    rodadas: Vec<Rodada>,
+}
+
+pub fn rodadas(rotina: i64) -> Result<Vec<Rodada>, String> {
+    chamar::<ListaRodadas>("GET", &format!("/v1/rotinas/{rotina}/rodadas?max=30"), None).map(|l| l.rodadas)
+}
+
+pub fn rodada(id: i64) -> Result<Rodada, String> {
+    chamar("GET", &format!("/v1/rodadas/{id}"), None)
 }

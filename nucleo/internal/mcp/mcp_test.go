@@ -34,10 +34,16 @@ func (n *nucleoFalso) Pedir(ctx context.Context, metodo, caminho string, corpo a
 		return 400, []byte(`{"erro":"Só endereços http, https ou arquivos desta pasta"}`), nil
 	case caminho == "/v1/agente/lousa":
 		return 200, []byte(`{"lousa":3,"elementos":[{"id":1,"tipo":"nota","texto":"Fluxo da tela"}]}`), nil
+	case caminho == "/v1/agente/lousa/elementos" && metodo == "DELETE":
+		return 200, []byte(`{"lousa":3,"removidos":[7,9]}`), nil
 	case caminho == "/v1/agente/lousa/elementos":
 		return 200, []byte(`{"lousa":3,"ids":[7,8,9],"refs":{"a":7,"b":8}}`), nil
 	case caminho == "/v1/agente/coluna":
 		return 200, []byte(`{"tarefa":1,"coluna":"concluido"}`), nil
+	case caminho == "/v1/agente/comandos" && metodo == "GET":
+		return 200, []byte(`{"projeto":"loja-web","workspace":"loja","comandos":[{"id":2,"projeto":"loja-api","nome":"api","comando":"go run .","pasta":"","variaveis":["PORTA"],"proposta":true,"rodando":false}]}`), nil
+	case caminho == "/v1/agente/comandos":
+		return 200, []byte(`{"id":5,"projeto":"loja-web","nome":"app","proposta":true}`), nil
 	case caminho == "/v1/agente/bancos":
 		return 200, []byte(`{"conexoes":[{"id":4,"nome":"loja-web-dev","tipo":"postgres","banco":"loja"}]}`), nil
 	case caminho == "/v1/agente/bancos/4/consultas":
@@ -138,7 +144,7 @@ func TestServidorMCP(t *testing.T) {
 	for _, f := range ferramentas {
 		nomes = append(nomes, f.(map[string]any)["name"].(string))
 	}
-	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,mover_tarefa,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,ler_conhecimento,anotar_conhecimento,listar_bancos,consultar_banco" {
+	if strings.Join(nomes, ",") != "ler_tarefa,ler_nota,complementar_nota,escrever_nota,mover_tarefa,criar_tarefa,listar_projetos,transferir_tarefa,listar_tarefas,anexar_imagem,abrir_navegador,capturar_navegador,concluir_pedido,ler_lousa,acrescentar_a_lousa,apagar_da_lousa,montar_quadro_da_reuniao,ler_conhecimento,anotar_conhecimento,listar_plays,propor_play,listar_bancos,consultar_banco" {
 		t.Errorf("ferramentas: %v", nomes)
 	}
 
@@ -172,7 +178,7 @@ func TestServidorMCP(t *testing.T) {
 		t.Errorf("captura anexa por padrão: %v", corpo)
 	}
 
-	// Mover a tarefa: só Revisão ou Concluído, sem escolher outra tarefa.
+	// Mover a tarefa: qualquer coluna do quadro, a sua ou outra do projeto.
 	if texto, erro := resultado(t, c.chamar(15, "mover_tarefa", `{"coluna":"concluido"}`)); erro || !strings.Contains(texto, "Concluído") {
 		t.Errorf("mover_tarefa: %q %v", texto, erro)
 	}
@@ -180,7 +186,7 @@ func TestServidorMCP(t *testing.T) {
 		t.Errorf("pedido de mover: %s", p)
 	}
 	antes = len(nucleo.pedidos)
-	for _, ruim := range []string{`{}`, `{"coluna":"concluido","tarefa":2}`, `{"coluna":5}`} {
+	for _, ruim := range []string{`{}`, `{"coluna":"feito"}`, `{"coluna":5}`} {
 		if texto, erro := resultado(t, c.chamar(16, "mover_tarefa", ruim)); !erro {
 			t.Errorf("mover_tarefa aceitou %s: %q", ruim, texto)
 		}
@@ -194,6 +200,30 @@ func TestServidorMCP(t *testing.T) {
 		}
 	}
 
+	// O Play: listar o do workspace e propor um (o usuário aceita na tela).
+	if texto, erro := resultado(t, c.chamar(30, "listar_plays", `{}`)); erro || !strings.Contains(texto, "[2] loja-api › api: go run . · proposta") || !strings.Contains(texto, "variáveis: [PORTA]") {
+		t.Errorf("listar_plays: %q %v", texto, erro)
+	}
+	if texto, erro := resultado(t, c.chamar(31, "propor_play", `{"nome":"app","comando":"flutter run -d linux","pasta":"app","ambiente":[{"nome":"PORTA","valor":"8081"}]}`)); erro || !strings.Contains(texto, "Proposto o Play “app” no projeto loja-web") {
+		t.Errorf("propor_play: %q %v", texto, erro)
+	}
+	if p := nucleo.pedidos[len(nucleo.pedidos)-1]; p != "POST /v1/agente/comandos" {
+		t.Errorf("pedido de propor: %s", p)
+	}
+	corpo, _ := json.Marshal(nucleo.corpos[len(nucleo.corpos)-1])
+	if !strings.Contains(string(corpo), `"ambiente":[{"nome":"PORTA","valor":"8081"}]`) || !strings.Contains(string(corpo), `"pasta":"app"`) {
+		t.Errorf("corpo do propor: %s", corpo)
+	}
+	antes = len(nucleo.pedidos)
+	for _, ruim := range []string{`{}`, `{"nome":"x"}`, `{"nome":" ","comando":"ls"}`, `{"nome":"x","comando":"ls","tarefa":2}`} {
+		if texto, erro := resultado(t, c.chamar(32, "propor_play", ruim)); !erro {
+			t.Errorf("propor_play aceitou %s: %q", ruim, texto)
+		}
+	}
+	if len(nucleo.pedidos) != antes {
+		t.Errorf("argumentos ruins chegaram ao núcleo: %v", nucleo.pedidos[antes:])
+	}
+
 	// A lousa da tarefa: ler e acrescentar (com refs e ligações).
 	if texto, erro := resultado(t, c.chamar(20, "ler_lousa", `{}`)); erro || !strings.Contains(texto, "Fluxo da tela") {
 		t.Errorf("ler_lousa: %q %v", texto, erro)
@@ -202,7 +232,7 @@ func TestServidorMCP(t *testing.T) {
 	if texto, erro := resultado(t, c.chamar(21, "acrescentar_a_lousa", itens)); erro || !strings.Contains(texto, "Acrescentei 3 itens") {
 		t.Errorf("acrescentar_a_lousa: %q %v", texto, erro)
 	}
-	corpo, _ := json.Marshal(nucleo.corpos[len(nucleo.corpos)-1])
+	corpo, _ = json.Marshal(nucleo.corpos[len(nucleo.corpos)-1])
 	if !strings.Contains(string(corpo), `"de":"a"`) || !strings.Contains(string(corpo), `"elementos":[`) {
 		t.Errorf("corpo levado ao núcleo: %s", corpo)
 	}
@@ -214,6 +244,17 @@ func TestServidorMCP(t *testing.T) {
 	}
 	if len(nucleo.pedidos) != antes {
 		t.Errorf("argumentos ruins da lousa chegaram ao núcleo")
+	}
+	// Apagar: pelos ids ou tudo; sem os dois, nem chega ao núcleo.
+	if texto, erro := resultado(t, c.chamar(23, "apagar_da_lousa", `{"ids":[7]}`)); erro || !strings.Contains(texto, "Apaguei 2 itens") {
+		t.Errorf("apagar_da_lousa: %q %v", texto, erro)
+	}
+	if ultimo := nucleo.pedidos[len(nucleo.pedidos)-1]; ultimo != "DELETE /v1/agente/lousa/elementos" {
+		t.Errorf("pedido de apagar: %q", ultimo)
+	}
+	antes = len(nucleo.pedidos)
+	if _, erro := resultado(t, c.chamar(24, "apagar_da_lousa", `{}`)); !erro || len(nucleo.pedidos) != antes {
+		t.Error("apagar sem ids nem tudo foi aceito")
 	}
 	for _, f := range ferramentas {
 		if f := f.(map[string]any); f["name"] == "acrescentar_a_lousa" {

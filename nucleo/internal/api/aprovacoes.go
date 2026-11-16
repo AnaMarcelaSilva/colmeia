@@ -82,11 +82,15 @@ func (s *Servidor) agenteListarBancos(w http.ResponseWriter, r *http.Request, q 
 	conexoes := []map[string]any{}
 	for _, c := range lista {
 		if c.Agentes {
-			conexoes = append(conexoes, map[string]any{"id": c.ID, "nome": c.Nome, "tipo": c.Tipo, "banco": c.Banco})
+			conexoes = append(conexoes, map[string]any{"id": c.ID, "nome": c.Nome, "tipo": c.Tipo, "banco": c.Banco,
+				"sem_pedir": c.AgentesLivre, "escrita": c.AgentesEscrita && c.Escrita})
 		}
 	}
 	responderJSON(w, map[string]any{"conexoes": conexoes})
 }
+
+// O que o agente não faz nem com escrita liberada: a estrutura e as permissões.
+var verbosDeEstrutura = map[string]bool{"CREATE": true, "DROP": true, "ALTER": true, "TRUNCATE": true, "GRANT": true, "REVOKE": true, "RENAME": true}
 
 func novoIDAprovacao() string {
 	var b [12]byte
@@ -173,8 +177,9 @@ func (s *Servidor) responderAprovacao(w http.ResponseWriter, r *http.Request) {
 	responderJSON(w, map[string]any{"ok": true})
 }
 
-// agenteConsultar: o agente pede uma consulta. Só leitura, numa conexão
-// liberada para agentes, e só depois da sua aprovação.
+// agenteConsultar: o agente pede uma consulta numa conexão liberada para
+// agentes. Por padrão só leitura e só depois da sua aprovação; a conexão
+// pode liberar rodar sem pedir e alterar dados (cada uma até você desmarcar).
 func (s *Servidor) agenteConsultar(w http.ResponseWriter, r *http.Request, q quemAgente) {
 	id, err := idDaRota(r)
 	if err != nil {
@@ -210,8 +215,17 @@ func (s *Servidor) agenteConsultar(w http.ResponseWriter, r *http.Request, q que
 		responderErro(w, dados.ErrInvalido{Motivo: err.Error()})
 		return
 	}
-	if cl.Classe != bancos.Leitura {
-		responderErro(w, dados.ErrInvalido{Motivo: "o agente só consulta: " + cl.Verbo + " altera dados e não é permitido ao agente"})
+	altera := cl.Classe != bancos.Leitura
+	if altera && !(c.AgentesEscrita && c.Escrita) {
+		responderErro(w, dados.ErrInvalido{Motivo: "o agente só consulta nesta conexão: " + cl.Verbo + " altera dados e não foi liberado ao agente"})
+		return
+	}
+	if altera && cl.SemWhere {
+		responderErro(w, dados.ErrInvalido{Motivo: cl.Verbo + " sem WHERE altera a tabela inteira e não é permitido ao agente"})
+		return
+	}
+	if altera && verbosDeEstrutura[strings.ToUpper(cl.Verbo)] {
+		responderErro(w, dados.ErrInvalido{Motivo: cl.Verbo + " muda a estrutura do banco e não é permitido ao agente; só INSERT, UPDATE e DELETE com WHERE"})
 		return
 	}
 	if f := bancos.FuncaoNegadaAoAgente(c.Tipo, pedido.SQL); f != "" {
@@ -225,38 +239,44 @@ func (s *Servidor) agenteConsultar(w http.ResponseWriter, r *http.Request, q que
 		Limite: pedido.Limite, CriadaHora: hora(agora), Expira: agora.Add(s.PrazoAprovacao).UTC().Format(time.RFC3339Nano),
 		ExpiraHora: hora(agora.Add(s.PrazoAprovacao)), PrecisaSenha: errors.Is(faltaSenha, errSemSenha), perfil: q.perfil,
 		resposta: make(chan respostaAprovacao, 1)}
-	s.muAprovacoes.Lock()
-	s.aprovacoes[a.ID] = a
-	s.muAprovacoes.Unlock()
-	sessao, temSessao := s.Agentes.Pegar(q.ctx.ID)
-	if temSessao {
-		sessao.Segurar(terminal.AprovarConsulta)
-	}
-	s.Avisos.Publicar(q.perfil, a.mensagem())
-
 	var resposta respostaAprovacao
 	resultado := cancelada
-	prazo := time.NewTimer(s.PrazoAprovacao)
-	select {
-	case resposta = <-a.resposta:
-		resultado = recusada
-		if resposta.aprovar {
-			resultado = aprovada
+	if c.AgentesLivre {
+		// Liberada sem pedir: vale como aprovada; a tela fica sabendo pelo
+		// aviso de resolvida e pelo histórico da conexão.
+		resultado = aprovada
+	} else {
+		s.muAprovacoes.Lock()
+		s.aprovacoes[a.ID] = a
+		s.muAprovacoes.Unlock()
+		sessao, temSessao := s.Agentes.Pegar(q.ctx.ID)
+		if temSessao {
+			sessao.Segurar(terminal.AprovarConsulta)
 		}
-	case <-prazo.C:
-		resultado = expirou
-	case <-r.Context().Done():
-	}
-	prazo.Stop()
-	s.muAprovacoes.Lock()
-	delete(s.aprovacoes, a.ID)
-	s.muAprovacoes.Unlock()
-	if temSessao {
-		sessao.Soltar()
+		s.Avisos.Publicar(q.perfil, a.mensagem())
+
+		prazo := time.NewTimer(s.PrazoAprovacao)
+		select {
+		case resposta = <-a.resposta:
+			resultado = recusada
+			if resposta.aprovar {
+				resultado = aprovada
+			}
+		case <-prazo.C:
+			resultado = expirou
+		case <-r.Context().Done():
+		}
+		prazo.Stop()
+		s.muAprovacoes.Lock()
+		delete(s.aprovacoes, a.ID)
+		s.muAprovacoes.Unlock()
+		if temSessao {
+			sessao.Soltar()
+		}
 	}
 	feita := consultaFeita{sql: pedido.SQL, banco: pedido.Banco, verbo: cl.Verbo, agente: q.ctx, resultado: resultado}
 	resolvida := map[string]any{"tipo": "banco.aprovacao", "acao": "resolvida", "aprovacao_id": a.ID, "agente_id": a.AgenteID,
-		"tarefa_id": a.TarefaID, "conexao_id": c.ID, "resultado": resultado, "hora": hora(time.Now())}
+		"tarefa_id": a.TarefaID, "conexao_id": c.ID, "resultado": resultado, "hora": hora(time.Now()), "sem_pedir": c.AgentesLivre, "altera": altera}
 	if resultado != aprovada {
 		s.registrarConsulta(r.Context(), c, feita)
 		s.Avisos.Publicar(q.perfil, resolvida)
@@ -286,13 +306,17 @@ func (s *Servidor) agenteConsultar(w http.ResponseWriter, r *http.Request, q que
 		var senha string
 		if senha, err = s.senhaDe(c); err == nil {
 			cfg = config(c, senha)
-			// Mesmo numa conexão com escrita, o agente só lê.
-			cfg.Escrita = false
+			// A escrita só fica ligada para a instrução que altera, e só chega
+			// aqui se a conexão liberou os agentes para isso.
+			cfg.Escrita = altera
 		}
 	}
 	var r2 bancos.Resultado
 	if err == nil {
-		r2, err = s.Bancos.Executar(r.Context(), cfg, bancos.Opcoes{SQL: pedido.SQL, Banco: pedido.Banco, Limite: pedido.Limite, Tempo: tempoAgente, SemCursor: true})
+		// A alteração conta como confirmada: pela sua aprovação ou pela
+		// conexão liberada sem pedir.
+		r2, err = s.Bancos.Executar(r.Context(), cfg, bancos.Opcoes{SQL: pedido.SQL, Banco: pedido.Banco, Limite: pedido.Limite, Tempo: tempoAgente, SemCursor: true,
+			Confirmada: altera})
 	}
 	feita.linhas, feita.ms, feita.erro = int64(len(r2.Linhas)), r2.Ms, err != nil
 	s.registrarConsulta(ctx, c, feita)

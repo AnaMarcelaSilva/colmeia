@@ -217,7 +217,10 @@ impl TerminalAgente {
     /// Desenha o terminal. Só o terminal `em_foco` muda o tamanho do terminal
     /// no núcleo; uma miniatura mostra a mesma grade com letra menor, cortada.
     pub fn mostrar(&mut self, ui: &mut egui::Ui, tamanho_fonte: f32, em_foco: bool) -> egui::Response {
-        let (rect, resposta) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Id fixo pelo terminal: o automático muda quando algo antes dele na
+        // tela muda de um quadro para o outro, e o foco do teclado se perdia.
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let resposta = ui.interact(rect, egui::Id::new(("terminal", self.base.as_str(), em_foco)), Sense::click_and_drag());
         self.area.set(Some(rect));
         let pintor = ui.painter_at(rect);
         pintor.rect_filled(rect, 0.0, cores().terminal_fundo);
@@ -246,6 +249,11 @@ impl TerminalAgente {
             if (colunas, linhas) != self.tamanho {
                 self.tamanho = (colunas, linhas);
                 term.resize(TermSize::new(colunas, linhas));
+                self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
+            }
+            if self.focar.get() && self.redesenhou {
+                // Ao ganhar o foco, o tamanho vai de novo: se alguém mudou o
+                // terminal do núcleo por fora, ele volta ao da tela.
                 self.mandar(ParaNucleo::Texto(format!(r#"{{"cols":{colunas},"rows":{linhas}}}"#)));
             }
             if !self.redesenhou {
@@ -473,9 +481,14 @@ fn sequencia(tecla: egui::Key, m: egui::Modifiers, cursor_de_aplicacao: bool) ->
     let com_alt = |b: Vec<u8>| if m.alt { esc(&b) } else { b };
 
     if m.ctrl {
+        // Ctrl+Z suspenderia o programa (o Claude Code se manda um SIGTSTP),
+        // e aqui não há shell para trazê-lo de volta: não vai.
+        if tecla == Z && !m.alt {
+            return Some(Vec::new());
+        }
         let nome = tecla.name();
         if nome.len() == 1 && nome.as_bytes()[0].is_ascii_uppercase() {
-            // Ctrl+letra é o caractere de controle da letra (Ctrl+A = 1 ... Ctrl+Z = 26).
+            // Ctrl+letra é o caractere de controle da letra (Ctrl+A = 1 ... Ctrl+Y = 25).
             return Some(com_alt(vec![nome.as_bytes()[0] - b'A' + 1]));
         }
         let controle = match tecla {
@@ -904,6 +917,8 @@ mod testes {
         let s = |k, m| sequencia(k, m, false).unwrap();
         assert_eq!(s(Key::R, ctrl), vec![0x12]);
         assert_eq!(s(Key::A, ctrl), vec![0x01]);
+        // Ctrl+Z suspenderia o programa sem ninguém para trazê-lo de volta.
+        assert_eq!(s(Key::Z, ctrl), Vec::<u8>::new());
         assert_eq!(s(Key::Tab, shift), b"\x1b[Z");
         assert_eq!(s(Key::Enter, shift), b"\x1b\r");
         assert_eq!(s(Key::Enter, ctrl), b"\x1b\r");

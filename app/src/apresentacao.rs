@@ -1,7 +1,10 @@
-//! Modo apresentação da daily e da sprint: uma capa com o resumo do período
-//! e uma tarefa por slide (o que foi feito, os números, as fotos e vídeos e a
-//! nota), para passar a reunião inteira sem sair daqui. Abre em tela cheia
-//! (F5) ou em janela (clique num cartão), e o F11 alterna.
+//! Modo apresentação da daily e da sprint: uma capa com o resumo do período,
+//! um slide por bloco (as tarefas de um projeto, ou de um assunto da sprint,
+//! com as notas) e, para as tarefas com fotos, vídeos ou lousa, o slide
+//! delas logo depois do bloco. Qualquer tarefa abre em detalhe de dentro do
+//! bloco (clique ou Enter; Esc volta), onde a nota se edita, os anexos
+//! entram e o agente recebe pedidos. Abre em tela cheia (F5) ou em janela
+//! (clique num cartão), e o F11 alterna.
 //!
 //! Nada se redesenha por tempo: a troca de slide é seca, as imagens são
 //! decodificadas fora da thread da tela no tamanho da região, e o envio de
@@ -123,45 +126,82 @@ pub fn regioes(tamanho: Vec2, com_anexos: bool, com_abas: bool) -> Regioes {
 #[derive(Clone, Debug, PartialEq)]
 enum Pagina {
     Capa,
+    /// O slide de uma tarefa: só quem tem anexos ou lousa ganha o seu, logo
+    /// depois do bloco; as outras abrem pelo detalhe (clique ou Enter).
     Tarefa(usize),
-    /// Divisor de projeto (com mais de um no deck): o nome, o workspace
-    /// (vazio com um workspace só) e quantas tarefas.
-    Divisor {
+    /// Um bloco: as tarefas de um projeto (ou de um assunto da sprint), com
+    /// as notas, numa tela só. Um bloco que não cabe segue em partes.
+    Bloco {
+        secao_id: i64,
         projeto: String,
         workspace: String,
-        n: usize,
+        /// Os índices dos slides do deck nesta parte.
+        tarefas: Vec<usize>,
+        parte: usize,
+        partes: usize,
     },
     Mais,
     Fim,
 }
 
-/// Monta a sequência de páginas do deck (sem os slides escondidos com H).
-/// Com mais de um projeto (na daily e na sprint), cada projeto começa com um divisor.
-fn montar_paginas(deck: &api::Deck, escondidos: &HashSet<i64>) -> Vec<Pagina> {
+/// Monta a sequência de páginas do deck (sem os slides escondidos com H):
+/// a capa, um bloco por seção (dividido em partes pela altura que `medir`
+/// dá a cada tarefa, sem cortar tarefa ao meio), o slide das tarefas com
+/// anexos ou lousa logo depois do bloco delas, "mais" e o fim. Com
+/// `altura` infinita, cada seção é um bloco só (os testes e a primeira
+/// montagem, antes de a tela medir).
+fn montar_paginas(deck: &api::Deck, escondidos: &HashSet<i64>, medir: &dyn Fn(&api::Slide) -> f32, altura: f32) -> Vec<Pagina> {
     let mut paginas = vec![Pagina::Capa];
     let secao = |s: &api::Slide| (s.secao_id, s.secao.clone());
-    let mut secoes: Vec<(i64, String)> = deck.slides.iter().filter(|s| !escondidos.contains(&s.tarefa_id)).map(secao).collect();
-    secoes.dedup();
-    // Um assunto da sprint (id negativo) sempre abre com o divisor dele.
-    let com_divisor = secoes.len() > 1 || secoes.iter().any(|s| s.0 < 0);
-    let mut secao_atual = None;
+    let mut grupos: Vec<Vec<usize>> = Vec::new();
     for (i, s) in deck.slides.iter().enumerate() {
         if escondidos.contains(&s.tarefa_id) {
             continue;
         }
-        if com_divisor && secao_atual.as_ref() != Some(&secao(s)) {
-            let n = deck.slides.iter().filter(|x| secao(x) == secao(s) && !escondidos.contains(&x.tarefa_id)).count();
-            let projeto = if s.projeto.is_empty() || s.secao_id < 0 { s.secao.clone() } else { s.projeto.clone() };
-            paginas.push(Pagina::Divisor { projeto, workspace: s.workspace.clone(), n });
-            secao_atual = Some(secao(s));
+        match grupos.last_mut() {
+            Some(lista) if secao(&deck.slides[lista[0]]) == secao(s) => lista.push(i),
+            _ => grupos.push(vec![i]),
         }
-        paginas.push(Pagina::Tarefa(i));
+    }
+    for lista in grupos {
+        let s0 = &deck.slides[lista[0]];
+        let projeto = if s0.projeto.is_empty() || s0.secao_id < 0 { s0.secao.clone() } else { s0.projeto.clone() };
+        let mut partes: Vec<Vec<usize>> = Vec::new();
+        let mut atual: Vec<usize> = Vec::new();
+        let mut soma = 0.0;
+        for i in lista {
+            let h = medir(&deck.slides[i]);
+            if !atual.is_empty() && soma + h > altura {
+                partes.push(std::mem::take(&mut atual));
+                soma = 0.0;
+            }
+            soma += h;
+            atual.push(i);
+        }
+        if !atual.is_empty() {
+            partes.push(atual);
+        }
+        let n = partes.len();
+        for (k, tarefas) in partes.into_iter().enumerate() {
+            let com_slide: Vec<usize> = tarefas.iter().copied().filter(|i| !deck.slides[*i].anexos.is_empty() || deck.slides[*i].lousa.is_some()).collect();
+            paginas.push(Pagina::Bloco { secao_id: s0.secao_id, projeto: projeto.clone(), workspace: s0.workspace.clone(), tarefas, parte: k + 1, partes: n });
+            paginas.extend(com_slide.into_iter().map(Pagina::Tarefa));
+        }
     }
     if deck.mais > 0 {
         paginas.push(Pagina::Mais);
     }
     paginas.push(Pagina::Fim);
     paginas
+}
+
+/// A página em que a tarefa aparece: o slide dela, senão o bloco que a contém.
+fn pagina_da_tarefa(paginas: &[Pagina], deck: &api::Deck, tarefa: i64) -> Option<usize> {
+    let indice = deck.slides.iter().position(|s| s.tarefa_id == tarefa)?;
+    paginas
+        .iter()
+        .position(|p| matches!(p, Pagina::Tarefa(i) if *i == indice))
+        .or_else(|| paginas.iter().position(|p| matches!(p, Pagina::Bloco { tarefas, .. } if tarefas.contains(&indice))))
 }
 
 /// Para onde ir ao avançar ou voltar, dentro dos limites.
@@ -206,16 +246,38 @@ struct Visor {
 }
 
 enum Mensagem {
-    Deck { resultado: Result<Box<api::Deck>, String>, manter: Option<i64> },
-    NotaSalva { tarefa: i64, texto: String, resultado: Result<api::NotaGravada, String> },
+    Deck {
+        resultado: Result<Box<api::Deck>, String>,
+        manter: Option<i64>,
+    },
+    NotaSalva {
+        tarefa: i64,
+        texto: String,
+        resultado: Result<api::NotaGravada, String>,
+    },
     Progresso(Progresso),
-    Enviado { tarefa: i64, nome: String, resultado: Result<api::AnexoSlide, String> },
+    Enviado {
+        tarefa: i64,
+        nome: String,
+        resultado: Result<api::AnexoSlide, String>,
+    },
     FimDosEnvios,
     VideoFalhou(String),
-    Grande { anexo: i64, resultado: Result<egui::ColorImage, String> },
+    Grande {
+        anexo: i64,
+        resultado: Result<egui::ColorImage, String>,
+    },
     RemocaoFalhou(i64),
-    ForaDaDailyFalhou { tarefa: i64, erro: String },
-    Lousa { tarefa: i64, resultado: Result<api::LousaAberta, String> },
+    ForaDaDailyFalhou {
+        tarefa: i64,
+        erro: String,
+    },
+    Lousa {
+        tarefa: i64,
+        resultado: Result<api::LousaAberta, String>,
+    },
+    /// A lousa da reunião (da daily ou da sprint), para o palco.
+    LousaReuniao(Result<api::LousaAberta, String>),
 }
 
 /// A lousa de uma tarefa no slide: buscada sob demanda, em cache por tarefa.
@@ -240,121 +302,130 @@ enum Tom {
     Alerta,
 }
 
-/// Linhas da nota no slide: pelo menos estas; acima disso, o espaço que sobra.
-/// O que passar dele rola dentro da nota.
-const LINHAS_NOTA: usize = 4;
-
-/// A nota é o roteiro da fala: o maior texto da coluna.
+/// A nota é o roteiro da fala: o maior texto do slide. No bloco, 22 por
+/// escala; no slide da tarefa, que tem a coluna só para ela, 26.
 const FONTE_NOTA: f32 = 22.0;
+const FONTE_NOTA_TAREFA: f32 = 26.0;
+/// O vão entre duas tarefas no slide do bloco.
+const VAO_TAREFA_BLOCO: f32 = 26.0;
+/// O respiro de cada linha da tabela do bloco (metade acima, metade abaixo do fio).
+const VAO_LINHA_BLOCO: f32 = 44.0;
 
 /// "O que foi feito" recolhido: só a linha que abre a lista.
 const ALTURA_FEITO_RECOLHIDO: f32 = 30.0;
 
-/// Altura que "O que foi feito" ocupa sem limite (as mesmas contas do slide).
-fn altura_feito(slide: &api::Slide, s: f32, aberto: bool) -> f32 {
+/// O estilo da nota em itens no slide: a fonte dada (já na escala), linhas
+/// a 1,35 da fonte, a coluna do marcador e os vãos na mesma proporção.
+fn estilo_nota(fonte: f32, cor: Color32, largura: f32) -> registro::EstiloNota {
+    let p = cores();
+    registro::EstiloNota {
+        fonte,
+        cor,
+        marcador: p.suave,
+        largura: largura.max(40.0),
+        altura_linha: (fonte * 1.35).round(),
+        recuo: (fonte * 1.36).round(),
+        vao_item: (fonte * 0.27).round(),
+        vao_bloco: (fonte * 0.55).round(),
+    }
+}
+
+/// A nota que o slide lê: a de hoje, ou a de ontem (na sprint, a da sprint
+/// anterior) para quem parou. `None` sem nota nenhuma.
+fn nota_do_slide(slide: &api::Slide) -> Option<(&str, bool)> {
+    if !slide.nota.trim().is_empty() {
+        return Some((slide.nota.trim(), false));
+    }
+    slide.nota_anterior.as_ref().filter(|a| !a.texto.trim().is_empty()).map(|a| (a.texto.trim(), true))
+}
+
+/// Uma tarefa medida para o slide do bloco, do jeito que a pessoa monta o
+/// slide dela: o tópico à esquerda, em negrito, e a frase à direita, com um
+/// fio entre as linhas. Sem montagem, o título e a nota em itens, como antes.
+struct TarefaNoBloco {
+    titulo: std::sync::Arc<egui::Galley>,
+    selos: Vec<(String, Color32)>,
+    /// A frase da montagem (a coluna da direita).
+    frase: Option<std::sync::Arc<egui::Galley>>,
+    nota: Option<registro::NotaMedida>,
+    estado: Option<std::sync::Arc<egui::Galley>>,
+    altura: f32,
+}
+
+/// A linha cinza de quem não tem nota (a mesma da página).
+fn estado_sem_nota(s: &api::Slide) -> &'static str {
+    if s.removida {
+        return "A tarefa foi removida.";
+    }
+    match s.grupo.as_str() {
+        "trabalhando" => "Segue em andamento.",
+        "aguardando" => "Espera minha resposta.",
+        "erros" => "Parou com erro.",
+        "revisao" => "Em revisão, ainda sem nota.",
+        "concluidas" => "Concluída, ainda sem nota.",
+        _ => "Ainda sem nota.",
+    }
+}
+
+/// A largura da coluna do tópico no bloco (a frase fica com o resto).
+fn coluna_do_topico(largura: f32, s: f32) -> f32 {
+    (largura * 0.37).min((430.0 * s).round()).max(160.0)
+}
+
+/// Os selos de uma tarefa: o dia (quando não é hoje) e o estado que pede atenção.
+fn selos_do_slide(slide: &api::Slide) -> Vec<(String, Color32)> {
+    let p = cores();
+    let mut selos = Vec::new();
+    if !slide.partes.iter().any(|p| p == "Hoje")
+        && let Some(parte) = slide.partes.iter().find(|p| *p != "No período")
+    {
+        selos.push((parte.clone(), p.suave));
+    }
+    match slide.grupo.as_str() {
+        "aguardando" if !slide.removida => selos.push(("esperando você".into(), p.alerta)),
+        "erros" if !slide.removida => selos.push(("parou com erro".into(), p.erro)),
+        _ => {}
+    }
+    selos
+}
+
+/// Mede uma tarefa como ela aparece no bloco (`s` é a escala, `largura` a
+/// da coluna). O slide pinta exatamente o que foi medido.
+fn medir_tarefa_no_bloco(pintor: &egui::Painter, slide: &api::Slide, s: f32, largura: f32) -> TarefaNoBloco {
+    let p = cores();
     let px = |v: f32| (v * s).round();
-    if slide.feito.is_empty() {
-        return 0.0;
+    let selos = selos_do_slide(slide);
+    let fonte_selo = forte(px(14.0));
+    if let Some(m) = slide.montagem.as_ref().filter(|m| !m.frase.trim().is_empty()) {
+        let coluna = coluna_do_topico(largura, s);
+        let topico = m.topico.trim().trim_end_matches('.');
+        let topico = if topico.is_empty() { slide.titulo.trim_end_matches('.') } else { topico };
+        let titulo = pintor.layout(topico.to_string(), forte(px(27.0)), p.texto, coluna - px(24.0));
+        let frase = pintor.layout(m.frase.trim().to_string(), FontId::proportional(px(25.0)), p.texto, largura - coluna - px(8.0));
+        let altura_selos = if selos.is_empty() { 0.0 } else { px(24.0) };
+        let altura = (titulo.size().y + altura_selos).max(frase.size().y) + px(VAO_LINHA_BLOCO);
+        return TarefaNoBloco { titulo, selos, frase: Some(frase), nota: None, estado: None, altura };
     }
-    if !aberto {
-        return px(ALTURA_FEITO_RECOLHIDO);
-    }
-    let so_periodo = slide.feito.len() == 1 && slide.feito[0].parte == "No período";
-    let linha = px(28.0);
-    let mut y = px(22.0) + px(12.0);
-    for f in &slide.feito {
-        if !so_periodo {
-            y += px(26.0);
+    let largura_selos: f32 = selos.iter().map(|(t, _)| pintor.layout_no_wrap(t.clone(), fonte_selo.clone(), p.suave).size().x + 12.0 + px(8.0)).sum();
+    let recuo = px(24.0);
+    let largura_texto = (largura - recuo - largura_selos - if selos.is_empty() { 0.0 } else { px(8.0) }).max(120.0);
+    let titulo = pintor.layout(slide.titulo.trim_end_matches('.').to_string(), forte(px(26.0)), p.texto, largura_texto);
+    let mut altura = titulo.size().y + px(10.0);
+    let anterior = !matches!(slide.grupo.as_str(), "trabalhando" | "aguardando" | "erros");
+    let (nota, estado) = match nota_do_slide(slide) {
+        Some((texto, de_ontem)) if !de_ontem || anterior => {
+            let n = registro::NotaMedida::nova(pintor, texto, estilo_nota(px(FONTE_NOTA), p.texto, largura - recuo));
+            altura += n.altura;
+            (Some(n), None)
         }
-        let total = f.itens.len() + f.mais;
-        let mostrar = total.min(MAX_TOPICOS).min(f.itens.len());
-        y += mostrar as f32 * (linha + px(8.0));
-        if total > mostrar {
-            y += linha;
+        _ => {
+            let g = pintor.layout_no_wrap(estado_sem_nota(slide).to_string(), FontId::proportional(px(20.0)), p.suave);
+            altura += g.size().y;
+            (None, Some(g))
         }
-        y += px(20.0) - px(8.0);
-    }
-    y
-}
-
-/// Quantas linhas da nota (fonte 18) cabem na altura livre, com o estado da
-/// gravação embaixo.
-fn linhas_que_cabem(pintor: &egui::Painter, livre: f32) -> usize {
-    let linha = pintor.layout_no_wrap("Ág".into(), FontId::proportional(FONTE_NOTA), Color32::WHITE).size().y.max(1.0);
-    let cabem = ((livre - RODAPE_NOTA - 20.0) / linha).floor().max(0.0) as usize;
-    cabem.max(LINHAS_NOTA)
-}
-
-/// A nota lida no slide, com o markdown da lousa (títulos, negrito, itálico,
-/// código, listas e tabelas simples), em até `linhas` (`usize::MAX`: inteira).
-fn nota_formatada(pintor: &egui::Painter, texto: &str, cor: Color32, largura: f32, linhas: usize) -> std::sync::Arc<egui::Galley> {
-    use lousa::markdown::{Bloco, Marcador, Trecho, ler};
-    let blocos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
-    let montar = |blocos: &[Bloco], max: usize| {
-        let p = cores();
-        let normal = FontId::proportional(FONTE_NOTA);
-        let mut job = egui::text::LayoutJob::default();
-        let trechos = |job: &mut egui::text::LayoutJob, lista: &[Trecho], negrito: bool| {
-            for t in lista {
-                let mut f = egui::TextFormat::simple(if t.negrito || negrito { forte(FONTE_NOTA) } else { normal.clone() }, cor);
-                if t.codigo {
-                    f.font_id = FontId::monospace(FONTE_NOTA - 3.0);
-                    f.background = p.superficie;
-                }
-                f.italics = t.italico;
-                job.append(&t.texto, 0.0, f);
-            }
-        };
-        for (i, b) in blocos.iter().enumerate() {
-            if i > 0 {
-                job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
-            }
-            match b {
-                Bloco::Titulo(_, t) => trechos(&mut job, t, true),
-                Bloco::Paragrafo(ls) => {
-                    for (j, l) in ls.iter().enumerate() {
-                        if j > 0 {
-                            job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
-                        }
-                        trechos(&mut job, l, false);
-                    }
-                }
-                Bloco::Item { nivel, marcador, trechos: t } => {
-                    let recuo = "    ".repeat(*nivel as usize);
-                    let marca = match marcador {
-                        Marcador::Ponto => "•".to_string(),
-                        Marcador::Numero(n) => format!("{n}."),
-                        Marcador::Caixa(true) => "[x]".to_string(),
-                        Marcador::Caixa(false) => "[ ]".to_string(),
-                    };
-                    job.append(&format!("{recuo}{marca} "), 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
-                    trechos(&mut job, t, false);
-                }
-                Bloco::Codigo(c) => {
-                    let mut f = egui::TextFormat::simple(FontId::monospace(FONTE_NOTA - 4.0), cor);
-                    f.background = p.superficie;
-                    job.append(c.trim_end(), 0.0, f);
-                }
-                Bloco::Tabela { cabecalho, linhas: ls, .. } => {
-                    for (j, l) in cabecalho.iter().chain(ls.iter()).enumerate() {
-                        if j > 0 {
-                            job.append("\n", 0.0, egui::TextFormat::simple(normal.clone(), cor));
-                        }
-                        for (k, celula) in l.iter().enumerate() {
-                            if k > 0 {
-                                job.append("  ·  ", 0.0, egui::TextFormat::simple(normal.clone(), p.suave));
-                            }
-                            trechos(&mut job, celula, j == 0 && cabecalho.is_some());
-                        }
-                    }
-                }
-                Bloco::Vazio => {}
-            }
-        }
-        job.wrap = egui::text::TextWrapping { max_width: largura.max(10.0), max_rows: max, break_anywhere: false, overflow_character: Some('…') };
-        pintor.layout_job(job)
     };
-    montar(&blocos, linhas.max(1))
+    altura += px(VAO_TAREFA_BLOCO);
+    TarefaNoBloco { titulo, selos, frase: None, nota, estado, altura }
 }
 
 pub struct Apresentacao {
@@ -374,6 +445,15 @@ pub struct Apresentacao {
     erro: Option<String>,
     paginas: Vec<Pagina>,
     atual: usize,
+    /// As páginas foram montadas sem medir (deck novo): a próxima pintura
+    /// divide os blocos pela altura da tela. Guarda o tamanho usado.
+    repaginar: bool,
+    tamanho_paginado: Vec2,
+    /// O detalhe de uma tarefa aberto de dentro do bloco (clique ou Enter):
+    /// o índice do slide no deck. Esc volta ao bloco.
+    detalhe: Option<usize>,
+    /// A tarefa sob o mouse no slide do bloco (o H esconde essa).
+    sob_mouse: Option<i64>,
     inicio: Inicio,
     escondidos: HashSet<i64>,
     pub tela_cheia: bool,
@@ -431,6 +511,8 @@ pub struct Apresentacao {
     desenho_lousa: lousa::desenho::Desenho,
     /// O palco da lousa do slide, por cima da apresentação (Esc volta ao slide).
     palco: Option<Box<lousa::palco::Palco>>,
+    /// A lousa da reunião está sendo buscada para o palco (Q).
+    pedindo_lousa_reuniao: bool,
 }
 
 /// A nota mudou enquanto você editava e não dá para juntar sozinho (o agente
@@ -509,6 +591,10 @@ impl Apresentacao {
             erro: None,
             paginas: vec![Pagina::Capa],
             atual: 0,
+            repaginar: false,
+            tamanho_paginado: Vec2::ZERO,
+            detalhe: None,
+            sob_mouse: None,
             inicio,
             escondidos: HashSet::new(),
             tela_cheia,
@@ -547,11 +633,18 @@ impl Apresentacao {
             lousas: HashMap::new(),
             desenho_lousa: lousa::desenho::Desenho::novo("slide-lousa"),
             palco: None,
+            pedindo_lousa_reuniao: false,
         };
         match deck {
             // Um deck com o tempo e a opção desligada nunca entra na tela.
             Some(d) if !(d.tempo_agentes && !mostrar_tempo) => a.trocar_deck(d, None),
             _ => a.pedir_deck(ctx, None),
+        }
+        // A apresentação é em papel (o tema Leitura): fundo claro projeta
+        // melhor e é o que a pessoa leva para a reunião. T troca para o escuro.
+        if tema_base != tema::Escolha::Leitura {
+            tema::Escolha::Leitura.aplicar(ctx);
+            a.tema_sessao = Some(tema::Escolha::Leitura);
         }
         a
     }
@@ -616,10 +709,7 @@ impl Apresentacao {
 
     /// A tarefa do slide atual (para voltar à página rolada até o cartão dela).
     pub fn tarefa_atual(&self) -> Option<i64> {
-        match self.paginas.get(self.atual)? {
-            Pagina::Tarefa(i) => self.deck.as_ref().map(|d| d.slides[*i].tarefa_id),
-            _ => None,
-        }
+        self.slide().map(|s| s.tarefa_id)
     }
 
     /// O agente respondeu um pedido: o slide traz a nota e as capturas novas
@@ -646,6 +736,30 @@ impl Apresentacao {
     }
 
     /// A lousa da tarefa mudou: o slide busca de novo quando aparecer.
+    /// Q: o palco da lousa da reunião (a da daily de hoje ou a da sprint
+    /// fixa), cartão por cartão, na ordem das setas.
+    fn abrir_lousa_da_reuniao(&mut self, ctx: &egui::Context) {
+        let Some(deck) = &self.deck else { return };
+        if self.pedindo_lousa_reuniao {
+            return;
+        }
+        let dono = if self.daily() {
+            api::DonoLousa::daily(self.perfil, &deck.chave_nota)
+        } else if deck.sprint_id != 0 {
+            api::DonoLousa::sprint(deck.sprint_id)
+        } else {
+            self.aviso = Some(("A lousa da reunião é da sprint fixa; escolha a sprint na página".into(), 0.0, Tom::Neutro));
+            return;
+        };
+        self.pedindo_lousa_reuniao = true;
+        let envio = self.canal.0.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = envio.send(Mensagem::LousaReuniao(api::abrir_lousa(dono)));
+            ctx.request_repaint();
+        });
+    }
+
     pub fn lousa_mudou(&mut self, tarefa: i64) {
         self.lousas.remove(&tarefa);
     }
@@ -695,15 +809,27 @@ impl Apresentacao {
     /// Troca o deck mantendo o slide pela tarefa (R), ou indo ao início pedido.
     fn trocar_deck(&mut self, deck: api::Deck, manter: Option<i64>) {
         let antes = self.atual;
-        self.paginas = montar_paginas(&deck, &self.escondidos);
+        self.paginas = montar_paginas(&deck, &self.escondidos, &|_| 0.0, f32::INFINITY);
+        self.repaginar = true;
         let alvo = match (manter, self.inicio) {
             (Some(t), _) | (None, Inicio::Tarefa(t)) => Some(t),
             _ => None,
         };
+        // O detalhe segue a mesma tarefa no deck novo (ou fecha, se ela saiu).
+        self.detalhe = self
+            .detalhe
+            .and_then(|i| self.deck.as_ref().and_then(|d| d.slides.get(i)).map(|s| s.tarefa_id))
+            .and_then(|t| deck.slides.iter().position(|s| s.tarefa_id == t));
         self.atual = 0;
         if let Some(t) = alvo {
-            match self.paginas.iter().position(|p| matches!(p, Pagina::Tarefa(i) if deck.slides[*i].tarefa_id == t)) {
-                Some(i) => self.atual = i,
+            match pagina_da_tarefa(&self.paginas, &deck, t) {
+                Some(i) => {
+                    self.atual = i;
+                    // A tarefa que você via continua na tela: no bloco, em detalhe.
+                    if matches!(self.paginas[i], Pagina::Bloco { .. }) {
+                        self.detalhe = deck.slides.iter().position(|s| s.tarefa_id == t);
+                    }
+                }
                 None if manter.is_some() => {
                     // A tarefa saiu do deck: fica no vizinho e avisa.
                     let titulo = self.deck.as_ref().and_then(|d| d.slides.iter().find(|s| s.tarefa_id == t)).map(|s| s.titulo.clone()).unwrap_or_default();
@@ -719,14 +845,51 @@ impl Apresentacao {
         self.novidades = false;
     }
 
+    /// O slide de tarefa na tela: o detalhe aberto, ou a página de tarefa.
     fn slide(&self) -> Option<&api::Slide> {
+        let deck = self.deck.as_ref()?;
+        if let Some(i) = self.detalhe {
+            return deck.slides.get(i);
+        }
         match self.paginas.get(self.atual)? {
-            Pagina::Tarefa(i) => self.deck.as_ref().map(|d| &d.slides[*i]),
+            Pagina::Tarefa(i) => deck.slides.get(*i),
             _ => None,
         }
     }
 
+    /// Divide os blocos pela altura da tela, mantendo a página pelo conteúdo.
+    fn repaginar(&mut self, pintor: &egui::Painter, tamanho: Vec2) {
+        let Some(deck) = &self.deck else { return };
+        let r = regioes(tamanho, false, false);
+        let s = r.escala;
+        let largura = r.conteudo.width().min((1100.0 * s).round());
+        let alvo = match self.paginas.get(self.atual) {
+            Some(Pagina::Tarefa(i)) => Some(deck.slides[*i].tarefa_id),
+            Some(Pagina::Bloco { tarefas, .. }) => tarefas.first().map(|i| deck.slides[*i].tarefa_id),
+            _ => None,
+        };
+        let no_fim = matches!(self.paginas.get(self.atual), Some(Pagina::Fim));
+        let no_mais = matches!(self.paginas.get(self.atual), Some(Pagina::Mais));
+        let medir = |slide: &api::Slide| medir_tarefa_no_bloco(pintor, slide, s, largura).altura;
+        self.paginas = montar_paginas(deck, &self.escondidos, &medir, r.conteudo.height());
+        self.atual = if no_fim {
+            self.paginas.len() - 1
+        } else if no_mais {
+            self.paginas.iter().position(|p| *p == Pagina::Mais).unwrap_or(0)
+        } else {
+            alvo.and_then(|t| pagina_da_tarefa(&self.paginas, deck, t)).unwrap_or(0)
+        };
+        self.repaginar = false;
+        self.tamanho_paginado = tamanho;
+    }
+
     fn ir(&mut self, pagina: usize, ctx: &egui::Context) {
+        if self.detalhe.is_some() {
+            self.fechar_caixa();
+            self.descartar_recusada();
+            self.salvar_nota(ctx);
+            self.detalhe = None;
+        }
         if pagina != self.atual {
             self.fechar_caixa();
             self.descartar_recusada();
@@ -737,11 +900,29 @@ impl Apresentacao {
         }
     }
 
+    /// Vai ao slide da tarefa, ou ao bloco dela com o detalhe aberto.
     fn ir_para_tarefa(&mut self, tarefa: i64, ctx: &egui::Context) {
         let Some(deck) = &self.deck else { return };
-        if let Some(i) = self.paginas.iter().position(|p| matches!(p, Pagina::Tarefa(i) if deck.slides[*i].tarefa_id == tarefa)) {
-            self.ir(i, ctx);
+        let Some(i) = pagina_da_tarefa(&self.paginas, deck, tarefa) else { return };
+        let indice = deck.slides.iter().position(|s| s.tarefa_id == tarefa);
+        self.ir(i, ctx);
+        if matches!(self.paginas.get(i), Some(Pagina::Bloco { .. })) {
+            self.detalhe = indice;
         }
+    }
+
+    /// Abre o detalhe da tarefa de dentro do bloco (clique ou Enter).
+    fn abrir_detalhe(&mut self, indice: usize) {
+        self.detalhe = Some(indice);
+        self.sob_mouse = None;
+    }
+
+    /// Fecha o detalhe e volta ao bloco (Esc).
+    fn fechar_detalhe(&mut self, ctx: &egui::Context) {
+        self.fechar_caixa();
+        self.descartar_recusada();
+        self.salvar_nota(ctx);
+        self.detalhe = None;
     }
 
     /// Grava a nota em edição, se mudou. Chamado ao perder o foco, ao trocar
@@ -850,6 +1031,19 @@ impl Apresentacao {
         self.miniaturas.receber(ctx);
         while let Ok(m) = self.canal.1.try_recv() {
             match m {
+                Mensagem::LousaReuniao(Ok(l)) => {
+                    self.pedindo_lousa_reuniao = false;
+                    if l.elementos.is_empty() {
+                        self.aviso = Some(("A lousa da reunião ainda está vazia".into(), 0.0, Tom::Neutro));
+                        continue;
+                    }
+                    let tema_base = self.tema_sessao.unwrap_or(self.tema_base);
+                    self.palco = Some(Box::new(lousa::palco::Palco::novo(l.elementos, None, tema_base)));
+                }
+                Mensagem::LousaReuniao(Err(e)) => {
+                    self.pedindo_lousa_reuniao = false;
+                    self.aviso = Some((format!("Não consegui abrir a lousa da reunião: {e}"), 0.0, Tom::Alerta));
+                }
                 Mensagem::Deck { resultado: Ok(deck), manter } => {
                     self.buscando = false;
                     self.erro = None;
@@ -1167,12 +1361,26 @@ impl Apresentacao {
             return None;
         }
         let total = self.paginas.len();
+        let de_novo = ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Key { key: Key::H, pressed: true, repeat: true, .. })));
         let interrogacao = ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(t) if t == "?")));
         let colou = ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command)));
         if tecla(Key::Escape) {
+            if self.detalhe.is_some() {
+                self.fechar_detalhe(ctx);
+                return None;
+            }
             return Some(Pedido::Sair);
         }
-        if tecla(Key::ArrowRight) || tecla(Key::PageDown) || tecla(Key::Space) || tecla(Key::Enter) {
+        // Enter num bloco abre o detalhe da primeira tarefa dele.
+        let bloco = match self.paginas.get(self.atual) {
+            Some(Pagina::Bloco { tarefas, .. }) if self.detalhe.is_none() => tarefas.first().copied(),
+            _ => None,
+        };
+        if let Some(i) = bloco
+            && tecla(Key::Enter)
+        {
+            self.abrir_detalhe(i);
+        } else if tecla(Key::ArrowRight) || tecla(Key::PageDown) || tecla(Key::Space) || tecla(Key::Enter) {
             self.ir(navegar(self.atual, total, 1), ctx);
         } else if tecla(Key::ArrowLeft) || tecla(Key::PageUp) || tecla(Key::Backspace) {
             self.ir(navegar(self.atual, total, -1), ctx);
@@ -1195,10 +1403,16 @@ impl Apresentacao {
             let manter = self.tarefa_atual();
             self.pedir_deck(ctx, manter);
         } else if tecla(Key::H) {
-            if let Some(t) = self.tarefa_atual() {
+            // No bloco, some a tarefa sob o mouse; no slide ou no detalhe, a dele.
+            // Só o primeiro toque vale: com a tecla segurada, a repetição
+            // esconderia a tarefa que sobe para o lugar da que saiu.
+            if let Some(t) = self.tarefa_atual().or(self.sob_mouse).filter(|_| !de_novo) {
+                self.sob_mouse = None;
                 self.escondidos.insert(t);
+                self.detalhe = None;
                 if let Some(d) = &self.deck {
-                    self.paginas = montar_paginas(d, &self.escondidos);
+                    self.paginas = montar_paginas(d, &self.escondidos, &|_| 0.0, f32::INFINITY);
+                    self.repaginar = true;
                     self.atual = self.atual.min(self.paginas.len() - 1);
                     // Na daily, a tarefa sai também da daily de hoje (a sprint continua com ela).
                     if d.tipo == "daily" {
@@ -1209,9 +1423,11 @@ impl Apresentacao {
             }
         } else if tecla(Key::T) {
             let atual = self.tema_sessao.unwrap_or(self.tema_base);
-            let outro = if atual.escuro() { tema::Escolha::Claro } else { tema::Escolha::Escuro };
+            let outro = if atual.escuro() { tema::Escolha::Leitura } else { tema::Escolha::Escuro };
             outro.aplicar(ctx);
             self.tema_sessao = Some(outro);
+        } else if tecla(Key::Q) {
+            self.abrir_lousa_da_reuniao(ctx);
         } else if interrogacao || tecla(Key::Questionmark) {
             self.atalhos = true;
         } else if colou {
@@ -1289,6 +1505,10 @@ impl Apresentacao {
         let p = cores();
         let tela = ui.max_rect();
         ui.painter().rect_filled(tela, 0, p.fundo);
+        if self.deck.is_some() && (self.repaginar || self.tamanho_paginado != tela.size()) {
+            self.repaginar(ui.painter(), tela.size());
+        }
+        self.sob_mouse = None;
         let (direita, abas) = self.slide().map_or((false, false), |s| (!s.anexos.is_empty() || s.lousa.is_some(), !s.anexos.is_empty() && s.lousa.is_some()));
         let r = regioes(tela.size(), direita, abas);
         let deslocar = |rect: Rect| rect.translate(tela.min.to_vec2());
@@ -1317,21 +1537,21 @@ impl Apresentacao {
             }
             (Some(_), _) => {
                 let pagina = self.paginas.get(self.atual).cloned().unwrap_or(Pagina::Capa);
-                match pagina {
-                    Pagina::Capa => {
+                match (self.detalhe, pagina) {
+                    (Some(i), _) => self.slide_tarefa(ui, &r, i, modelo, agora),
+                    (None, Pagina::Capa) => {
                         favo.desenhar(ui.painter(), tela);
                         self.capa(ui, &r, tela);
                     }
-                    Pagina::Tarefa(i) => self.slide_tarefa(ui, &r, i, modelo, agora),
-                    Pagina::Divisor { projeto, workspace, n } => {
-                        favo.desenhar(ui.painter(), tela);
-                        self.divisor(ui, tela, &projeto, &workspace, n, r.escala);
+                    (None, Pagina::Tarefa(i)) => self.slide_tarefa(ui, &r, i, modelo, agora),
+                    (None, Pagina::Bloco { projeto, workspace, tarefas, parte, partes, .. }) => {
+                        self.slide_bloco(ui, &r, &projeto, &workspace, &tarefas, parte, partes);
                     }
-                    Pagina::Mais => {
+                    (None, Pagina::Mais) => {
                         favo.desenhar(ui.painter(), tela);
                         self.pagina_mais(ui, tela, r.escala);
                     }
-                    Pagina::Fim => {
+                    (None, Pagina::Fim) => {
                         favo.desenhar(ui.painter(), tela);
                         self.fim(ui, tela, r.escala);
                     }
@@ -1507,22 +1727,117 @@ impl Apresentacao {
         self.mostrar_tempo && self.deck.as_ref().is_some_and(|d| d.tempo_agentes)
     }
 
-    /// Divisor de projeto: o logo, o workspace suave em cima (com mais de um
-    /// no deck), o nome do projeto e quantas tarefas.
-    fn divisor(&self, ui: &mut egui::Ui, tela: Rect, projeto: &str, workspace: &str, n: usize, s: f32) {
+    /// O slide de um bloco, como a pessoa monta o slide dela: a etiqueta do
+    /// grupo em cima, o nome como título e, embaixo, uma tabela com o tópico
+    /// e a frase de cada tarefa, separadas por um fio. O clique numa linha
+    /// abre o detalhe.
+    #[allow(clippy::too_many_arguments)]
+    fn slide_bloco(&mut self, ui: &mut egui::Ui, r: &Regioes, projeto: &str, workspace: &str, tarefas: &[usize], parte: usize, partes: usize) {
         let p = cores();
-        let pintor = ui.painter();
-        let com_workspace = !workspace.is_empty();
-        let c = tela.center() - vec2(0.0, if com_workspace { 80.0 } else { 60.0 } * s);
-        tema::logo(pintor, c, 28.0 * s);
-        let mut y = c.y + 28.0 * s + 24.0 * s;
-        if com_workspace {
-            pintor.text(pos2(c.x, y), egui::Align2::CENTER_TOP, workspace, FontId::proportional(22.0 * s), p.suave);
-            y += 34.0 * s;
+        let Some(deck) = self.deck.clone() else { return };
+        let s = r.escala;
+        let px = |v: f32| (v * s).round();
+        let pintor = ui.painter().clone();
+
+        // Cabeçalho: a etiqueta (a daily ou a sprint e o período, com o
+        // workspace quando há mais de um) à esquerda, a posição à direita.
+        let etiqueta = {
+            let mut partes_etiqueta = vec![if self.daily() { "Daily".to_string() } else { "Sprint".to_string() }];
+            if !deck.periodo.is_empty() {
+                partes_etiqueta.push(deck.periodo.clone());
+            }
+            if !workspace.is_empty() {
+                partes_etiqueta.push(workspace.to_string());
+            }
+            partes_etiqueta.join("  ·  ").to_uppercase()
+        };
+        let g = tema::cortar(&pintor, &etiqueta, egui::TextFormat::simple(forte(px(14.0)), p.destaque), r.cabecalho.width() - px(120.0), 1, false);
+        pintor.galley(pos2(r.cabecalho.left(), r.cabecalho.center().y - g.size().y / 2.0), g, p.destaque);
+        let blocos: Vec<usize> = self.paginas.iter().enumerate().filter(|(_, p)| matches!(p, Pagina::Bloco { .. })).map(|(n, _)| n).collect();
+        let posicao = blocos.iter().position(|n| *n == self.atual).map_or(0, |n| n + 1);
+        pintor.text(r.cabecalho.right_center(), egui::Align2::RIGHT_CENTER, format!("{posicao} / {}", blocos.len()), forte(15.0), p.suave);
+
+        // Título: só o assunto da sprint; o nome do projeto não aparece na
+        // apresentação. "· 2 de 3" quando o bloco continua.
+        let assunto = tarefas.first().and_then(|i| deck.slides.get(*i)).is_some_and(|s0| s0.projeto.is_empty() || s0.secao_id < 0);
+        let titulo = if assunto { projeto } else { "" };
+        let tamanho_titulo = px(44.0).max(34.0);
+        let galeria = tema::cortar(&pintor, titulo, egui::TextFormat::simple(forte(tamanho_titulo), p.texto), r.titulo.width() - px(120.0), 1, false);
+        let largura_titulo = galeria.size().x;
+        let altura_titulo = galeria.size().y;
+        pintor.galley(r.titulo.min, galeria, p.texto);
+        if partes > 1 {
+            let texto = if titulo.is_empty() { format!("Parte {parte} de {partes}") } else { format!(" · {parte} de {partes}") };
+            let g = pintor.layout_no_wrap(texto, FontId::proportional(px(20.0)), p.suave);
+            pintor.galley(pos2(r.titulo.left() + largura_titulo, r.titulo.top() + altura_titulo - g.size().y - px(6.0)), g, p.suave);
         }
-        pintor.text(pos2(c.x, y), egui::Align2::CENTER_TOP, projeto, forte(64.0 * s), p.texto);
-        let texto = if n == 1 { "1 tarefa".to_string() } else { format!("{n} tarefas") };
-        pintor.text(pos2(c.x, y + 80.0 * s), egui::Align2::CENTER_TOP, texto, FontId::proportional(22.0 * s), p.suave);
+        let sobra = (r.titulo.height() - altura_titulo).max(0.0);
+        let largura = r.conteudo.width().min(px(1100.0));
+        let area = Rect::from_min_max(pos2(r.conteudo.left(), r.conteudo.top() - sobra), pos2(r.conteudo.left() + largura, r.conteudo.bottom()));
+        let recortado = pintor.with_clip_rect(Rect::from_min_max(area.min - vec2(px(12.0), px(8.0)), pos2(r.conteudo.right(), area.bottom())));
+        let coluna = coluna_do_topico(largura, s);
+        let fio = Stroke::new(1.0, p.borda);
+        // O fio de cima da tabela.
+        recortado.hline(area.left()..=area.right(), area.top(), fio);
+        let mut y = area.top();
+        let mut abrir = None;
+        for &i in tarefas {
+            let Some(slide) = deck.slides.get(i) else { continue };
+            let medida = medir_tarefa_no_bloco(&pintor, slide, s, largura);
+            let faixa = Rect::from_min_size(pos2(area.left() - px(12.0), y + 1.0), vec2(largura + px(24.0), medida.altura - 1.0));
+            let resposta = ui.interact(faixa.intersect(area.expand2(vec2(px(12.0), px(8.0)))), Id::new(("tarefa-no-bloco", slide.tarefa_id)), Sense::click());
+            if resposta.hovered() {
+                recortado.rect_filled(faixa, CornerRadius::same(tema::RAIO_SUPERFICIE), p.realce);
+                self.sob_mouse = Some(slide.tarefa_id);
+            }
+            if resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                abrir = Some(i);
+            }
+            let (cor, _, marca) = registro::estado_do_slide(slide);
+            let topo = y + px(VAO_LINHA_BLOCO) / 2.0;
+            match &medida.frase {
+                Some(frase) => {
+                    // A tabela: a marca do estado, o tópico e, à direita, a frase.
+                    let primeira = medida.titulo.rows.first().map_or(px(27.0), |l| l.rect().height());
+                    tema::marca(&recortado, pos2(area.left() - px(2.0), topo + primeira / 2.0), px(5.0), cor, marca);
+                    recortado.galley(pos2(area.left() + px(16.0), topo), medida.titulo.clone(), p.texto);
+                    let mut x_selo = area.left() + px(16.0);
+                    let y_selo = topo + medida.titulo.size().y + px(4.0);
+                    for (texto, cor) in &medida.selos {
+                        x_selo = registro::selo(&recortado, pos2(x_selo, y_selo), texto, forte(px(14.0)), *cor).right() + px(8.0);
+                    }
+                    recortado.galley(pos2(area.left() + coluna, topo), frase.clone(), p.texto);
+                }
+                None => {
+                    // Sem montagem: o título e a nota em itens, como na página.
+                    let primeira = medida.titulo.rows.first().map_or(px(26.0), |l| l.rect().height());
+                    tema::marca(&recortado, pos2(area.left() + px(7.0), topo + primeira / 2.0), px(6.0), cor, marca);
+                    let recuo = px(24.0);
+                    recortado.galley(pos2(area.left() + recuo, topo), medida.titulo.clone(), p.texto);
+                    let mut x_selo = area.right();
+                    for (texto, cor) in medida.selos.iter().rev() {
+                        let w = pintor.layout_no_wrap(texto.clone(), forte(px(14.0)), *cor).size().x + 12.0;
+                        x_selo -= w;
+                        registro::selo(&recortado, pos2(x_selo, topo + (primeira - px(14.0) - 6.0) / 2.0), texto, forte(px(14.0)), *cor);
+                        x_selo -= px(8.0);
+                    }
+                    let y_corpo = topo + medida.titulo.size().y + px(10.0);
+                    if let Some(n) = &medida.nota {
+                        n.pintar(&recortado, pos2(area.left() + recuo, y_corpo));
+                    } else if let Some(g) = &medida.estado {
+                        recortado.galley(pos2(area.left() + recuo, y_corpo), g.clone(), p.suave);
+                    }
+                }
+            }
+            y += medida.altura;
+            recortado.hline(area.left()..=area.right(), y, fio);
+            if y > area.bottom() {
+                break;
+            }
+        }
+        if let Some(i) = abrir {
+            self.abrir_detalhe(i);
+        }
     }
 
     fn pagina_mais(&self, ui: &mut egui::Ui, tela: Rect, s: f32) {
@@ -1558,12 +1873,9 @@ impl Apresentacao {
         let px = |v: f32| (v * s).round();
         let pintor = ui.painter().clone();
 
-        // Cabeçalho: projeto, estado, Ontem · Hoje e a posição.
+        // Cabeçalho: estado, Ontem · Hoje e a posição (sem o nome do projeto).
         let mut x = r.cabecalho.left();
         let y = r.cabecalho.center().y - 16.0;
-        if !slide.projeto.is_empty() {
-            x = Pilula::neutra(&slide.projeto).grande().pintar(&pintor, pos2(x, y)).right() + 8.0;
-        }
         x = registro::pilula_do_slide(&slide, true).pintar(&pintor, pos2(x, y)).right() + 12.0;
         let mut marcas = slide.partes.iter().filter(|p| *p != "No período").peekable();
         while let Some(parte) = marcas.next() {
@@ -1579,9 +1891,19 @@ impl Apresentacao {
                 x += w;
             }
         }
-        let tarefas: Vec<usize> = self.paginas.iter().enumerate().filter(|(_, p)| matches!(p, Pagina::Tarefa(_))).map(|(n, _)| n).collect();
-        let posicao = tarefas.iter().position(|n| *n == self.atual).map_or(0, |n| n + 1);
-        pintor.text(r.cabecalho.right_center(), egui::Align2::RIGHT_CENTER, format!("{posicao} / {}", tarefas.len()), forte(15.0), p.suave);
+        if self.detalhe.is_some() {
+            // Aberta de dentro do bloco: a pílula volta a ele.
+            let pilula = Pilula::neutra("Voltar ao bloco (Esc)").grande();
+            let largura = pilula.largura(&pintor);
+            let caixa = pilula.pintar(&pintor, pos2(r.cabecalho.right() - largura, r.cabecalho.center().y - 16.0));
+            if ui.interact(caixa, Id::new("voltar-ao-bloco"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.fechar_detalhe(ui.ctx());
+            }
+        } else {
+            let tarefas: Vec<usize> = self.paginas.iter().enumerate().filter(|(_, p)| matches!(p, Pagina::Tarefa(_))).map(|(n, _)| n).collect();
+            let posicao = tarefas.iter().position(|n| *n == self.atual).map_or(0, |n| n + 1);
+            pintor.text(r.cabecalho.right_center(), egui::Align2::RIGHT_CENTER, format!("{posicao} / {}", tarefas.len()), forte(15.0), p.suave);
+        }
 
         // Título em até 2 linhas, com a dica do título inteiro se cortou.
         let tamanho_titulo = px(40.0).max(34.0);
@@ -1598,6 +1920,14 @@ impl Apresentacao {
         let subir = |rect: Rect| Rect::from_min_max(rect.min - vec2(0.0, sobra), rect.max);
         let r = Regioes { esquerda: subir(r.esquerda), direita: subir(r.direita), seletor_direita: r.seletor_direita.translate(vec2(0.0, -sobra)), ..*r };
 
+        // A imagem que a montagem escolheu é a que aparece primeiro.
+        if !self.principal.contains_key(&slide.tarefa_id)
+            && let Some(m) = &slide.montagem
+            && let Some(c) = m.cartoes.iter().find(|c| c.imagem != 0)
+            && let Some(i) = slide.anexos.iter().position(|a| a.id == c.imagem)
+        {
+            self.principal.insert(slide.tarefa_id, i);
+        }
         self.coluna_esquerda(ui, &r, &slide);
         // "Anexos | Lousa" quando a tarefa tem os dois.
         if !slide.anexos.is_empty() && slide.lousa.is_some() {
@@ -1659,7 +1989,79 @@ impl Apresentacao {
         }
     }
 
+    /// A coluna da esquerda do slide da tarefa: os cartões da montagem (o
+    /// resumo, uma mudança por cartão, o fluxo numerado, o que falta), como
+    /// na lousa da reunião. Editando a nota (N), ou sem montagem, a coluna
+    /// clássica (a nota, os números e o que foi feito).
     fn coluna_esquerda(&mut self, ui: &mut egui::Ui, r: &Regioes, slide: &api::Slide) {
+        let editando = self.nota.as_ref().is_some_and(|(t, _)| *t == slide.tarefa_id) || self.focar_nota;
+        let cartoes: Vec<&api::Cartao> = slide.montagem.as_ref().map(|m| m.cartoes.iter().filter(|c| c.imagem == 0).collect()).unwrap_or_default();
+        if editando || cartoes.is_empty() {
+            return self.coluna_esquerda_classica(ui, r, slide);
+        }
+        let p = cores();
+        let s = r.escala;
+        let px = |v: f32| (v * s).round();
+        let pintor = ui.painter().clone();
+        let area = r.esquerda;
+        let largura = area.width().min(px(1100.0));
+        let mut y = area.top();
+        // A linha do pedido ao agente, acima dos cartões.
+        if let Some(resumo) = self.pedidos.get(&slide.tarefa_id).cloned() {
+            let meio = y + px(11.0);
+            tema::marca(
+                &pintor,
+                pos2(area.left() + 4.5, meio),
+                4.5,
+                resumo.estado.cor,
+                if resumo.estado.cheio { tema::Marca::Cheia } else { tema::Marca::Anel },
+            );
+            let texto = format!("Pedido: «{}» · {}", resumo.pedido.texto.replace('\n', " "), resumo.estado.longo.to_lowercase());
+            let g = registro::texto_em_linhas(&pintor, &texto, FontId::proportional(px(14.0)), p.suave, largura - 16.0, 1);
+            pintor.galley(pos2(area.left() + 16.0, meio - g.size().y / 2.0), g, p.suave);
+            y += px(22.0) + px(12.0);
+        }
+        let limite = area.bottom() - px(30.0);
+        let estilo = estilo_nota(px(21.0), p.texto, largura - px(28.0));
+        let total = cartoes.len();
+        for (n, c) in cartoes.iter().enumerate() {
+            let titulo = pintor.layout(c.titulo.trim_end_matches('.').to_string(), forte(px(23.0)), p.texto, largura - px(28.0));
+            let texto = registro::NotaMedida::nova(&pintor, c.texto.trim(), estilo);
+            let altura_titulo = if c.titulo.trim().is_empty() { 0.0 } else { titulo.size().y + px(8.0) };
+            let altura = altura_titulo + texto.altura;
+            if y + altura > limite {
+                let restam = total - n;
+                let aviso =
+                    if restam == 1 { "+1 cartão na lousa da reunião (Q)".to_string() } else { format!("+{restam} cartões na lousa da reunião (Q)") };
+                pintor.text(pos2(area.left(), y + px(8.0)), egui::Align2::LEFT_TOP, aviso, FontId::proportional(px(15.0)), p.suave);
+                break;
+            }
+            // O fio à esquerda marca o cartão; o do "Falta" leva a cor de alerta.
+            let cor = if c.titulo.trim().eq_ignore_ascii_case("falta") {
+                p.alerta
+            } else if n == 0 {
+                p.destaque
+            } else {
+                p.borda
+            };
+            pintor.vline(area.left() + px(4.0), y..=y + altura, Stroke::new(3.0, cor));
+            if altura_titulo > 0.0 {
+                pintor.galley(pos2(area.left() + px(24.0), y), titulo, p.texto);
+            }
+            texto.pintar(&pintor, pos2(area.left() + px(24.0), y + altura_titulo));
+            y += altura + px(22.0);
+        }
+        // N edita a nota, que é de onde a montagem sai.
+        pintor.text(
+            pos2(area.left(), area.bottom() - px(18.0)),
+            egui::Align2::LEFT_CENTER,
+            "N edita a nota · a montagem acompanha",
+            FontId::proportional(px(13.0)),
+            p.suave,
+        );
+    }
+
+    fn coluna_esquerda_classica(&mut self, ui: &mut egui::Ui, r: &Regioes, slide: &api::Slide) {
         let p = cores();
         let s = r.escala;
         let px = |v: f32| (v * s).round();
@@ -1668,51 +2070,87 @@ impl Apresentacao {
         // Sem anexos, o texto não passa de 1100 de largura.
         let largura = area.width().min(px(1100.0));
 
-        // De cima para baixo: o que foi feito, os números logo depois e a nota
-        // (o roteiro da fala) logo depois dos números. Os tópicos param antes
-        // do espaço dos números e da nota: com a lista cheia, os dois ficam
-        // no pé da coluna; com poucos tópicos, sobem junto.
+        // De cima para baixo: a nota (o roteiro da fala) logo abaixo do
+        // título, os números e, por último, "O que foi feito", que fica com o
+        // que sobra (recolhido, só o rótulo).
         let n = &slide.numeros;
         let com_tempo = self.com_tempo();
         let tem_numeros = (com_tempo && n.tempo_s > 0) || n.sessoes > 0 || n.erros > 0 || n.capturas > 0;
         let altura_numeros = if tem_numeros { px(64.0) } else { 0.0 };
+        let vao_numeros = if tem_numeros { px(20.0) } else { 0.0 };
         // A linha do pedido ao agente, acima da nota.
         let resumo = self.pedidos.get(&slide.tarefa_id).cloned();
         let altura_pedido = if resumo.is_some() { px(22.0) + px(8.0) } else { 0.0 };
-        let vao_numeros = if tem_numeros { px(24.0) } else { 0.0 };
-        // A nota usa o espaço que os tópicos deixam (pelo menos 4 linhas): o
-        // agente complementa no fim, e a resposta precisa aparecer no slide.
-        // Respondido um pedido, se ainda não couber, o começo sai ("…" em cima).
-        let livre = area.height() - altura_feito(slide, s, self.feito_aberto) - altura_numeros - vao_numeros - altura_pedido - px(20.0);
-        let linhas_nota = linhas_que_cabem(&pintor, livre);
+        let feito_minimo = if slide.feito.is_empty() { 0.0 } else { px(ALTURA_FEITO_RECOLHIDO) + px(12.0) };
+        let maximo_nota = (area.height() - altura_pedido - altura_numeros - vao_numeros - feito_minimo - px(12.0)).max(px(80.0));
+        // Respondido um pedido, se ainda não couber, o começo sai (rola até o fim).
         let pelo_fim = resumo.as_ref().is_some_and(|r| r.pedido.estado == "respondido");
-        let altura_nota = self.altura_nota(&pintor, slide, s, largura, linhas_nota) + altura_pedido;
-        let vao_nota = if altura_nota > 0.0 { px(20.0) } else { 0.0 };
-        let limite = area.bottom() - altura_nota - vao_nota - altura_numeros - vao_numeros;
+        let altura_nota = self.altura_nota(&pintor, slide, s, largura, maximo_nota);
 
         let mut y = area.top();
-        // Recolhido por padrão: o que o agente fez é apoio; a fala é a nota.
-        if !slide.feito.is_empty() {
-            let itens: usize = slide.feito.iter().map(|f| f.itens.len() + f.mais).sum();
-            let rotulo = format!("O que foi feito · {itens} {}", if itens == 1 { "item" } else { "itens" });
-            let g = pintor.layout_no_wrap(rotulo, FontId::proportional(13.5), p.suave);
-            let caixa = Rect::from_min_size(pos2(area.left(), y), g.size() + vec2(16.0, 4.0));
-            let resposta = ui.interact(caixa, Id::new(("feito", slide.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let cor = if resposta.hovered() { p.texto } else { p.suave };
-            // A seta desenhada: a fonte não tem ▸/▾.
-            let c = pos2(caixa.left() + 5.0, caixa.top() + g.size().y / 2.0);
-            let pontas = if self.feito_aberto {
-                vec![c + vec2(-4.0, -2.5), c + vec2(4.0, -2.5), c + vec2(0.0, 3.0)]
-            } else {
-                vec![c + vec2(-2.5, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.5, 4.0)]
-            };
-            pintor.add(egui::Shape::convex_polygon(pontas, cor, Stroke::NONE));
-            pintor.galley(caixa.min + vec2(16.0, 0.0), g, cor);
-            if resposta.clicked() {
-                self.feito_aberto = !self.feito_aberto;
+        if let Some(r) = resumo {
+            let meio = y + px(11.0);
+            tema::marca(&pintor, pos2(area.left() + 4.5, meio), 4.5, r.estado.cor, if r.estado.cheio { tema::Marca::Cheia } else { tema::Marca::Anel });
+            let texto = format!("Pedido: «{}» · {}", r.pedido.texto.replace('\n', " "), r.estado.longo.to_lowercase());
+            let g = registro::texto_em_linhas(&pintor, &texto, FontId::proportional(px(14.0)), p.suave, largura - 16.0, 1);
+            if g.elided {
+                let caixa = Rect::from_min_size(pos2(area.left() + 16.0, y), vec2(g.size().x, px(22.0)));
+                ui.interact(caixa, Id::new(("linha-pedido", slide.tarefa_id)), Sense::hover()).on_hover_text(&texto);
             }
-            y += if self.feito_aberto { px(22.0) + px(12.0) } else { px(ALTURA_FEITO_RECOLHIDO) };
+            pintor.galley(pos2(area.left() + 16.0, meio - g.size().y / 2.0), g, p.suave);
+            y += altura_pedido;
         }
+        let area_nota = Rect::from_min_size(pos2(area.left(), y), vec2(largura, altura_nota));
+        self.notas(ui, area_nota, slide, s, pelo_fim);
+        y += altura_nota;
+        if altura_nota > 0.0 {
+            y += px(24.0);
+        }
+
+        // Números da tarefa (zeros escondidos).
+        if tem_numeros {
+            let numeros = Rect::from_min_size(pos2(area.left(), y), vec2(largura, altura_numeros));
+            let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(numeros).layout(egui::Layout::left_to_right(egui::Align::Min)));
+            filho.spacing_mut().item_spacing.x = px(40.0);
+            if com_tempo && n.tempo_s > 0 {
+                tema::metrica(&mut filho, &registro::texto_tempo(n.tempo_s), "Tempo de agente", None, px(28.0));
+            }
+            if n.sessoes > 0 {
+                tema::metrica(&mut filho, &n.sessoes.to_string(), if n.sessoes == 1 { "Sessão" } else { "Sessões" }, None, px(28.0));
+            }
+            if n.erros > 0 {
+                tema::metrica(&mut filho, &n.erros.to_string(), if n.erros == 1 { "Erro" } else { "Erros" }, Some((p.erro, tema::Marca::AnelGrosso)), px(28.0));
+            }
+            if n.capturas > 0 {
+                tema::metrica(&mut filho, &n.capturas.to_string(), if n.capturas == 1 { "Captura" } else { "Capturas" }, None, px(28.0));
+            }
+            y += altura_numeros + vao_numeros;
+        }
+
+        // "O que foi feito", recolhido por padrão: o que o agente fez é apoio; a fala é a nota.
+        if slide.feito.is_empty() || y + px(ALTURA_FEITO_RECOLHIDO) > area.bottom() {
+            return;
+        }
+        let limite = area.bottom();
+        let itens: usize = slide.feito.iter().map(|f| f.itens.len() + f.mais).sum();
+        let rotulo = format!("O que foi feito · {itens} {}", if itens == 1 { "item" } else { "itens" });
+        let g = pintor.layout_no_wrap(rotulo, FontId::proportional(13.5), p.suave);
+        let caixa = Rect::from_min_size(pos2(area.left(), y), g.size() + vec2(16.0, 4.0));
+        let resposta = ui.interact(caixa, Id::new(("feito", slide.tarefa_id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let cor = if resposta.hovered() { p.texto } else { p.suave };
+        // A seta desenhada: a fonte não tem ▸/▾.
+        let c = pos2(caixa.left() + 5.0, caixa.top() + g.size().y / 2.0);
+        let pontas = if self.feito_aberto {
+            vec![c + vec2(-4.0, -2.5), c + vec2(4.0, -2.5), c + vec2(0.0, 3.0)]
+        } else {
+            vec![c + vec2(-2.5, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.5, 4.0)]
+        };
+        pintor.add(egui::Shape::convex_polygon(pontas, cor, Stroke::NONE));
+        pintor.galley(caixa.min + vec2(16.0, 0.0), g, cor);
+        if resposta.clicked() {
+            self.feito_aberto = !self.feito_aberto;
+        }
+        y += if self.feito_aberto { px(22.0) + px(12.0) } else { px(ALTURA_FEITO_RECOLHIDO) };
         let feito: &[api::Feito] = if self.feito_aberto { &slide.feito } else { &[] };
         let so_periodo = slide.feito.len() == 1 && slide.feito[0].parte == "No período";
         let linha = px(28.0);
@@ -1746,61 +2184,27 @@ impl Apresentacao {
             }
             y += px(20.0) - px(8.0);
         }
-        let y = y.min(limite);
-
-        // Números da tarefa (zeros escondidos).
-        let numeros = Rect::from_min_size(pos2(area.left(), y + vao_numeros), vec2(largura, altura_numeros));
-        if tem_numeros {
-            let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(numeros).layout(egui::Layout::left_to_right(egui::Align::Min)));
-            filho.spacing_mut().item_spacing.x = px(40.0);
-            if com_tempo && n.tempo_s > 0 {
-                tema::metrica(&mut filho, &registro::texto_tempo(n.tempo_s), "Tempo de agente", None, px(28.0));
-            }
-            if n.sessoes > 0 {
-                tema::metrica(&mut filho, &n.sessoes.to_string(), if n.sessoes == 1 { "Sessão" } else { "Sessões" }, None, px(28.0));
-            }
-            if n.erros > 0 {
-                tema::metrica(&mut filho, &n.erros.to_string(), if n.erros == 1 { "Erro" } else { "Erros" }, Some((p.erro, tema::Marca::AnelGrosso)), px(28.0));
-            }
-            if n.capturas > 0 {
-                tema::metrica(&mut filho, &n.capturas.to_string(), if n.capturas == 1 { "Captura" } else { "Capturas" }, None, px(28.0));
-            }
-        }
-
-        let mut topo_nota = numeros.bottom() + vao_nota;
-        if let Some(r) = resumo {
-            let meio = topo_nota + px(11.0);
-            tema::marca(&pintor, pos2(area.left() + 4.5, meio), 4.5, r.estado.cor, if r.estado.cheio { tema::Marca::Cheia } else { tema::Marca::Anel });
-            let texto = format!("Pedido: «{}» · {}", r.pedido.texto.replace('\n', " "), r.estado.longo.to_lowercase());
-            let g = registro::texto_em_linhas(&pintor, &texto, FontId::proportional(px(14.0)), p.suave, largura - 16.0, 1);
-            if g.elided {
-                let caixa = Rect::from_min_size(pos2(area.left() + 16.0, topo_nota), vec2(g.size().x, px(22.0)));
-                ui.interact(caixa, Id::new(("linha-pedido", slide.tarefa_id)), Sense::hover()).on_hover_text(&texto);
-            }
-            pintor.galley(pos2(area.left() + 16.0, meio - g.size().y / 2.0), g, p.suave);
-            topo_nota += altura_pedido;
-        }
-        let area_nota = Rect::from_min_size(pos2(area.left(), topo_nota), vec2(largura, altura_nota - altura_pedido));
-        self.notas(ui, area_nota, slide, s, pelo_fim);
     }
 
-    /// Altura do bloco de notas: o campo em edição, a nota (até `linhas`)
-    /// com o estado da gravação logo embaixo, ou o convite para escrever.
-    fn altura_nota(&self, pintor: &egui::Painter, slide: &api::Slide, s: f32, largura: f32, linhas: usize) -> f32 {
+    /// Altura do bloco de notas: o campo em edição, a nota inteira (até
+    /// `maximo`; o que passa rola) com o estado da gravação logo embaixo, ou
+    /// o convite para escrever.
+    fn altura_nota(&self, pintor: &egui::Painter, slide: &api::Slide, s: f32, largura: f32, maximo: f32) -> f32 {
         let editando = self.nota.as_ref().is_some_and(|(t, _)| *t == slide.tarefa_id) || self.focar_nota;
-        let tem = !slide.nota.is_empty() || slide.nota_anterior.is_some();
+        let tem = nota_do_slide(slide).is_some();
         if editando {
-            return (132.0 * s).round().max(110.0);
+            return maximo.min((260.0 * s).round()).max((132.0 * s).round().min(maximo)).max(110.0);
         }
         if !tem {
             return if self.tela_cheia { 0.0 } else { (44.0 * s).round() };
         }
-        let (texto, prefixo) = match (&slide.nota_anterior, slide.nota.is_empty()) {
-            (Some(a), true) => (a.texto.as_str(), 20.0),
-            _ => (slide.nota.as_str(), 0.0),
+        let (texto, prefixo) = match nota_do_slide(slide) {
+            Some((t, true)) => (t, 20.0),
+            Some((t, false)) => (t, 0.0),
+            None => ("", 0.0),
         };
-        let g = nota_formatada(pintor, texto, cores().texto, largura - 15.0, linhas);
-        prefixo + g.size().y + RODAPE_NOTA
+        let medida = registro::NotaMedida::nova(pintor, texto, estilo_nota((FONTE_NOTA_TAREFA * s).round(), cores().texto, largura - 15.0 - 12.0));
+        (prefixo + medida.altura + RODAPE_NOTA).min(maximo)
     }
 
     fn notas(&mut self, ui: &mut egui::Ui, area: Rect, slide: &api::Slide, s: f32, pelo_fim: bool) {
@@ -1828,7 +2232,15 @@ impl Apresentacao {
             let id = Id::new(("nota-slide", tarefa));
             let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(area.min, vec2(area.width(), area.height() - rodape))));
             let mut texto = self.nota.as_ref().map(|n| n.1.clone()).unwrap_or_default();
-            let resposta = tema::campo_multilinha_com(&mut filho, &mut texto, 3, area.height() - rodape - 20.0, id, false, FontId::proportional(FONTE_NOTA));
+            let resposta = tema::campo_multilinha_com(
+                &mut filho,
+                &mut texto,
+                3,
+                area.height() - rodape - 20.0,
+                id,
+                false,
+                FontId::proportional((FONTE_NOTA_TAREFA * s).round()),
+            );
             if texto.chars().count() > MAX_NOTA {
                 texto = texto.chars().take(MAX_NOTA).collect();
             }
@@ -1868,25 +2280,27 @@ impl Apresentacao {
         let pintor = ui.painter().clone();
         // O estado da gravação fica logo abaixo da última linha, alinhado ao texto.
         let mut fim_texto = pos2(corpo.left(), corpo.top() + 44.0 * s);
-        if !slide.nota.is_empty() || slide.nota_anterior.is_some() {
-            let (texto, cor, prefixo) = match (&slide.nota_anterior, slide.nota.is_empty()) {
-                (Some(a), true) => (a.texto.as_str(), p.suave, Some(format!("Nota de {}", a.periodo))),
-                _ => (slide.nota.as_str(), p.texto, None),
+        if nota_do_slide(slide).is_some() {
+            let (texto, cor, prefixo) = match nota_do_slide(slide) {
+                Some((t, true)) => (t, p.suave, slide.nota_anterior.as_ref().map(|a| format!("Nota de {}", a.periodo))),
+                Some((t, false)) => (t, p.texto, None),
+                None => ("", p.texto, None),
             };
             let mut y = corpo.top();
             if let Some(prefixo) = prefixo {
                 pintor.text(pos2(corpo.left() + 15.0, y), egui::Align2::LEFT_TOP, prefixo, fonte_estado.clone(), p.suave);
                 y += 20.0;
             }
-            // A nota sempre inteira: o que não cabe no espaço livre rola
-            // dentro dela. Respondido um pedido, começa no fim (a resposta do
-            // agente vem embaixo); a nota de outro período, não.
-            let g = nota_formatada(&pintor, texto, cor, corpo.width() - 15.0 - 12.0, usize::MAX);
+            // A nota sempre inteira, em itens: o que não cabe no espaço livre
+            // rola dentro dela. Respondido um pedido, começa no fim (a
+            // resposta do agente vem embaixo); a nota de outro período, não.
+            let largura_nota = corpo.width() - 15.0 - 12.0;
+            let medida = registro::NotaMedida::nova(&pintor, texto, estilo_nota((FONTE_NOTA_TAREFA * s).round(), cor, largura_nota));
             let cabe = (corpo.bottom() - y - RODAPE_NOTA).max(FONTE_NOTA * 2.0);
-            let altura = g.size().y.min(cabe);
+            let altura = medida.altura.min(cabe);
             pintor.rect_filled(Rect::from_min_size(pos2(corpo.left(), y), vec2(3.0, altura)), CornerRadius::same(2), p.destaque);
-            if g.size().y <= cabe {
-                pintor.galley(pos2(corpo.left() + 15.0, y), g, cor);
+            if medida.altura <= cabe {
+                medida.pintar(&pintor, pos2(corpo.left() + 15.0, y));
             } else {
                 let caixa = Rect::from_min_size(pos2(corpo.left() + 15.0, y), vec2(corpo.width() - 15.0, altura));
                 let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -1896,8 +2310,8 @@ impl Apresentacao {
                     .auto_shrink([false, false])
                     .stick_to_bottom(pelo_fim && !slide.nota.is_empty())
                     .show(&mut filho, |ui| {
-                        let (rect, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                        ui.painter().galley(rect.min, g, cor);
+                        let (rect, _) = ui.allocate_exact_size(vec2(largura_nota, medida.altura), Sense::hover());
+                        medida.pintar(ui.painter(), rect.min);
                     });
             }
             fim_texto = pos2(corpo.left() + 15.0, y + altura);
@@ -2448,15 +2862,17 @@ impl Apresentacao {
 
 /// Os atalhos do painel "?".
 const ATALHOS: &[(&str, &[&str])] = &[
-    ("Avançar", &["→", "PgDn", "Espaço", "Enter"]),
+    ("Avançar", &["→", "PgDn", "Espaço"]),
     ("Voltar", &["←", "PgUp", "Backspace"]),
+    ("Abrir a tarefa do bloco / voltar ao bloco", &["Enter", "Esc"]),
     ("Primeiro / último", &["Home", "End"]),
     ("Ir à capa", &["C"]),
     ("Pedir ao agente", &["P"]),
     ("Anexos ou lousa", &["L"]),
-    ("Editar a nota", &["N"]),
+    ("Lousa da reunião, cartão por cartão", &["Q"]),
+    ("Editar a nota (no slide da tarefa)", &["N"]),
     ("Adicionar foto ou vídeo", &["A"]),
-    ("Esconder o slide (na daily, tira desta daily)", &["H"]),
+    ("Esconder a tarefa (na daily, tira desta daily)", &["H"]),
     ("Tema claro ou escuro (só agora)", &["T"]),
     ("Atualizar com as novidades", &["R"]),
     ("Tela cheia", &["F11"]),
@@ -2576,39 +2992,40 @@ mod testes {
         .unwrap()
     }
 
-    fn divisor(projeto: &str, workspace: &str, n: usize) -> Pagina {
-        Pagina::Divisor { projeto: projeto.into(), workspace: workspace.into(), n }
+    fn bloco(projeto: &str, workspace: &str, tarefas: &[usize], parte: usize, partes: usize) -> Pagina {
+        Pagina::Bloco { secao_id: 0, projeto: projeto.into(), workspace: workspace.into(), tarefas: tarefas.to_vec(), parte, partes }
+    }
+
+    /// Compara as páginas ignorando o id da seção.
+    fn iguais(a: &[Pagina], b: &[Pagina]) -> bool {
+        let sem_id = |p: &Pagina| match p {
+            Pagina::Bloco { projeto, workspace, tarefas, parte, partes, .. } => bloco(projeto, workspace, tarefas, *parte, *partes),
+            outra => outra.clone(),
+        };
+        a.iter().map(sem_id).eq(b.iter().map(sem_id))
     }
 
     #[test]
-    fn paginas_do_deck() {
+    fn paginas_do_deck_em_blocos() {
         let d = deck();
-        let paginas = montar_paginas(&d, &HashSet::new());
-        assert_eq!(
-            paginas,
-            vec![
-                Pagina::Capa,
-                divisor("loja-web", "", 2),
-                Pagina::Tarefa(0),
-                Pagina::Tarefa(1),
-                divisor("cliente-x", "", 1),
-                Pagina::Tarefa(2),
-                Pagina::Mais,
-                Pagina::Fim
-            ]
+        let tudo = |_: &api::Slide| 0.0;
+        let paginas = montar_paginas(&d, &HashSet::new(), &tudo, f32::INFINITY);
+        assert!(
+            iguais(&paginas, &[Pagina::Capa, bloco("loja-web", "", &[0, 1], 1, 1), bloco("cliente-x", "", &[2], 1, 1), Pagina::Mais, Pagina::Fim]),
+            "{paginas:?}"
         );
-        // Esconder (H) tira o slide; um projeto só fica sem divisor.
+        // Esconder (H) tira a tarefa do bloco; um bloco sem tarefas some.
         let escondidos: HashSet<i64> = [3].into();
-        let paginas = montar_paginas(&d, &escondidos);
-        assert_eq!(paginas, vec![Pagina::Capa, Pagina::Tarefa(0), Pagina::Tarefa(1), Pagina::Mais, Pagina::Fim]);
-        // A daily com mais de um projeto também tem divisor; com um projeto só, não.
+        let paginas = montar_paginas(&d, &escondidos, &tudo, f32::INFINITY);
+        assert!(iguais(&paginas, &[Pagina::Capa, bloco("loja-web", "", &[0, 1], 1, 1), Pagina::Mais, Pagina::Fim]), "{paginas:?}");
+        // Um projeto só ainda é um bloco: é a daily do projeto.
         let mut daily = d.clone();
         daily.tipo = "daily".into();
         daily.mais = 0;
-        assert_eq!(montar_paginas(&daily, &HashSet::new()).len(), 7);
         daily.slides.pop();
-        assert_eq!(montar_paginas(&daily, &HashSet::new()), vec![Pagina::Capa, Pagina::Tarefa(0), Pagina::Tarefa(1), Pagina::Fim]);
-        // Dois loja-web de workspaces diferentes são projetos diferentes.
+        let paginas = montar_paginas(&daily, &HashSet::new(), &tudo, f32::INFINITY);
+        assert!(iguais(&paginas, &[Pagina::Capa, bloco("loja-web", "", &[0, 1], 1, 1), Pagina::Fim]), "{paginas:?}");
+        // Dois loja-web de workspaces diferentes são blocos diferentes.
         let mut dois: api::Deck = serde_json::from_value(serde_json::json!({
             "tipo": "daily", "titulo": "Daily",
             "slides": [
@@ -2617,13 +3034,79 @@ mod testes {
             ]
         }))
         .unwrap();
-        assert_eq!(
-            montar_paginas(&dois, &HashSet::new()),
-            vec![Pagina::Capa, divisor("loja-web", "estudos", 1), Pagina::Tarefa(0), divisor("loja-web", "trabalho-x", 1), Pagina::Tarefa(1), Pagina::Fim]
+        let paginas = montar_paginas(&dois, &HashSet::new(), &tudo, f32::INFINITY);
+        assert!(
+            iguais(&paginas, &[Pagina::Capa, bloco("loja-web", "estudos", &[0], 1, 1), bloco("loja-web", "trabalho-x", &[1], 1, 1), Pagina::Fim]),
+            "{paginas:?}"
         );
         dois.slides[1].secao_id = 1;
         dois.slides[1].secao = "estudos · loja-web".into();
-        assert_eq!(montar_paginas(&dois, &HashSet::new()).len(), 4);
+        assert_eq!(montar_paginas(&dois, &HashSet::new(), &tudo, f32::INFINITY).len(), 3);
+    }
+
+    #[test]
+    fn tarefa_com_anexo_ganha_slide_depois_do_bloco() {
+        let mut d = deck();
+        d.slides[1].anexos = vec![serde_json::from_value(serde_json::json!({"id": 9, "tipo": "imagem", "bytes": 1, "largura": 1, "altura": 1})).unwrap()];
+        d.slides[2].lousa = Some(api::ResumoLousa { id: 1, elementos: 2 });
+        let paginas = montar_paginas(&d, &HashSet::new(), &|_| 0.0, f32::INFINITY);
+        assert!(
+            iguais(
+                &paginas,
+                &[
+                    Pagina::Capa,
+                    bloco("loja-web", "", &[0, 1], 1, 1),
+                    Pagina::Tarefa(1),
+                    bloco("cliente-x", "", &[2], 1, 1),
+                    Pagina::Tarefa(2),
+                    Pagina::Mais,
+                    Pagina::Fim
+                ]
+            ),
+            "{paginas:?}"
+        );
+        // A tarefa com slide próprio abre nele; a outra, no bloco dela.
+        assert_eq!(pagina_da_tarefa(&paginas, &d, 2), Some(2));
+        assert_eq!(pagina_da_tarefa(&paginas, &d, 1), Some(1));
+        assert_eq!(pagina_da_tarefa(&paginas, &d, 3), Some(4));
+        assert_eq!(pagina_da_tarefa(&paginas, &d, 99), None);
+    }
+
+    #[test]
+    fn bloco_que_nao_cabe_segue_em_partes_sem_cortar_tarefa() {
+        let d = deck();
+        // Cada tarefa mede 60; cabem 100 por tela: a segunda do loja-web vai para a parte 2.
+        let paginas = montar_paginas(&d, &HashSet::new(), &|_| 60.0, 100.0);
+        assert!(
+            iguais(
+                &paginas,
+                &[
+                    Pagina::Capa,
+                    bloco("loja-web", "", &[0], 1, 2),
+                    bloco("loja-web", "", &[1], 2, 2),
+                    bloco("cliente-x", "", &[2], 1, 1),
+                    Pagina::Mais,
+                    Pagina::Fim
+                ]
+            ),
+            "{paginas:?}"
+        );
+        // Uma tarefa maior que a tela fica sozinha na parte dela, nunca cortada.
+        let paginas = montar_paginas(&d, &HashSet::new(), &|s| if s.tarefa_id == 1 { 500.0 } else { 10.0 }, 100.0);
+        assert!(
+            iguais(
+                &paginas,
+                &[
+                    Pagina::Capa,
+                    bloco("loja-web", "", &[0], 1, 2),
+                    bloco("loja-web", "", &[1], 2, 2),
+                    bloco("cliente-x", "", &[2], 1, 1),
+                    Pagina::Mais,
+                    Pagina::Fim
+                ]
+            ),
+            "{paginas:?}"
+        );
     }
 
     #[test]
@@ -2709,5 +3192,56 @@ mod testes {
         assert_eq!(celulas_capa(9), 6);
         assert_eq!(rotulo_parte("estudos · cliente-x", 1), "estudos › cliente-x · 1");
         assert_eq!(rotulo_parte("loja-web", 3), "loja-web · 3");
+    }
+
+    #[test]
+    fn h_esconde_a_tarefa_sob_o_mouse() {
+        let ctx = egui::Context::default();
+        tema::instalar(&ctx);
+        let mut d = deck();
+        d.slides[0].nota = "Primeira nota\n- item um\n- item dois".into();
+        d.slides[1].nota = "Segunda nota".into();
+        let mut a = Apresentacao::nova(&ctx, 1, api::Recorte::Perfil, None, Some(d), Inicio::Capa, true, tema::Escolha::Escuro, false);
+        a.atual = 1;
+        let modelo = dados::Modelo::default();
+        let mut favo = tema::Favo::default();
+        let tela = Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 900.0));
+        let mut quadro = |a: &mut Apresentacao, eventos: Vec<Event>, t: f64| {
+            let entrada = egui::RawInput { screen_rect: Some(tela), events: eventos, time: Some(t), ..Default::default() };
+            let mut s = ctx.run_ui(entrada, |ui| {
+                a.mostrar(ui, &mut favo, &modelo, t);
+            });
+            s.textures_delta.clear();
+        };
+        // Acha a linha da tarefa 1 (A) movendo o mouse.
+        let mut t = 0.0;
+        let mut achou = None;
+        for y in (100..800).step_by(10) {
+            t += 0.1;
+            quadro(&mut a, vec![Event::PointerMoved(pos2(400.0, y as f32))], t);
+            t += 0.1;
+            quadro(&mut a, vec![], t);
+            if a.sob_mouse == Some(1) {
+                achou = Some(y);
+                break;
+            }
+        }
+        assert!(achou.is_some());
+        let tecla = |pressed| Event::Key { key: Key::H, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+        t += 0.1;
+        quadro(&mut a, vec![tecla(true), Event::Text("h".into())], t);
+        // Segurando o H, a repetição não leva a tarefa que subiu (B).
+        for _ in 0..4 {
+            t += 0.05;
+            quadro(&mut a, vec![tecla(true)], t);
+        }
+        t += 0.05;
+        quadro(&mut a, vec![tecla(false)], t);
+        for _ in 0..4 {
+            t += 0.1;
+            quadro(&mut a, vec![], t);
+        }
+        assert_eq!(a.escondidos, [1].into());
+        assert!(a.paginas.iter().any(|p| matches!(p, Pagina::Bloco { tarefas, .. } if tarefas == &[1])));
     }
 }

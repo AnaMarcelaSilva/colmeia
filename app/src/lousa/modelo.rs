@@ -775,7 +775,7 @@ mod testes {
 
     fn modelo() -> Modelo {
         Modelo::novo(api::LousaAberta {
-            lousa: api::InfoLousa { id: 1, dono: api::DonoLousa { workspace_id: 1, tarefa_id: 0 } },
+            lousa: api::InfoLousa { id: 1, dono: api::DonoLousa::workspace(1) },
             elementos: vec![elemento(10, 0.0), elemento(11, 300.0), ligacao(12, 10, 11)],
         })
     }

@@ -3,6 +3,7 @@ package dados
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -415,8 +416,74 @@ func TestAgenteSoAcrescentaNaLousaDaTarefa(t *testing.T) {
 	if _, err := d.b.AcrescentarDoAgente(ctx, d.tarefa, d.agente, muitos); err == nil {
 		t.Error("o agente acrescentou mais de 50 de uma vez")
 	}
-	if _, err := aplicarLoteComo(t, d, Operacao{Op: "remover", ID: existente.Elementos[0].ID, Versao: 1}); err == nil {
-		t.Error("o agente removeu um item")
+	if _, err := aplicarLoteComo(t, d, Operacao{Op: "alterar", ID: existente.Elementos[0].ID, Versao: 1, Campos: &CamposElemento{Texto: new(string)}}); err == nil {
+		t.Error("o agente alterou um item")
+	}
+}
+
+func TestAgenteApagaDaLousaDaTarefa(t *testing.T) {
+	d := montarLousas(t)
+	ctx := context.Background()
+	seu, _ := d.b.GravarLousa(ctx, d.lousaTr, []Operacao{criar("", &NovoElemento{Tipo: "nota", Texto: "minha", X: f(0), Y: f(0), Largura: f(200), Altura: f(100)})})
+	r, err := d.b.AcrescentarDoAgente(ctx, d.tarefa, d.agente, []NovoDoAgente{
+		{Ref: "a", NovoElemento: NovoElemento{Tipo: "nota", Texto: "velha"}},
+		{Ref: "b", NovoElemento: NovoElemento{Tipo: "codigo", Texto: "x -> y"}},
+		{NovoElemento: NovoElemento{Tipo: "ligacao", De: &RefElemento{Ref: "a"}, Para: &RefElemento{Ref: "b"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b, lig := r.Refs["a"], r.Refs["b"], r.Elementos[2].ID
+	// Apagar a nota leva a ligação junto; o código e a sua nota ficam.
+	r, err = d.b.ApagarDoAgente(ctx, d.tarefa, d.agente, []int64{a}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(r.Removidos) != fmt.Sprint([]int64{a, lig}) {
+		t.Errorf("removidos: %v (nota %d, ligação %d)", r.Removidos, a, lig)
+	}
+	_, restantes, _ := d.b.Lousa(ctx, d.lousaTr)
+	if len(restantes) != 2 {
+		t.Errorf("ficaram: %+v", restantes)
+	}
+	// Id que não é desta lousa (ou já apagado): recusado, nada gravado.
+	outra, _ := d.b.GravarLousa(ctx, d.lousaWS, []Operacao{criar("", &NovoElemento{Tipo: "nota", Texto: "do workspace", X: f(0), Y: f(0), Largura: f(200), Altura: f(100)})})
+	for nome, ids := range map[string][]int64{"de outra lousa": {b, outra.Elementos[0].ID}, "já apagado": {a}, "nenhum": {}} {
+		if _, err := d.b.ApagarDoAgente(ctx, d.tarefa, d.agente, ids, false); err == nil {
+			t.Errorf("apagou %s", nome)
+		}
+	}
+	if _, restantes, _ := d.b.Lousa(ctx, d.lousaTr); len(restantes) != 2 {
+		t.Errorf("o lote recusado apagou algo: %+v", restantes)
+	}
+	if _, err := d.b.ApagarDoAgente(ctx, d.tarefa2, d.agente, []int64{b}, false); err == nil {
+		t.Error("o agente apagou na lousa de outra tarefa")
+	}
+	// Tudo: a lousa fica vazia, inclusive o que é seu; o evento leva só ids.
+	r, err = d.b.ApagarDoAgente(ctx, d.tarefa, d.agente, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(r.Removidos) != fmt.Sprint([]int64{seu.Elementos[0].ID, b}) {
+		t.Errorf("removidos com tudo: %v", r.Removidos)
+	}
+	if _, restantes, _ := d.b.Lousa(ctx, d.lousaTr); len(restantes) != 0 {
+		t.Errorf("sobrou: %+v", restantes)
+	}
+	eventos, _ := d.b.ListarEventos(ctx, FiltroEventos{Perfil: d.perfil, Tipos: []string{"lousa.agente"}})
+	ultimo := eventos[0] // do mais novo para o mais antigo
+	if ultimo.Tipo != "lousa.agente" || !strings.Contains(string(ultimo.Dados), `"acao":"apagou"`) || !strings.Contains(string(ultimo.Dados), `"quantidade":2`) {
+		t.Errorf("evento: %s %s", ultimo.Tipo, ultimo.Dados)
+	}
+	if strings.Contains(string(ultimo.Dados), "minha") || strings.Contains(string(ultimo.Dados), "velha") {
+		t.Errorf("texto no evento: %s", ultimo.Dados)
+	}
+	// Vazia, apagar tudo de novo não é erro nem evento.
+	if r, err := d.b.ApagarDoAgente(ctx, d.tarefa, d.agente, nil, true); err != nil || len(r.Removidos) != 0 {
+		t.Errorf("lousa vazia: %v %v", r.Removidos, err)
+	}
+	if deNovo, _ := d.b.ListarEventos(ctx, FiltroEventos{Perfil: d.perfil, Tipos: []string{"lousa.agente"}}); len(deNovo) != len(eventos) {
+		t.Error("apagar nada gerou evento")
 	}
 }
 
@@ -555,7 +622,7 @@ func TestMigracaoDeUmBancoV3(t *testing.T) {
 	defer b2.Fechar()
 	var versao int
 	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 10 {
+	if versao != 16 {
 		t.Errorf("versão do banco: %d", versao)
 	}
 	a, err := b2.Anexo(ctx, 1)

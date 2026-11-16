@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
@@ -442,28 +443,6 @@ func TestPreferenciaDoTempoDosAgentes(t *testing.T) {
 	}
 }
 
-func TestPreferenciaDoAutocompletar(t *testing.T) {
-	b, _ := bancoDeTeste(t)
-	ctx := context.Background()
-	perfil, _ := b.CriarPerfil(ctx, "Profissional", "")
-	if p, _ := b.Perfil(ctx, perfil.ID); p.AutocompletarSQL {
-		t.Error("o autocompletar começa ligado")
-	}
-	if err := b.DefinirAutocompletarSQL(ctx, perfil.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	if lista, _ := b.ListarPerfis(ctx); len(lista) != 1 || !lista[0].AutocompletarSQL {
-		t.Errorf("perfis: %+v", lista)
-	}
-	if err := b.DefinirAutocompletarSQL(ctx, 99, true); !errors.Is(err, ErrNaoEncontrado) {
-		t.Errorf("perfil que não existe: %v", err)
-	}
-	eventos, _ := b.ListarEventos(ctx, FiltroEventos{Perfil: perfil.ID, Tipos: []string{"perfil.autocompletar_sql"}})
-	if len(eventos) != 1 || !strings.Contains(string(eventos[0].Dados), `"ligado":true`) {
-		t.Errorf("evento da preferência: %+v", eventos)
-	}
-}
-
 func TestMascoteDoPerfil(t *testing.T) {
 	b, _ := bancoDeTeste(t)
 	ctx := context.Background()
@@ -533,7 +512,7 @@ func TestMigracaoDaAbelhaPorPerfil(t *testing.T) {
 	b, dir := bancoDeTeste(t)
 	ctx := context.Background()
 	p, _ := b.CriarPerfil(ctx, "Pessoal", "claro")
-	if err := b.DefinirAutocompletarSQL(ctx, p.ID, true); err != nil {
+	if err := b.DefinirTempoAgentes(ctx, p.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, coluna := range []string{"mascote_modelo", "mascote_nome", "abelha_fixa"} {
@@ -555,7 +534,7 @@ func TestMigracaoDaAbelhaPorPerfil(t *testing.T) {
 	if perfil.MascoteModelo != "identidade" || perfil.MascoteNome != "Colmeia" || perfil.AbelhaFixa {
 		t.Errorf("padrões depois da migração: %+v", perfil)
 	}
-	if perfil.Tema != "claro" || !perfil.AutocompletarSQL {
+	if perfil.Tema != "claro" || !perfil.TempoAgentes {
 		t.Errorf("a migração mexeu no resto do perfil: %+v", perfil)
 	}
 	if err := b2.DefinirMascote(ctx, p.ID, "favo", "Mel"); err != nil {
@@ -627,14 +606,11 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 	defer b2.Fechar()
 	var versao int
 	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
-	if versao != 10 {
+	if versao != 16 {
 		t.Errorf("versão: %d", versao)
 	}
 	if err := b2.DefinirTema(ctx, p.ID, "fosco"); err != nil {
 		t.Fatalf("tema fosco depois da migração: %v", err)
-	}
-	if err := b2.DefinirAutocompletarSQL(ctx, p.ID, true); err != nil {
-		t.Fatalf("autocompletar depois da migração: %v", err)
 	}
 	perfil, err := b2.Perfil(ctx, p.ID)
 	if err != nil || perfil.Tema != "fosco" || perfil.Nome != "Pessoal" {
@@ -652,6 +628,79 @@ func TestMigracaoDoTemaFosco(t *testing.T) {
 	}
 	if workspaces, _ := b2.ListarWorkspaces(ctx, p.ID); len(workspaces) != 0 {
 		t.Errorf("a remoção em cascata parou de funcionar: %+v", workspaces)
+	}
+}
+
+// Um banco da versão 10 tem fora_da_daily apontando para tarefas e sem o
+// perfil. A migração refaz a tabela: a linha de hoje continua, e uma tarefa
+// removida também pode sair da daily.
+func TestMigracaoDaDailyComTarefaRemovida(t *testing.T) {
+	b, dir := bancoDeTeste(t)
+	ctx := context.Background()
+	p, _ := b.CriarPerfil(ctx, "Pessoal", "escuro")
+	w, err := b.CriarWorkspace(ctx, p.ID, "Estudos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projeto, err := b.CriarProjeto(ctx, w.ID, "loja-web", t.TempDir(), "pasta", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fica, _ := b.CriarTarefa(ctx, projeto.ID, "Fica", "", "")
+	some, _ := b.CriarTarefa(ctx, projeto.ID, "Some", "", "")
+	hoje := time.Now().Format("2006-01-02")
+	for _, comando := range []string{
+		`PRAGMA foreign_keys = OFF`,
+		`DROP TABLE fora_da_daily`,
+		`CREATE TABLE fora_da_daily (
+			tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+			dia TEXT NOT NULL,
+			PRIMARY KEY (tarefa_id, dia))`,
+		fmt.Sprintf(`INSERT INTO fora_da_daily (tarefa_id, dia) VALUES (%d, '%s')`, fica.ID, hoje),
+		`PRAGMA user_version = 10`,
+	} {
+		if _, err := b.db.Exec(comando); err != nil {
+			t.Fatal(comando, err)
+		}
+	}
+	b.Fechar()
+
+	b2, err := Abrir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b2.Fechar()
+	var versao int
+	b2.db.QueryRow(`PRAGMA user_version`).Scan(&versao)
+	if versao != 16 {
+		t.Errorf("versão: %d", versao)
+	}
+	fora, err := b2.ForaDaDaily(ctx, p.ID, hoje)
+	if err != nil || !fora[fica.ID] || len(fora) != 1 {
+		t.Fatalf("a linha de hoje deveria continuar: %v, %v", fora, err)
+	}
+	if err := b2.RemoverTarefa(ctx, some.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b2.TirarDaDaily(ctx, some.ID, hoje, true); err != nil {
+		t.Fatalf("tirar a tarefa removida: %v", err)
+	}
+	if fora, _ = b2.ForaDaDaily(ctx, p.ID, hoje); !fora[some.ID] || len(fora) != 2 {
+		t.Errorf("a tarefa removida deveria estar fora: %v", fora)
+	}
+	if err := b2.TirarDaDaily(ctx, 99, hoje, true); !errors.Is(err, ErrNaoEncontrado) {
+		t.Errorf("tarefa que nunca existiu: %v", err)
+	}
+	if err := b2.TirarDaDaily(ctx, some.ID, hoje, false); err != nil {
+		t.Fatalf("trazer a tarefa removida de volta: %v", err)
+	}
+	if fora, _ = b2.ForaDaDaily(ctx, p.ID, hoje); fora[some.ID] {
+		t.Errorf("deveria ter voltado: %v", fora)
+	}
+	// Outro perfil não vê o que saiu da daily deste.
+	outro, _ := b2.CriarPerfil(ctx, "Trabalho", "escuro")
+	if fora, _ = b2.ForaDaDaily(ctx, outro.ID, hoje); len(fora) != 0 {
+		t.Errorf("vazou para outro perfil: %v", fora)
 	}
 }
 

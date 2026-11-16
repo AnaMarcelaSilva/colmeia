@@ -306,8 +306,7 @@ func (s *Servidor) tentarEntregar(agente int64) {
 	if _, err := s.Banco.MudarPedido(ctx, proximo.ID, []string{dados.PedidoFila}, dados.PedidoEntregue, ""); err != nil {
 		return
 	}
-	texto := append(terminal.Colagem(textoParaOAgente(*proximo), sessao.ColagemLigada()), '\r')
-	if _, err := sessao.Escrever(texto); err != nil {
+	if err := sessao.Enviar(textoParaOAgente(*proximo)); err != nil {
 		log.Printf("pedido %d: escrevendo no terminal: %v", proximo.ID, err)
 	}
 }

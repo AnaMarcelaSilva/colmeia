@@ -186,6 +186,8 @@ func (s *Servidor) Encerrar() {
 	close(s.parado)
 	<-s.trabalhou
 	s.frases.encerrar()
+	s.montagens.encerrar()
+	s.encerrarRotinas()
 }
 
 func (s *Servidor) guardarContexto(c dados.ContextoAgente) {
@@ -220,6 +222,8 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 		s.regraDeColuna(ctx, c, m.Estado)
 		if m.Estado == terminal.Aguardando && m.Motivo == terminal.EsperandoResposta {
 			s.tentarEntregar(c.ID)
+			// O agente terminou a vez: o que a reunião mostra da tarefa pode ter mudado.
+			s.agendarMontagem(c.Perfil, c.TarefaID, false)
 		}
 	case "terminou":
 		motivo, erro := classificar(c.Ferramenta, m.Saida, m.PelaColmeia)
@@ -238,6 +242,7 @@ func (s *Servidor) tratarMudanca(mu mudancaAgente) {
 			s.limparMCP(c.ID)
 			s.falharPedidosDoAgente(ctx, c.ID, motivoDaFalha(motivo))
 		}
+		s.atualizarSeFecharam()
 	}
 }
 
@@ -348,6 +353,7 @@ func (s *Servidor) publicarEventos(eventos []dados.Evento) {
 			m["evento"] = e.ID
 			s.Avisos.Publicar(e.Escopo.Perfil, m)
 			s.aoGravarParaFrase(e, m)
+			s.aoGravarParaMontagem(e)
 		}
 	}
 }
@@ -365,7 +371,13 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		var t dados.Tarefa
 		ler(&t)
 		return map[string]any{"tipo": e.Tipo, "tarefa": t, "origem": dados.OrigemVoce}
-	case "tarefa.atualizada", "tarefa.copia":
+	case "rotina.criada", "rotina.atualizada", "rotina.removida", "rodada.comecou", "rodada.terminou":
+		// As rotinas do workspace: a tela recebe o que foi gravado, inteiro.
+		m := map[string]any{}
+		ler(&m)
+		m["tipo"] = e.Tipo
+		return m
+	case "tarefa.atualizada", "tarefa.copia", "tarefa.transferida":
 		var d struct {
 			Tarefa dados.Tarefa `json:"tarefa"`
 			Origem string       `json:"origem"`
@@ -398,6 +410,7 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		var d struct {
 			Lousa     int64   `json:"lousa"`
 			Elementos []int64 `json:"elementos"`
+			Removidos []int64 `json:"removidos"`
 		}
 		ler(&d)
 		elementos, err := s.Banco.ElementosPorID(context.Background(), d.Elementos)
@@ -405,7 +418,7 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 			log.Printf("lousa %d: lendo o que o agente acrescentou: %v", d.Lousa, err)
 			elementos = []dados.Elemento{}
 		}
-		m := mensagemLousa(dados.Lousa{ID: d.Lousa, Dono: dados.DonoLousa{TarefaID: e.Escopo.Tarefa}}, elementos, nil)
+		m := mensagemLousa(dados.Lousa{ID: d.Lousa, Dono: dados.DonoLousa{TarefaID: e.Escopo.Tarefa}}, elementos, d.Removidos)
 		m["agente_id"] = e.Escopo.Agente
 		return m
 	case "anexo.removido":
@@ -445,6 +458,23 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": "banco.consulta", "conexao_id": d.ConexaoID, "tarefa_id": e.Escopo.Tarefa, "agente_id": e.Escopo.Agente}
+	case "comando.proposto", "comando.aceito":
+		// A tela busca a lista do projeto de novo; a proposta vira aviso.
+		var d struct {
+			Comando     int64  `json:"comando"`
+			Nome        string `json:"nome"`
+			ProjetoNome string `json:"projeto_nome"`
+			PropostaPor string `json:"proposta_por"`
+			Ferramenta  string `json:"ferramenta"`
+			Papel       string `json:"papel"`
+		}
+		ler(&d)
+		quem := d.PropostaPor
+		if e.Tipo == "comando.proposto" {
+			quem = ferramentas.Nome(d.Ferramenta) + " (" + d.Papel + ")"
+		}
+		return map[string]any{"tipo": e.Tipo, "comando_id": d.Comando, "projeto_id": e.Escopo.Projeto, "projeto_nome": d.ProjetoNome,
+			"nome": d.Nome, "quem": quem, "tarefa_id": e.Escopo.Tarefa}
 	case "workspace.mudou":
 		var ws dados.Workspace
 		ler(&ws)
@@ -479,6 +509,35 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "dia": d.Dia, "fora": d.Fora}
+	case "pauta.mudou", "daily.apresentada":
+		// A página da reunião (e a tela cheia) busca de novo.
+		var d struct {
+			Tipo        string `json:"tipo"`
+			Chave       string `json:"chave"`
+			Dia         string `json:"dia"`
+			Apresentada *bool  `json:"apresentada"`
+		}
+		ler(&d)
+		m := map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "reuniao": d.Tipo, "chave": d.Chave, "dia": d.Dia}
+		if d.Apresentada != nil {
+			m["apresentada"] = *d.Apresentada
+		}
+		return m
+	case "sprint.fora":
+		// A sprint de outras telas busca de novo.
+		var d struct {
+			Sprint int64 `json:"sprint"`
+			Fora   bool  `json:"fora"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "tarefa_id": e.Escopo.Tarefa, "sprint_id": d.Sprint, "fora": d.Fora}
+	case "assunto.texto":
+		var d struct {
+			Sprint  int64 `json:"sprint"`
+			Assunto int64 `json:"assunto"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "sprint_id": d.Sprint, "assunto_id": d.Assunto}
 	case "perfil.tempo_agentes":
 		// Só o booleano: as outras telas do perfil escondem ou mostram na hora.
 		var d struct {
@@ -486,6 +545,12 @@ func (s *Servidor) mensagemDoEvento(e dados.Evento) map[string]any {
 		}
 		ler(&d)
 		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "mostrar": d.Mostrar}
+	case "perfil.montador":
+		var d struct {
+			Ligado bool `json:"ligado"`
+		}
+		ler(&d)
+		return map[string]any{"tipo": e.Tipo, "perfil_id": e.Escopo.Perfil, "ligado": d.Ligado}
 	case "perfil.mascote":
 		var d struct {
 			Modelo string `json:"modelo"`

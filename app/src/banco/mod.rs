@@ -35,8 +35,6 @@ pub enum Acao {
         id: String,
         resposta: aprovacao::Resposta,
     },
-    /// Guardar no perfil o autocompletar do console.
-    Autocompletar(bool),
 }
 
 /// O que a tela de bancos recebe da principal a cada quadro.
@@ -86,6 +84,8 @@ enum Resposta {
     Testado(Result<api::Teste, String>),
     TestouConexao(i64, String, Result<api::Teste, api::ErroBanco>),
     Salvou(Result<api::ConexaoBanco, String>),
+    /// A conexão mudou de pasta pela árvore (o nome vai no aviso de erro).
+    Moveu(String, Result<api::ConexaoBanco, String>),
     SenhaDefinida(i64, Result<String, String>),
 }
 
@@ -127,8 +127,6 @@ pub struct Bancos {
     limpar: Option<(i64, String, Option<String>)>,
     largura_arvore: f32,
     fracao_editor: f32,
-    /// Sugestões no console (do perfil; desligado não calcula nada).
-    pub autocompletar: bool,
     /// O pedido aberto na gaveta.
     pedido_aberto: Option<String>,
     rodada: Option<Rodada>,
@@ -165,7 +163,6 @@ impl Bancos {
             limpar: None,
             largura_arvore: 300.0,
             fracao_editor: 0.4,
-            autocompletar: false,
             pedido_aberto: None,
             rodada: None,
             historico_pedido: None,
@@ -514,6 +511,13 @@ impl Bancos {
                         }
                     }
                 },
+                Resposta::Moveu(nome, r) => {
+                    if let Err(e) = r {
+                        self.acoes.push(Acao::Avisar(TipoAviso::Erro, format!("{nome} não mudou de pasta: {e}")));
+                    }
+                    // Certo ou não, a lista volta a ser a do núcleo.
+                    self.recarregar(ctx);
+                }
                 Resposta::SenhaDefinida(conexao, r) => match r {
                     Ok(_) => {
                         self.senha = None;
@@ -576,6 +580,17 @@ impl Bancos {
         });
     }
 
+    /// Muda a conexão de pasta na hora (na ordem do núcleo: pasta, depois
+    /// nome) e grava em segundo plano; só pasta mudando, a ligação continua aberta.
+    fn mover(&mut self, ctx: &egui::Context, c: i64, pasta: String) {
+        let Some(x) = self.conexoes.iter_mut().find(|x| x.id == c) else { return };
+        x.pasta = pasta;
+        let (nome, campos) = (x.nome.clone(), conexao::campos_de(x));
+        self.conexoes.sort_by_key(|c| (c.pasta.to_lowercase(), c.nome.to_lowercase()));
+        self.arvore.pastas_fechadas.remove(&campos.pasta);
+        self.em_segundo_plano(ctx, move || Resposta::Moveu(nome, api::editar_conexao(c, &campos, None, false)));
+    }
+
     fn tratar_arvore(&mut self, ctx: &egui::Context, acoes: Vec<arvore::Acao>, _agora: f64) {
         for a in acoes {
             match a {
@@ -612,6 +627,12 @@ impl Bancos {
                 arvore::Acao::Remover(c) => {
                     if let Some(x) = self.conexao(c) {
                         self.remover = Some((c, x.nome.clone(), None));
+                    }
+                }
+                arvore::Acao::Mover(c, pasta) => self.mover(ctx, c, pasta),
+                arvore::Acao::NovaPasta(c) => {
+                    if let Some(c) = self.conexao(c) {
+                        self.dialogo = Some(conexao::Dialogo::editar(c).com_nova_pasta());
                     }
                 }
                 arvore::Acao::TrocarSenha(c) => {
@@ -817,12 +838,11 @@ impl Bancos {
         let r_editor = Rect::from_min_size(resto.min, vec2(resto.width(), altura_editor));
         let r_divisa2 = Rect::from_min_size(pos2(resto.left(), r_editor.bottom()), vec2(resto.width(), 8.0));
         let r_painel = Rect::from_min_max(pos2(resto.left(), r_divisa2.bottom()), resto.max);
-        let autocompletar = self.autocompletar;
         {
             let c = self.console(id);
             let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(barra));
-            c.barra(&mut filho, &conexao, &bancos, autocompletar, agora, &mut acoes);
-            c.editor(ui, r_editor, &conexao.tipo, autocompletar, agora, &mut acoes);
+            c.barra(&mut filho, &conexao, &bancos, agora, &mut acoes);
+            c.editor(ui, r_editor, &conexao.tipo, agora, &mut acoes);
         }
         let d = tema::divisoria(ui, r_divisa2, egui::Id::new("divisa-editor"), false);
         if d != 0.0 && resto.height() > 0.0 {
@@ -890,15 +910,9 @@ impl Bancos {
                 console::Acao::LimparHistorico => self.limpar = Some((id, conexao.nome.clone(), None)),
                 console::Acao::Avisar(t) => self.acoes.push(Acao::Avisar(TipoAviso::Neutro, t)),
                 console::Acao::Sugerir(cursor) => self.sugerir(&ctx, id, cursor),
-                console::Acao::Autocompletar(ligado) => {
-                    self.autocompletar = ligado;
-                    self.acoes.push(Acao::Autocompletar(ligado));
-                }
             }
         }
-        if self.autocompletar {
-            self.console(id).popup(&ctx);
-        }
+        self.console(id).popup(&ctx);
     }
 
     /// O nome da conexão em destaque, o tipo e onde ela aponta; à direita,
@@ -941,7 +955,10 @@ impl Bancos {
             }
         }
         if c.agentes {
-            partes.push("agentes podem pedir consultas".into());
+            partes.push(if c.agentes_livre { "agentes consultam sem pedir" } else { "agentes podem pedir consultas" }.into());
+            if c.agentes_escrita {
+                partes.push("agentes alteram dados".into());
+            }
         }
         let erro = self.arvore.erros.contains_key(&c.id);
         let mut x_sub = x;

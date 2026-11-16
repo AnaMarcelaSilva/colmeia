@@ -323,6 +323,27 @@ func TestPedidosENavegadorNaLinha(t *testing.T) {
 	}
 }
 
+func TestPlayPropostoNaLinhaDoTempo(t *testing.T) {
+	h := &historico{t: t}
+	a := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1, Agente: 7}
+	h.add("2026-09-25 10:00", "tarefa.criada", dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1}, map[string]any{"id": 1, "titulo": "Nova tela de pedidos", "projeto_id": 1, "projeto_nome": "loja-web"})
+	h.add("2026-09-25 10:10", "comando.proposto", a, map[string]any{"comando": 4, "nome": "api", "projeto_nome": "loja-api", "titulo": "Nova tela de pedidos", "agente": 7, "ferramenta": "claude", "papel": "dev"})
+	h.add("2026-09-25 10:12", "comando.aceito", dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1}, map[string]any{"comando": 4, "nome": "api", "projeto_nome": "loja-api", "proposta_por": "Claude Code (dev)"})
+	c := Contexto{Agora: em("2026-09-25 18:00"), Fuso: fuso, Tarefas: map[int64]TarefaAtual{1: {ID: 1, Titulo: "Nova tela de pedidos", Coluna: "trabalhando", ProjetoID: 1}}}
+	dias := Montar(h.eventos, c)
+	var textos, curtos []string
+	for _, item := range dias[0].Itens {
+		textos = append(textos, item.Texto)
+		curtos = append(curtos, item.Curto)
+	}
+	if len(textos) != 3 || textos[0] != "Você aceitou o Play “api” em loja-api, proposto por Claude Code (dev)." || textos[1] != "Claude Code (dev) propôs o Play “api” em loja-api (“Nova tela de pedidos”)." {
+		t.Errorf("itens: %q", textos)
+	}
+	if curtos[1] != "Claude Code (dev) propôs o Play “api” em loja-api." || dias[0].Itens[1].Tipo != TipoPlay {
+		t.Errorf("curto: %q %s", curtos[1], dias[0].Itens[1].Tipo)
+	}
+}
+
 func TestLousaDoAgenteNaLinhaDoTempo(t *testing.T) {
 	h := &historico{t: t}
 	a := dados.Escopo{Perfil: 1, Projeto: 1, Tarefa: 1, Agente: 7}
@@ -333,6 +354,12 @@ func TestLousaDoAgenteNaLinhaDoTempo(t *testing.T) {
 	h.add("2026-09-25 10:10", "lousa.agente", a, conteudo)
 	conteudo["quantidade"] = 2
 	h.add("2026-09-25 10:12", "lousa.agente", a, conteudo)
+	// Apagar é outra linha, somada do mesmo jeito.
+	apagou := map[string]any{"lousa": 3, "tarefa": 1, "titulo": "Nova tela de pedidos", "projeto_nome": "loja-web", "acao": "apagou", "quantidade": 2,
+		"removidos": []int64{11, 12}, "ferramenta": "claude", "papel": "dev"}
+	h.add("2026-09-25 10:13", "lousa.agente", a, apagou)
+	apagou["quantidade"] = 1
+	h.add("2026-09-25 10:14", "lousa.agente", a, apagou)
 	// Imagem posta numa lousa não aparece na linha do tempo.
 	h.add("2026-09-25 10:15", "anexo.adicionado", p, map[string]any{"anexo": 9, "origem": "colagem", "na_lousa": true})
 	c := Contexto{Agora: em("2026-09-25 18:00"), Fuso: fuso, Tarefas: map[int64]TarefaAtual{1: {ID: 1, Titulo: "Nova tela de pedidos", Coluna: "trabalhando", ProjetoID: 1}}}
@@ -341,10 +368,10 @@ func TestLousaDoAgenteNaLinhaDoTempo(t *testing.T) {
 	for _, item := range dias[0].Itens {
 		textos = append(textos, item.Texto)
 	}
-	if len(textos) != 2 || textos[0] != "Claude Code (dev) acrescentou 6 itens à lousa de “Nova tela de pedidos”." {
+	if len(textos) != 3 || textos[0] != "Claude Code (dev) apagou 3 itens da lousa de “Nova tela de pedidos”." || textos[1] != "Claude Code (dev) acrescentou 6 itens à lousa de “Nova tela de pedidos”." {
 		t.Errorf("itens: %q", textos)
 	}
-	if curto := dias[0].Itens[0].Curto; curto != "Claude Code (dev) acrescentou 6 itens à lousa." {
+	if curto := dias[0].Itens[1].Curto; curto != "Claude Code (dev) acrescentou 6 itens à lousa." {
 		t.Errorf("curto: %q", curto)
 	}
 	// Na apresentação, a lousa conta como trabalho na tarefa e o slide leva o resumo dela.

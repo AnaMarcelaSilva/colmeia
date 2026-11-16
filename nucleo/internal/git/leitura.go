@@ -233,3 +233,83 @@ func Novo(ctx context.Context, dir, caminho string) (bool, error) {
 	saida, _, err := lerLimitado(ctx, dir, 64<<10, "ls-files", "-z", "--others", "--exclude-standard", "--", caminho)
 	return len(saida) > 0, err
 }
+
+// Commit é uma entrada do histórico do repositório.
+type Commit struct {
+	Hash     string `json:"hash"`
+	Data     string `json:"data"`
+	Autor    string `json:"autor"`
+	Mensagem string `json:"mensagem"`
+}
+
+// Commits lista os commits de todas as branches entre `desde` e `ate`
+// (RFC 3339), do mais novo para o mais antigo, até `max`.
+func Commits(ctx context.Context, dir, desde, ate string, max int) (lista []Commit, mais bool, err error) {
+	return lerCommits(ctx, dir, max, "--all", "--since="+desde, "--until="+ate)
+}
+
+// CommitsDesde lista os commits da branch atual depois de `ref` (uma tag, um
+// commit), do mais novo para o mais antigo, até `max`.
+func CommitsDesde(ctx context.Context, dir, ref string, max int) (lista []Commit, mais bool, err error) {
+	if err := refValida(ref); err != nil {
+		return nil, false, err
+	}
+	return lerCommits(ctx, dir, max, ref+"..HEAD")
+}
+
+// UltimaTag é a tag mais recente alcançável da branch atual e a data do
+// commit dela (AAAA-MM-DD). Sem tag, nomes vazios e erro nulo.
+func UltimaTag(ctx context.Context, dir string) (nome, data string, err error) {
+	saida, _, err := lerLimitado(ctx, dir, 4096, "describe", "--tags", "--abbrev=0")
+	if err != nil {
+		if strings.Contains(err.Error(), "No names found") || strings.Contains(err.Error(), "cannot describe") || strings.Contains(err.Error(), "No tags") {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	nome = strings.TrimSpace(string(saida))
+	if nome == "" {
+		return "", "", nil
+	}
+	if err := refValida(nome); err != nil {
+		return "", "", err
+	}
+	saida, _, err = lerLimitado(ctx, dir, 4096, "log", "-1", "--date=short", "--format=%ad", nome, "--")
+	if err != nil {
+		return nome, "", err
+	}
+	return nome, strings.TrimSpace(string(saida)), nil
+}
+
+// refValida só deixa passar um nome de tag ou commit: nada que o git leia
+// como opção ou caminho.
+func refValida(ref string) error {
+	if ref == "" || strings.HasPrefix(ref, "-") || strings.ContainsAny(ref, " \t\n\x00") || strings.Contains(ref, "..") {
+		return errors.New("referência inválida: " + ref)
+	}
+	return nil
+}
+
+func lerCommits(ctx context.Context, dir string, max int, alcance ...string) (lista []Commit, mais bool, err error) {
+	args := append([]string{"log", "--no-merges"}, alcance...)
+	args = append(args, "--date=short", "--format=%h%x09%ad%x09%an%x09%s%x00", "-n", strconv.Itoa(max+1), "--")
+	saida, cortado, err := lerLimitado(ctx, dir, max*400, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, linha := range separarNUL(saida, cortado) {
+		linha = strings.TrimSpace(linha)
+		if linha == "" {
+			continue
+		}
+		campos := strings.SplitN(linha, "\t", 4)
+		if len(campos) != 4 {
+			continue
+		}
+		if len(lista) == max {
+			return lista, true, nil
+		}
+		lista = append(lista, Commit{Hash: campos[0], Data: campos[1], Autor: campos[2], Mensagem: campos[3]})
+	}
+	return lista, cortado, nil
+}

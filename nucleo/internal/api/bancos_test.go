@@ -500,3 +500,62 @@ func dadosConexao(t *testing.T, servidor *Servidor, id int64) dados.ConexaoBanco
 	}
 	return c
 }
+
+func TestMoverDePastaNaoFechaAConexao(t *testing.T) {
+	antes := dados.ConexaoBanco{Pasta: "Clientes", Nome: "loja", Host: "db.exemplo", Porta: 5432, Usuario: "leitor"}
+	depois := antes
+	depois.Pasta, depois.Nome = "Produção", "loja central"
+	if !soNomeOuPasta(antes, depois) {
+		t.Fatal("trocar nome e pasta não devia fechar a conexão")
+	}
+	depois.Host = "outro.exemplo"
+	if soNomeOuPasta(antes, depois) {
+		t.Fatal("trocar o servidor precisa fechar a conexão")
+	}
+}
+
+func TestAgenteConsultaSemPedirEComEscrita(t *testing.T) {
+	claudeQueEscreve(t)
+	srv, servidor := servidorComAgentes(t)
+	montarTarefas(t, srv.URL)
+	arquivo := lojaSQLite(t, 300)
+	// Só com escrita na conexão dá para liberar a escrita aos agentes.
+	if status, _ := pedirComo(t, tokenTela, "POST", srv.URL+"/v1/perfis/1/conexoes", map[string]any{"nome": "errada", "tipo": "sqlite", "arquivo": arquivo,
+		"agentes": true, "agentes_escrita": true}); status != http.StatusBadRequest {
+		t.Fatalf("escrita dos agentes sem escrita na conexão: %d", status)
+	}
+	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/perfis/1/conexoes", map[string]any{"nome": "livre", "tipo": "sqlite", "arquivo": arquivo,
+		"agentes": true, "escrita": true, "agentes_livre": true, "agentes_escrita": true})
+	pedirComo(t, tokenTela, "POST", srv.URL+"/v1/tarefas/1/agentes", map[string]string{"ferramenta": "claude", "papel": "dev"})
+	token := ""
+	esperarAte(t, "o token do agente", func() bool {
+		token = lerArquivo(filepath.Join(servidor.DirCanal, "agentes", "1.token"))
+		return token != ""
+	})
+	_, lista := pedirComo(t, token, "GET", srv.URL+"/v1/agente/bancos", nil)
+	if c := lista["conexoes"].([]any)[0].(map[string]any); c["sem_pedir"] != true || c["escrita"] != true {
+		t.Fatalf("listar: %v", lista)
+	}
+	// O que continua recusado mesmo com escrita: sem WHERE e a estrutura.
+	for sql, trecho := range map[string]string{"DELETE FROM pedidos": "sem WHERE", "CREATE TABLE x (a INTEGER)": "estrutura", "DROP TABLE pedidos": "estrutura"} {
+		if status, r := pedirComo(t, token, "POST", srv.URL+"/v1/agente/bancos/1/consultas", map[string]any{"sql": sql}); status != http.StatusBadRequest ||
+			!strings.Contains(fmt.Sprint(r["erro"]), trecho) {
+			t.Errorf("%s: %d %v", sql, status, r)
+		}
+	}
+	// Sem pedir: a consulta e a alteração com WHERE rodam na hora.
+	status, r := pedirComo(t, token, "POST", srv.URL+"/v1/agente/bancos/1/consultas", map[string]any{"sql": "UPDATE pedidos SET total = 1 WHERE id = 1"})
+	if status != http.StatusOK {
+		t.Fatalf("alteração sem pedir: %d %v", status, r)
+	}
+	status, r = pedirComo(t, token, "POST", srv.URL+"/v1/agente/bancos/1/consultas", map[string]any{"sql": "SELECT total FROM pedidos WHERE id = 1"})
+	if status != http.StatusOK || !strings.Contains(fmt.Sprint(r["texto"]), "1") {
+		t.Fatalf("consulta sem pedir: %d %v", status, r)
+	}
+	// Desmarcar a escrita volta a recusar na hora.
+	pedirComo(t, tokenTela, "PATCH", srv.URL+"/v1/conexoes/1", map[string]any{"nome": "livre", "tipo": "sqlite", "arquivo": arquivo,
+		"agentes": true, "escrita": true, "agentes_livre": true})
+	if status, _ := pedirComo(t, token, "POST", srv.URL+"/v1/agente/bancos/1/consultas", map[string]any{"sql": "UPDATE pedidos SET total = 2 WHERE id = 1"}); status != http.StatusBadRequest {
+		t.Fatalf("escrita desmarcada: %d", status)
+	}
+}

@@ -40,6 +40,8 @@ pub struct Paleta {
     pub ok: Color32,
     pub alerta: Color32,
     pub erro: Color32,
+    /// A coluna Concluído: um azul, para não se confundir com a Revisão (destaque).
+    pub concluido: Color32,
     pub favo: Color32,
     /// Fio de luz de 1 px logo abaixo da borda de cima dos cartões.
     pub luz: Color32,
@@ -97,6 +99,7 @@ pub const ESCURO: Paleta = Paleta {
     ok: rgb(0x6fd49b),
     alerta: rgb(0xf1b65f),
     erro: rgb(0xf4707c),
+    concluido: rgb(0x72b7f5),
     favo: Color32::from_rgba_premultiplied(13, 13, 14, 13),
     luz: rgba(0xffffff, 13),
     gradiente: [rgb(0x1a1436), rgb(0x0e0f1b), rgb(0x0b0d15)],
@@ -128,6 +131,7 @@ pub const CLARO: Paleta = Paleta {
     ok: rgb(0x14703f),
     alerta: rgb(0x8f5600),
     erro: rgb(0xc22f45),
+    concluido: rgb(0x1f5fb0),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 13),
     luz: rgba(0xffffff, 230),
     gradiente: [rgb(0xe2dcf6), rgb(0xeaecf5), rgb(0xeef1f8)],
@@ -160,6 +164,7 @@ pub const LEITURA: Paleta = Paleta {
     ok: rgb(0x3f6829),
     alerta: rgb(0x7a5c00),
     erro: rgb(0xad3429),
+    concluido: rgb(0x2f5c8a),
     favo: Color32::from_rgba_premultiplied(0, 0, 0, 12),
     luz: rgba(0xffffff, 179),
     gradiente: [rgb(0xe6d6cf), rgb(0xebe0cc), rgb(0xefe6d3)],
@@ -192,6 +197,7 @@ pub const FOSCO: Paleta = Paleta {
     ok: rgb(0x93c29b),
     alerta: rgb(0xd8b277),
     erro: rgb(0xdc8e95),
+    concluido: rgb(0x8fb9e6),
     favo: Color32::from_rgba_premultiplied(12, 12, 12, 12),
     luz: rgba(0xffffff, 10),
     gradiente: [rgb(0x25212f), rgb(0x1b1b20), rgb(0x19191d)],
@@ -474,6 +480,23 @@ pub fn chip_com_largura(ui: &mut egui::Ui, rotulo: &str, valor: &str, em_uso: bo
 }
 
 /// Seletor segmentado: várias opções numa pílula só, a escolhida preenchida.
+/// `show_rows` com as linhas coladas (sem espaço entre elas). O egui acha as
+/// linhas visíveis com o espaçamento do `ui` de fora; zerado só dentro, a
+/// conta usa o espaço de sempre e as últimas linhas da área ficam de fora.
+pub fn linhas_coladas<R>(
+    ui: &mut egui::Ui,
+    rolagem: egui::ScrollArea,
+    altura: f32,
+    total: usize,
+    conteudo: impl FnOnce(&mut egui::Ui, std::ops::Range<usize>) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let antes = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let saida = rolagem.show_rows(ui, altura, total, conteudo);
+    ui.spacing_mut().item_spacing.y = antes;
+    saida
+}
+
 /// Retorna o índice clicado, se houver.
 pub fn segmentado(ui: &mut egui::Ui, opcoes: &[&str], escolhida: usize) -> Option<usize> {
     segmentado_com_largura(ui, opcoes, escolhida, None)
@@ -615,6 +638,8 @@ pub fn tipo_da_branch(branch: &str) -> Option<(&'static str, Color32)> {
         "hotfix" | "fix" | "bugfix" => Some(("correção", p.etiquetas[4])),
         "docs" | "doc" => Some(("docs", p.etiquetas[2])),
         "main" | "master" => Some(("main", p.etiquetas[0])),
+        // O prefixo que a própria Colmeia sugere ao criar a tarefa.
+        "tarefa" | "task" => Some(("tarefa", p.etiquetas[3])),
         _ => None,
     }
 }
@@ -694,7 +719,16 @@ pub fn link_em_linha(ui: &mut egui::Ui, texto: &str) -> Response {
 /// com o foco do teclado, o contorno de foco. Inativo, fica suave e sem clique.
 pub fn link_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response {
     let p = cores();
-    let cor = if ativo { p.destaque } else { p.suave };
+    link_na_cor(ui, texto, if ativo { p.destaque } else { p.suave }, ativo)
+}
+
+/// Um link que encerra algo ("Excluir tarefa…"): vermelho, longe dos botões.
+pub fn link_perigo(ui: &mut egui::Ui, texto: &str) -> Response {
+    link_na_cor(ui, texto, cores().erro, true)
+}
+
+fn link_na_cor(ui: &mut egui::Ui, texto: &str, cor: Color32, ativo: bool) -> Response {
+    let p = cores();
     let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), cor);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 8.0, 24.0), if ativo { Sense::click() } else { Sense::hover() });
     let pos = pos2(rect.left() + 4.0, rect.center().y - galeria.size().y / 2.0);
@@ -702,7 +736,7 @@ pub fn link_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Response {
     let largura = galeria.size().x;
     ui.painter().galley(pos, galeria, cor);
     if ativo && resposta.hovered() {
-        ui.painter().line_segment([pos2(pos.x, base + 1.0), pos2(pos.x + largura, base + 1.0)], Stroke::new(1.0, p.destaque));
+        ui.painter().line_segment([pos2(pos.x, base + 1.0), pos2(pos.x + largura, base + 1.0)], Stroke::new(1.0, cor));
     }
     if resposta.has_focus() {
         ui.painter().rect_stroke(rect, CornerRadius::same(RAIO_ETIQUETA), Stroke::new(1.5, p.destaque), egui::StrokeKind::Inside);
@@ -807,13 +841,63 @@ pub fn botao_secundario_com(ui: &mut egui::Ui, texto: &str, ativo: bool) -> Resp
 /// com borda e texto na cor de erro, sem preencher (o principal continua
 /// sendo o caminho seguro).
 pub fn botao_alerta(ui: &mut egui::Ui, texto: &str) -> Response {
+    botao_contorno(ui, texto, cores().erro)
+}
+
+/// Pílula com borda e texto na cor dada, sem preencher: a de erro para o que
+/// apaga, a de alerta para o que muda dados sem apagar.
+pub fn botao_contorno(ui: &mut egui::Ui, texto: &str, cor: Color32) -> Response {
     let p = cores();
-    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), p.erro);
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.0), cor);
     let (rect, resposta) = ui.allocate_exact_size(vec2(galeria.size().x + 28.0, 32.0), Sense::click());
-    let fundo = cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, misturar(p.superficie_alta, p.erro, 0.12));
-    let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, p.erro) };
+    let fundo = cor_animada(ui, resposta.id.with("mouse"), resposta.hovered(), p.superficie_alta, misturar(p.superficie_alta, cor, 0.12));
+    let borda = if resposta.has_focus() { Stroke::new(1.5, p.destaque) } else { Stroke::new(1.0, cor) };
     ui.painter().rect(rect, CornerRadius::same(16), fundo, borda, egui::StrokeKind::Inside);
-    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, p.erro);
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, cor);
+    resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Os estilos dos botões de diálogo: todos com a mesma altura, os mesmos
+/// cantos e a mesma fonte; muda só o peso visual.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EstiloBotao {
+    /// O caminho recomendado, na cor da marca.
+    Principal,
+    /// Outra ação comum, com fundo baixo.
+    Secundario,
+    /// Uma ação que encerra algo, em vermelho suave e sem borda.
+    Perigo,
+    /// Adiar ou fechar, só o texto.
+    Discreto,
+}
+
+const ALTURA_BOTAO_DIALOGO: f32 = 36.0;
+
+/// Botão de diálogo: 16 px de cada lado do texto, cantos de 8 e o seminegrito da tela.
+pub fn botao_dialogo(ui: &mut egui::Ui, texto: &str, estilo: EstiloBotao) -> Response {
+    let p = cores();
+    let fonte = forte(13.5);
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), fonte, Color32::PLACEHOLDER);
+    let largura = (galeria.size().x + 32.0).max(72.0);
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, ALTURA_BOTAO_DIALOGO), Sense::click());
+    let em_cima = resposta.hovered();
+    let id = resposta.id.with("mouse");
+    let texto_principal = if claro() { Color32::WHITE } else { p.fundo };
+    let (fundo, cor) = match estilo {
+        EstiloBotao::Principal => (cor_animada(ui, id, em_cima, p.destaque, misturar(p.destaque, Color32::WHITE, 0.12)), texto_principal),
+        EstiloBotao::Secundario => (cor_animada(ui, id, em_cima, misturar(p.superficie, p.texto, 0.08), misturar(p.superficie, p.texto, 0.14)), p.texto),
+        EstiloBotao::Perigo => (cor_animada(ui, id, em_cima, misturar(p.superficie, p.erro, 0.14), misturar(p.superficie, p.erro, 0.24)), p.erro),
+        EstiloBotao::Discreto => (
+            cor_animada(ui, id, em_cima, Color32::TRANSPARENT, misturar(p.superficie, p.texto, 0.07)),
+            p.suave.lerp_to_gamma(p.texto, if em_cima { 1.0 } else { 0.0 }),
+        ),
+    };
+    let cantos = CornerRadius::same(8);
+    ui.painter().rect_filled(rect, cantos, fundo);
+    if resposta.has_focus() {
+        ui.painter().rect_stroke(rect.expand(2.0), CornerRadius::same(10), Stroke::new(1.5, p.destaque), egui::StrokeKind::Outside);
+    }
+    ui.painter().galley(rect.center() - galeria.size() / 2.0, galeria, cor);
     resposta.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -982,7 +1066,7 @@ pub fn cor_coluna(coluna: crate::dados::Coluna) -> Color32 {
         Coluna::Trabalhando => p.ok,
         Coluna::AguardandoVoce => p.alerta,
         Coluna::Revisao => p.texto,
-        Coluna::Concluido => p.destaque,
+        Coluna::Concluido => p.concluido,
     }
 }
 
@@ -1036,6 +1120,8 @@ pub enum Icone {
     Microfone,
     // A base de conhecimento do workspace.
     Livro,
+    // A versão nova, no trilho.
+    Atualizar,
 }
 
 /// Botão só com ícone, desenhado (a fonte não garante os símbolos): sem
@@ -1197,6 +1283,12 @@ pub fn desenhar_icone(pintor: &egui::Painter, c: Pos2, icone: Icone, cor: Color3
             }
             pintor.line_segment([r.left_top() + vec2(0.0, 3.0), r.right_top() + vec2(0.0, 3.0)], traco);
             pintor.line_segment([r.center_top() + vec2(0.0, 3.0), r.center_bottom()], traco);
+        }
+        Icone::Atualizar => {
+            // Uma seta para cima saindo de uma bandeja.
+            pintor.line_segment([c + vec2(0.0, 3.0), c + vec2(0.0, -6.0)], traco);
+            pintor.add(Shape::line(vec![c + vec2(-3.5, -2.5), c + vec2(0.0, -6.0), c + vec2(3.5, -2.5)], traco));
+            pintor.add(Shape::line(vec![c + vec2(-6.5, 1.5), c + vec2(-6.5, 6.0), c + vec2(6.5, 6.0), c + vec2(6.5, 1.5)], traco));
         }
         Icone::Livro => {
             // Livro aberto: as duas páginas a partir da lombada, um pouco
@@ -1857,6 +1949,20 @@ pub fn opcao_menu_com(ui: &mut egui::Ui, texto: &str, atalho: Option<&str>, ativ
         ui.painter().galley(pos2(rect.right() - 14.0 - a.size().x, rect.center().y - a.size().y / 2.0), a, p.suave);
     }
     ativa && resposta.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Item de menu que abre outro menu ao lado, no mesmo desenho das opções
+/// (a seta à direita diz que tem mais).
+pub fn submenu<R>(ui: &mut egui::Ui, texto: &str, conteudo: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let p = cores();
+    let galeria = ui.painter().layout_no_wrap(texto.to_owned(), FontId::proportional(13.5), p.texto);
+    let largura = (galeria.size().x + 64.0).max(ui.min_rect().width());
+    let (rect, resposta) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::click());
+    fundo_ao_passar(ui, &resposta, rect, RAIO_ETIQUETA, true);
+    ui.painter().galley(pos2(rect.left() + 14.0, rect.center().y - galeria.size().y / 2.0), galeria, p.texto);
+    let c = pos2(rect.right() - 16.0, rect.center().y);
+    ui.painter().add(Shape::convex_polygon(vec![c + vec2(-2.5, -4.0), c + vec2(2.5, 0.0), c + vec2(-2.5, 4.0)], p.suave, Stroke::NONE));
+    egui::containers::menu::SubMenu::new().show(ui, &resposta, conteudo).map(|r| r.inner)
 }
 
 /// Tipo do aviso do rodapé: muda a borda e o ponto.

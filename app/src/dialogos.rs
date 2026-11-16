@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText};
 
 use crate::api;
 use crate::dados::{Coluna, Projeto};
@@ -55,6 +55,16 @@ pub enum Dialogo {
         nome: String,
         erro: Option<String>,
     },
+    /// Renomear a tarefa: o título novo vale em todo lugar.
+    RenomearTarefa {
+        id: i64,
+        titulo: String,
+        original: String,
+        erro: Option<String>,
+    },
+    /// Levar a tarefa para outro projeto do perfil. Os agentes dela saem
+    /// antes (trabalham na pasta de agora); nada muda até confirmar.
+    TransferirTarefa(TransferirTarefa),
     /// Primeira captura do perfil: avisa que a imagem guarda o que está visível.
     Captura {
         agente: i64,
@@ -73,6 +83,8 @@ pub enum Dialogo {
         titulo: String,
         coluna: Coluna,
         copia: bool,
+        /// O destino marcado; `None` deixa a tarefa onde está.
+        escolha: Option<Coluna>,
         erro: Option<String>,
     },
     /// Escolher o acabamento e o nome da abelha do perfil.
@@ -83,6 +95,8 @@ pub enum Dialogo {
     Voz(Box<crate::ajustes_voz::AjustesVoz>),
     /// O nome e a imagem de um workspace.
     EditarWorkspace(EditarWorkspace),
+    /// A versão nova: o que mudou e atualizar agora ou quando os agentes fecharem.
+    Atualizacao(Atualizacao),
     /// Apagar o histórico de mensagens de um agente.
     LimparHistorico {
         agente: i64,
@@ -157,6 +171,22 @@ impl NovoProjeto {
         };
         self
     }
+}
+
+/// O que o diálogo de transferir precisa saber da tarefa e do perfil.
+pub struct TransferirTarefa {
+    pub id: i64,
+    pub titulo: String,
+    /// O projeto de agora, pelo nome.
+    pub projeto: String,
+    pub branch: String,
+    pub copia: bool,
+    /// Os agentes da tarefa, removidos antes de transferir.
+    pub agentes: Vec<i64>,
+    /// Os outros projetos do perfil, na ordem da barra lateral.
+    pub projetos: Vec<Projeto>,
+    pub escolha: Option<i64>,
+    pub erro: Option<String>,
 }
 
 pub struct NovaTarefa {
@@ -260,6 +290,8 @@ impl Dialogo {
                         erro,
                         || api::remover_projeto(*id),
                     ),
+                    Dialogo::RenomearTarefa { id, titulo, original, erro } => renomear_tarefa(ui, *id, titulo, original, erro),
+                    Dialogo::TransferirTarefa(d) => transferir_tarefa(ui, d),
                     Dialogo::Captura { agente, tarefa, nao_mostrar } => {
                         tema::cabecalho(
                             ui,
@@ -280,7 +312,8 @@ impl Dialogo {
                     Dialogo::Ditado(d) => ajustes_ditado(ui, d, perfil),
                     Dialogo::Voz(d) => crate::ajustes_voz::mostrar(ui, d),
                     Dialogo::EditarWorkspace(d) => editar_workspace(ui, d),
-                    Dialogo::AgenteParado { tarefa, titulo, coluna, copia, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, erro),
+                    Dialogo::Atualizacao(d) => atualizacao(ui, d),
+                    Dialogo::AgenteParado { tarefa, titulo, coluna, copia, escolha, erro } => agente_parado(ui, *tarefa, titulo, *coluna, *copia, escolha, erro),
                 }
             });
         match modal.inner {
@@ -615,6 +648,88 @@ fn ajustes_ditado(ui: &mut egui::Ui, d: &mut AjustesDitado, perfil: i64) -> Resu
     }
 }
 
+/// Renomear a tarefa. Enter salva; o título novo vale no quadro, na daily,
+/// na sprint e no histórico (a branch e a pasta não mudam).
+fn renomear_tarefa(ui: &mut egui::Ui, id: i64, titulo: &mut String, original: &str, erro: &mut Option<String>) -> Resultado {
+    tema::cabecalho(ui, "Renomear tarefa", "O título novo vale no quadro, na daily, na sprint e no histórico. A branch e a pasta não mudam.");
+    ui.add_space(14.0);
+    let campo = tema::campo(ui, "Título", titulo, "");
+    if ui.memory(|m| m.focused().is_none()) {
+        campo.request_focus();
+    }
+    mostrar_erro(ui, erro);
+    let novo = titulo.trim().to_string();
+    let habilitado = !novo.is_empty() && novo != original.trim() && novo.chars().count() <= 200;
+    let (cancelar, mut confirmar) = rodape(ui, "Salvar", habilitado);
+    confirmar |= habilitado && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if cancelar {
+        return Resultado::Fechar;
+    }
+    if confirmar {
+        match api::renomear_tarefa(id, &novo) {
+            Ok(_) => return Resultado::Mudou,
+            Err(e) => *erro = Some(e),
+        }
+    }
+    Resultado::Continua
+}
+
+/// Transferir a tarefa para outro projeto. As opções são os outros projetos
+/// do perfil, com o workspace de cada um; a cópia isolada impede (ela é do
+/// repositório de agora) e os agentes saem antes, avisado aqui.
+fn transferir_tarefa(ui: &mut egui::Ui, d: &mut TransferirTarefa) -> Resultado {
+    tema::cabecalho(ui, "Transferir tarefa", &format!("\"{}\" sai de {} com as notas, a lousa, os anexos e o histórico.", d.titulo, d.projeto));
+    mostrar_erro(ui, &d.erro);
+    ui.add_space(18.0);
+    if d.projetos.is_empty() {
+        dica(ui, "Não há outro projeto neste perfil. Adicione o projeto de destino na barra lateral antes.");
+    }
+    ui.spacing_mut().item_spacing.y = 8.0;
+    let cor = cores().destaque;
+    for p in &d.projetos {
+        let consequencia = if p.sem_git { format!("{} · pasta sem git", p.workspace) } else { p.workspace.clone() };
+        if opcao_destino(ui, &p.nome, &consequencia, cor, d.escolha == Some(p.id)) {
+            d.escolha = Some(p.id);
+        }
+    }
+    ui.add_space(12.0);
+    if d.copia {
+        dica(ui, "Uma tarefa com cópia isolada não muda de projeto: a cópia é do repositório de agora.");
+    } else {
+        match d.agentes.len() {
+            0 => {}
+            1 => dica(ui, "O agente da tarefa é parado e removido antes: ele trabalha na pasta do projeto de agora."),
+            n => dica(ui, &format!("Os {n} agentes da tarefa são parados e removidos antes: eles trabalham na pasta do projeto de agora.")),
+        }
+        if !d.branch.is_empty() {
+            dica(ui, &format!("A branch {} só segue se existir no outro repositório; senão a tarefa fica sem branch.", d.branch));
+        }
+    }
+    let habilitado = d.escolha.is_some() && !d.copia;
+    let (cancelar, confirmar) = rodape(ui, "Transferir", habilitado);
+    if cancelar {
+        return Resultado::Fechar;
+    }
+    if !confirmar {
+        return Resultado::Continua;
+    }
+    let Some(projeto) = d.escolha else { return Resultado::Continua };
+    for agente in &d.agentes {
+        if let Err(e) = api::remover_agente(*agente) {
+            d.erro = Some(format!("Não consegui remover o agente: {e}"));
+            return Resultado::Continua;
+        }
+    }
+    d.agentes.clear();
+    match api::transferir_tarefa(d.id, projeto) {
+        Ok(_) => Resultado::Mudou,
+        Err(e) => {
+            d.erro = Some(format!("Não consegui transferir: {e}"));
+            Resultado::Continua
+        }
+    }
+}
+
 fn mostrar_erro(ui: &mut egui::Ui, erro: &Option<String>) {
     if let Some(e) = erro {
         ui.add_space(10.0);
@@ -675,6 +790,183 @@ fn fechar(ui: &mut egui::Ui, rodando: usize, erro: &mut Option<String>) -> Resul
     Resultado::Continua
 }
 
+pub struct Atualizacao {
+    pub estado: api::EstadoAtualizacao,
+    erro: Option<String>,
+}
+
+impl Atualizacao {
+    pub fn new(estado: api::EstadoAtualizacao) -> Self {
+        Atualizacao { estado, erro: None }
+    }
+}
+
+/// Um pedaço das notas do CHANGELOG: o título da seção, um item ou um parágrafo.
+#[derive(Debug, PartialEq)]
+enum Bloco {
+    Titulo(String),
+    Item(String),
+    Texto(String),
+}
+
+/// As notas em blocos; a linha recuada continua o item de cima.
+fn blocos_das_notas(notas: &str) -> Vec<Bloco> {
+    let mut blocos = Vec::new();
+    for linha in notas.lines() {
+        let limpa = linha.trim();
+        if limpa.is_empty() {
+            continue;
+        }
+        if let Some(titulo) = limpa.strip_prefix("### ") {
+            blocos.push(Bloco::Titulo(titulo.to_string()));
+        } else if let Some(item) = limpa.strip_prefix("- ") {
+            blocos.push(Bloco::Item(item.to_string()));
+        } else if linha.starts_with(' ')
+            && let Some(Bloco::Item(item)) = blocos.last_mut()
+        {
+            item.push(' ');
+            item.push_str(limpa);
+        } else {
+            blocos.push(Bloco::Texto(limpa.to_string()));
+        }
+    }
+    blocos
+}
+
+/// As notas com o título da seção em negrito e cada item com o ponto
+/// pendurado: a segunda linha começa embaixo do texto, não do ponto.
+fn mostrar_notas(ui: &mut egui::Ui, notas: &str) {
+    let p = cores();
+    let largura = ui.available_width();
+    for (i, bloco) in blocos_das_notas(notas).iter().enumerate() {
+        match bloco {
+            Bloco::Titulo(t) => {
+                if i > 0 {
+                    ui.add_space(10.0);
+                }
+                ui.label(RichText::new(t).font(tema::forte(13.5)).color(p.texto));
+                ui.add_space(4.0);
+            }
+            Bloco::Item(t) => {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // O ponto no meio da primeira linha do texto.
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::hover());
+                    ui.painter().circle_filled(egui::pos2(r.left() + 5.0, r.top() + 9.0), 2.0, p.suave);
+                    // Na linha, o rótulo não quebra sozinho: o wrap usa o que sobra ao lado do ponto.
+                    ui.add(egui::Label::new(crate::conhecimento::texto_da_nota(t, largura - 16.0, None)).wrap());
+                });
+                ui.add_space(3.0);
+            }
+            Bloco::Texto(t) => {
+                ui.label(crate::conhecimento::texto_da_nota(t, largura, None));
+                ui.add_space(3.0);
+            }
+        }
+    }
+}
+
+/// A versão nova: o que mudou, rolando, e embaixo o que dá para fazer agora.
+/// Atualizar reinicia a Colmeia; com agentes rodando, dá para esperar eles fecharem.
+fn atualizacao(ui: &mut egui::Ui, d: &mut Atualizacao) -> Resultado {
+    let p = cores();
+    let e = &d.estado;
+    tema::cabecalho(ui, &format!("Versão {} disponível", e.versao), &format!("Você está na {}. Veja o que mudou.", e.atual));
+    ui.add_space(12.0);
+    egui::Frame::new().fill(tema::misturar(p.superficie, p.texto, 0.04)).corner_radius(10).inner_margin(14).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| mostrar_notas(ui, &e.notas));
+    });
+    ui.add_space(14.0);
+    let abertos = e.abertos;
+    let fecha = match abertos {
+        0 => String::new(),
+        1 => " e fecha 1 agente que está rodando".to_string(),
+        n => format!(" e fecha {n} agentes que estão rodando"),
+    };
+    let (texto, cor) = match e.estado.as_str() {
+        "baixando" => {
+            let fracao = e.baixados as f32 / e.tamanho.max(1) as f32;
+            ui.add(egui::ProgressBar::new(fracao).fill(p.destaque).desired_height(8.0));
+            ui.add_space(4.0);
+            (format!("Baixando {} de {}", megabytes(e.baixados), megabytes(e.tamanho)), p.suave)
+        }
+        "pronta" if e.ao_fechar => ("A versão nova já está pronta e entra sozinha quando os agentes fecharem.".to_string(), p.suave),
+        "reiniciando" => ("Reiniciando a Colmeia…".to_string(), p.suave),
+        "erro" => (e.erro.clone(), p.erro),
+        _ if !e.instalavel => ("Esta instalação não se atualiza sozinha. Baixe a versão nova pela página dela.".to_string(), p.suave),
+        _ => (
+            format!("Atualizar reinicia a Colmeia{fecha}. Antes, a Colmeia guarda uma cópia da versão de agora e volta para ela se a nova não abrir."),
+            p.suave,
+        ),
+    };
+    if !texto.is_empty() {
+        ui.label(RichText::new(texto).color(cor).size(12.5));
+    }
+    mostrar_erro(ui, &d.erro);
+
+    #[derive(PartialEq)]
+    enum Escolha {
+        Nada,
+        Depois,
+        Agora,
+        AoFechar,
+        Cancelar,
+        Pagina,
+    }
+    let mut escolha = Escolha::Nada;
+    ui.add_space(20.0);
+    use tema::EstiloBotao::{Discreto, Perigo, Principal, Secundario};
+    ui.horizontal(|ui| {
+        let ocupada = matches!(e.estado.as_str(), "baixando" | "reiniciando") || (e.estado == "pronta" && e.ao_fechar);
+        if ocupada {
+            if e.estado != "reiniciando" && tema::botao_dialogo(ui, "Cancelar", Secundario).clicked() {
+                escolha = Escolha::Cancelar;
+            }
+        } else if tema::botao_dialogo(ui, "Depois", Discreto).on_hover_text("Esc").clicked() {
+            escolha = Escolha::Depois;
+        }
+        // Da direita para a esquerda: o caminho recomendado fica na ponta.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if e.estado == "reiniciando" || e.estado == "baixando" {
+                return;
+            }
+            if !e.instalavel {
+                if tema::botao_dialogo(ui, "Abrir a página", Principal).clicked() {
+                    escolha = Escolha::Pagina;
+                }
+                return;
+            }
+            if abertos == 0 || e.ao_fechar {
+                if tema::botao_dialogo(ui, "Atualizar agora", if abertos == 0 { Principal } else { Perigo }).clicked() {
+                    escolha = Escolha::Agora;
+                }
+                return;
+            }
+            // Com agentes rodando, esperar eles fecharem é o recomendado;
+            // atualizar agora fecha os agentes, em vermelho.
+            if tema::botao_dialogo(ui, "Quando os agentes fecharem", Principal).clicked() {
+                escolha = Escolha::AoFechar;
+            }
+            if tema::botao_dialogo(ui, "Atualizar agora", Perigo).clicked() {
+                escolha = Escolha::Agora;
+            }
+        });
+    });
+    let resultado = match escolha {
+        Escolha::Nada => return Resultado::Continua,
+        Escolha::Depois => return Resultado::Fechar,
+        Escolha::Pagina => crate::sistema::abrir_link(&e.pagina).map(|_| Resultado::Fechar),
+        Escolha::Agora => api::instalar_atualizacao("agora").map(|_| Resultado::Continua),
+        Escolha::AoFechar => api::instalar_atualizacao("ao_fechar").map(|_| Resultado::Fechar),
+        Escolha::Cancelar => api::cancelar_atualizacao().map(|_| Resultado::Continua),
+    };
+    resultado.unwrap_or_else(|erro| {
+        d.erro = Some(format!("Não consegui: {erro}"));
+        Resultado::Continua
+    })
+}
+
 /// Apagar as mensagens guardadas de um agente (a seta para cima deixa de trazê-las).
 fn limpar_historico(ui: &mut egui::Ui, agente: i64, nome: &str, guardadas: usize, erro: &mut Option<String>) -> Resultado {
     let texto =
@@ -704,43 +996,109 @@ fn limpar_historico(ui: &mut egui::Ui, agente: i64, nome: &str, guardadas: usize
     Resultado::Continua
 }
 
-/// Depois de parar um agente pela tela: para onde vai a tarefa. As colunas
-/// são botões; a atual fica de fora. Esc ou "Deixar como está" não mudam nada.
-fn agente_parado(ui: &mut egui::Ui, tarefa: i64, titulo: &str, coluna: Coluna, copia: bool, erro: &mut Option<String>) -> Resultado {
-    tema::cabecalho(ui, "Você parou o agente. O que fazer com a tarefa?", &format!("\"{titulo}\" está em {}. Nada muda até você escolher.", coluna.nome()));
+/// Uma opção da caixa "O agente parou": a marca redonda, o ponto na cor da
+/// coluna, o nome e a consequência embaixo. O clique marca; devolve se marcou.
+fn opcao_destino(ui: &mut egui::Ui, nome: &str, consequencia: &str, cor: Color32, marcada: bool) -> bool {
+    let p = cores();
+    let largura = ui.available_width();
+    let fonte_nome = tema::forte(14.0);
+    let fonte_sub = egui::FontId::proportional(12.5);
+    let texto_largura = largura - 12.0 - 16.0 - 12.0 - 12.0;
+    let g_nome = ui.painter().layout(nome.to_string(), fonte_nome, p.texto, texto_largura - 16.0);
+    let g_sub = ui.painter().layout(consequencia.to_string(), fonte_sub, p.suave, texto_largura);
+    let altura = 10.0 + g_nome.size().y + 3.0 + g_sub.size().y + 10.0;
+    let (rect, resposta) = ui.allocate_exact_size(egui::vec2(largura, altura), egui::Sense::click());
+    let resposta = resposta.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let pintor = ui.painter();
+    let borda = if marcada {
+        p.destaque
+    } else if resposta.hovered() {
+        p.suave
+    } else {
+        p.borda
+    };
+    let fundo = if marcada {
+        p.destaque.gamma_multiply(0.08)
+    } else if resposta.hovered() {
+        p.realce
+    } else {
+        Color32::TRANSPARENT
+    };
+    pintor.rect(rect, egui::CornerRadius::same(tema::RAIO_CARTAO), fundo, egui::Stroke::new(1.0, borda), egui::StrokeKind::Inside);
+    let centro = egui::pos2(rect.left() + 12.0 + 8.0, rect.top() + 10.0 + g_nome.size().y / 2.0);
+    pintor.circle_stroke(centro, 7.0, egui::Stroke::new(1.5, if marcada { p.destaque } else { p.suave }));
+    if marcada {
+        pintor.circle_filled(centro, 3.8, p.destaque);
+    }
+    let x = rect.left() + 12.0 + 16.0 + 12.0;
+    pintor.circle_filled(egui::pos2(x + 4.0, centro.y), 4.0, cor);
+    pintor.galley(egui::pos2(x + 16.0, rect.top() + 10.0), g_nome.clone(), p.texto);
+    pintor.galley(egui::pos2(x, rect.top() + 10.0 + g_nome.size().y + 3.0), g_sub, p.suave);
+    resposta.clicked()
+}
+
+/// Depois de parar um agente pela tela: o que fazer com a tarefa, como uma
+/// escolha explicada (uma opção por linha, a consequência embaixo) e um
+/// Confirmar só. Deixar onde está vem marcado; Esc e Cancelar não mudam
+/// nada. "Agente trabalhando" não entra: sem agente, a tarefa não vai para
+/// lá (ela vai sozinha quando você chamar outro).
+fn agente_parado(
+    ui: &mut egui::Ui,
+    tarefa: i64,
+    titulo: &str,
+    coluna: Coluna,
+    copia: bool,
+    escolha: &mut Option<Coluna>,
+    erro: &mut Option<String>,
+) -> Resultado {
+    tema::cabecalho(ui, "O agente parou. E a tarefa?", &format!("\"{titulo}\" está em {}. Escolha para onde ela vai; nada muda até confirmar.", coluna.nome()));
     mostrar_erro(ui, erro);
-    ui.add_space(14.0);
-    ui.label(RichText::new("Mover para").color(cores().suave).size(12.5));
-    ui.add_space(6.0);
-    let mut destino = None;
-    ui.horizontal_wrapped(|ui| {
-        for c in Coluna::TODAS.into_iter().filter(|c| *c != coluna) {
-            if tema::botao_secundario(ui, c.nome()).clicked() {
-                destino = Some(c);
-            }
+    ui.add_space(18.0);
+    ui.spacing_mut().item_spacing.y = 8.0;
+    let ficar = format!("Deixar em {}", coluna.nome());
+    if opcao_destino(ui, &ficar, "Vou chamar outro agente ou continuar depois.", crate::quadro::cor_da_coluna(coluna), escolha.is_none()) {
+        *escolha = None;
+    }
+    let destinos: [(Coluna, &str, &str); 3] = [
+        (Coluna::Revisao, "Enviar para revisão", "O trabalho ficou pronto e alguém vai conferir."),
+        (Coluna::Concluido, "Concluir", "Terminou e não precisa de revisão. Entra na daily de hoje como concluída."),
+        (Coluna::Backlog, "Voltar ao backlog", "Não vai andar agora; fica na fila sem agente."),
+    ];
+    for (c, nome, consequencia) in destinos {
+        if c == coluna {
+            continue;
         }
-    });
-    let (mut deixar, mut excluir) = (false, false);
-    ui.add_space(20.0);
+        if opcao_destino(ui, nome, consequencia, crate::quadro::cor_da_coluna(c), *escolha == Some(c)) {
+            *escolha = Some(c);
+        }
+    }
+    let (mut cancelar, mut confirmar, mut excluir) = (false, false, false);
+    ui.add_space(12.0);
     ui.horizontal(|ui| {
-        deixar = tema::botao_secundario(ui, "Deixar como está").on_hover_text("Esc").clicked();
+        excluir = tema::link_perigo(ui, "Excluir tarefa…").on_hover_text("A tarefa sai do quadro; pede confirmação").clicked();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            excluir = tema::botao_alerta(ui, "Excluir tarefa…").clicked();
+            confirmar = tema::botao_dialogo(ui, "Confirmar", tema::EstiloBotao::Principal).on_hover_text("Enter").clicked();
+            ui.add_space(6.0);
+            cancelar = tema::botao_dialogo(ui, "Cancelar", tema::EstiloBotao::Secundario).on_hover_text("Esc").clicked();
         });
     });
-    if deixar {
+    confirmar |= ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if cancelar {
         return Resultado::Fechar;
     }
     if excluir {
         return Resultado::RemoverTarefa { id: tarefa, titulo: titulo.to_string(), copia };
     }
-    match destino.map(|c| api::mover_tarefa(tarefa, c.chave())) {
+    if !confirmar {
+        return Resultado::Continua;
+    }
+    match escolha.map(|c| api::mover_tarefa(tarefa, c.chave())) {
+        None => Resultado::Fechar,
         Some(Ok(_)) => Resultado::Mudou,
         Some(Err(e)) => {
             *erro = Some(format!("Não consegui mover a tarefa: {e}"));
             Resultado::Continua
         }
-        None => Resultado::Continua,
     }
 }
 
@@ -1079,6 +1437,19 @@ fn confirmar(ui: &mut egui::Ui, titulo: &str, texto: &str, erro: &mut Option<Str
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn notas_da_versao_em_titulos_itens_e_paragrafos() {
+        assert_eq!(
+            blocos_das_notas("### Novo\n\n- **Atualizar:** a Colmeia avisa.\n  e mostra o que mudou\n- outro\n\nObservação final."),
+            vec![
+                Bloco::Titulo("Novo".into()),
+                Bloco::Item("**Atualizar:** a Colmeia avisa. e mostra o que mudou".into()),
+                Bloco::Item("outro".into()),
+                Bloco::Texto("Observação final.".into()),
+            ]
+        );
+    }
 
     #[test]
     fn branch_sugerida_do_titulo() {

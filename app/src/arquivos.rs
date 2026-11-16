@@ -34,6 +34,9 @@ enum Resposta {
     Texto(String, Result<api::BuscaTexto, String>),
     Mudancas(Result<api::Mudancas, String>),
     Diff(String, Result<api::Diferenca, String>),
+    Github(Result<api::Github, String>),
+    /// A branch foi enviada ao origin (ou não); com ela vai a situação nova.
+    Enviado(Result<api::Github, String>),
 }
 
 /// Uma fileira da busca por texto: o arquivo (cabeçalho do grupo) ou uma linha achada.
@@ -60,6 +63,12 @@ pub struct AbaArquivos {
     diff: Option<(String, Estado<api::Diferenca>)>,
     focar_nome: bool,
     focar_texto: bool,
+    /// A branch da tarefa no GitHub: enviada, PR e checks (a faixa do "Mudou").
+    github: Estado<api::Github>,
+    enviando: bool,
+    /// Depois de enviar, a página de abrir o PR, para abrir no navegador.
+    abrir_depois: Option<String>,
+    erro_envio: Option<String>,
     canal: (Sender<Resposta>, Receiver<Resposta>),
 }
 
@@ -81,15 +90,21 @@ impl AbaArquivos {
             diff: None,
             focar_nome: false,
             focar_texto: false,
+            github: Estado::Nada,
+            enviando: false,
+            abrir_depois: None,
+            erro_envio: None,
             canal: mpsc::channel(),
         };
         a.pedir_mudancas(ctx);
+        a.pedir_github(ctx);
         a
     }
 
     /// Ao voltar para a aba: o agente pode ter mudado arquivos desde a última vez.
     pub fn ao_abrir(&mut self, ctx: &egui::Context) {
         self.pedir_mudancas(ctx);
+        self.pedir_github(ctx);
         if self.ver_diff
             && let Some(caminho) = self.arvore.aberto().map(str::to_string)
         {
@@ -119,6 +134,35 @@ impl AbaArquivos {
         }
         let tarefa = self.tarefa;
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::Mudancas(api::mudancas(tarefa)));
+    }
+
+    fn pedir_github(&mut self, ctx: &egui::Context) {
+        if !matches!(self.github, Estado::Pronto(_)) {
+            self.github = Estado::Carregando;
+        }
+        let tarefa = self.tarefa;
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::Github(api::github(tarefa)));
+    }
+
+    /// Manda a branch ao origin; `abrir` diz para abrir a página do PR quando chegar.
+    fn enviar(&mut self, ctx: &egui::Context, abrir: bool) {
+        self.enviando = true;
+        self.erro_envio = None;
+        self.abrir_depois = None;
+        let tarefa = self.tarefa;
+        let (envio, ctx2) = (self.canal.0.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = api::enviar_ao_github(tarefa);
+            let r = r.map(|mut g| {
+                // O que abrir fica na própria resposta, para a faixa decidir.
+                if !abrir {
+                    g.comparar.clear();
+                }
+                g
+            });
+            let _ = envio.send(Resposta::Enviado(r));
+            ctx2.request_repaint();
+        });
     }
 
     fn pedir_nomes(&mut self, ctx: &egui::Context) {
@@ -193,6 +237,24 @@ impl AbaArquivos {
                             Ok(d) => Estado::Pronto(d),
                             Err(e) => Estado::Erro(e),
                         };
+                    }
+                }
+                Resposta::Github(r) => {
+                    self.github = match r {
+                        Ok(g) => Estado::Pronto(g),
+                        Err(e) => Estado::Erro(e),
+                    }
+                }
+                Resposta::Enviado(r) => {
+                    self.enviando = false;
+                    match r {
+                        Ok(g) => {
+                            if !g.comparar.is_empty() {
+                                self.abrir_depois = Some(g.comparar.clone());
+                            }
+                            self.github = Estado::Pronto(g);
+                        }
+                        Err(e) => self.erro_envio = Some(e),
                     }
                 }
                 _ => {}
@@ -279,8 +341,7 @@ impl AbaArquivos {
         }
         ui.add_space(6.0);
         if self.so_mudou {
-            self.lista_mudancas(ui);
-            return None;
+            return self.lista_mudancas(ui);
         }
         let mudadas = std::mem::take(&mut self.mudadas);
         let pedido = self.arvore.mostrar_arvore(ui, pasta, &mudadas);
@@ -311,27 +372,39 @@ impl AbaArquivos {
             return;
         }
         let mut abrir = None;
-        egui::ScrollArea::vertical().id_salt(("nomes", self.tarefa)).auto_shrink(false).show_rows(ui, LINHA + 6.0, nomes.arquivos.len(), |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for a in &nomes.arquivos[faixa] {
-                let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
-                let (rect, r) = ui.allocate_exact_size(vec2(largura, LINHA + 6.0), Sense::click());
-                if r.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), p.realce);
+        tema::linhas_coladas(
+            ui,
+            egui::ScrollArea::vertical().id_salt(("nomes", self.tarefa)).auto_shrink(false),
+            LINHA + 6.0,
+            nomes.arquivos.len(),
+            |ui, faixa| {
+                for a in &nomes.arquivos[faixa] {
+                    let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
+                    let (rect, r) = ui.allocate_exact_size(vec2(largura, LINHA + 6.0), Sense::click());
+                    if r.hovered() {
+                        ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), p.realce);
+                    }
+                    let (pasta, nome) = a.caminho.rsplit_once('/').unwrap_or(("", &a.caminho));
+                    let marca = self.mudadas.get(&a.caminho).map(|m| m.estado.as_str());
+                    let fim = rect.right() - if marca.is_some() { 22.0 } else { 6.0 };
+                    texto_cortado(ui.painter(), pos2(rect.left() + 8.0, rect.top() + 10.0), nome, forte(13.0), p.texto, fim - rect.left() - 8.0);
+                    texto_cortado(
+                        ui.painter(),
+                        pos2(rect.left() + 8.0, rect.top() + 23.0),
+                        pasta,
+                        FontId::proportional(11.5),
+                        p.suave,
+                        fim - rect.left() - 8.0,
+                    );
+                    if let Some(m) = marca {
+                        ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, m, forte(11.5), cor_da_mudanca(m));
+                    }
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&a.caminho).clicked() {
+                        abrir = Some(a.caminho.clone());
+                    }
                 }
-                let (pasta, nome) = a.caminho.rsplit_once('/').unwrap_or(("", &a.caminho));
-                let marca = self.mudadas.get(&a.caminho).map(|m| m.estado.as_str());
-                let fim = rect.right() - if marca.is_some() { 22.0 } else { 6.0 };
-                texto_cortado(ui.painter(), pos2(rect.left() + 8.0, rect.top() + 10.0), nome, forte(13.0), p.texto, fim - rect.left() - 8.0);
-                texto_cortado(ui.painter(), pos2(rect.left() + 8.0, rect.top() + 23.0), pasta, FontId::proportional(11.5), p.suave, fim - rect.left() - 8.0);
-                if let Some(m) = marca {
-                    ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, m, forte(11.5), cor_da_mudanca(m));
-                }
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&a.caminho).clicked() {
-                    abrir = Some(a.caminho.clone());
-                }
-            }
-        });
+            },
+        );
         if nomes.mais {
             ui.label(egui::RichText::new("Mostrando os melhores; continue digitando.").size(11.5).color(p.suave));
         }
@@ -340,30 +413,30 @@ impl AbaArquivos {
         }
     }
 
-    fn lista_mudancas(&mut self, ui: &mut egui::Ui) {
+    fn lista_mudancas(&mut self, ui: &mut egui::Ui) -> Option<PedidoGaveta> {
         let p = cores();
         let ctx = ui.ctx().clone();
+        let pedido = self.faixa_github(ui);
         let m = match &self.mudancas {
             Estado::Pronto(m) => m,
             Estado::Erro(e) => {
                 aviso(ui, e, true);
-                return;
+                return pedido;
             }
             _ => {
                 tema::esqueleto(ui.painter(), Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 14.0)), tema::RAIO_ETIQUETA);
-                return;
+                return pedido;
             }
         };
         ui.label(egui::RichText::new(format!("Contra {}, com o que ainda não está em commit", m.base)).size(11.5).color(p.suave));
         ui.add_space(4.0);
         if m.arquivos.is_empty() {
             aviso(ui, "Nada mudou nesta tarefa ainda.", false);
-            return;
+            return pedido;
         }
         let aberto = self.arvore.aberto().map(str::to_string);
         let mut abrir = None;
-        egui::ScrollArea::vertical().id_salt(("mudou", self.tarefa)).auto_shrink(false).show_rows(ui, LINHA, m.arquivos.len(), |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+        tema::linhas_coladas(ui, egui::ScrollArea::vertical().id_salt(("mudou", self.tarefa)).auto_shrink(false), LINHA, m.arquivos.len(), |ui, faixa| {
             for a in &m.arquivos[faixa] {
                 let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
                 let (rect, r) = ui.allocate_exact_size(vec2(largura, LINHA), Sense::click());
@@ -395,6 +468,136 @@ impl AbaArquivos {
                 self.ver_diff = true;
             }
         }
+        pedido
+    }
+
+    /// A faixa da branch no alto do "Mudou": o nome dela e, à direita, os
+    /// checks do PR; embaixo a situação (enviada, PR aberto, commits novos)
+    /// e o que dá para fazer: enviar a branch e abrir o PR no GitHub, ver o
+    /// PR. Só aparece com um origin e a tarefa numa branch própria.
+    fn faixa_github(&mut self, ui: &mut egui::Ui) -> Option<PedidoGaveta> {
+        let p = cores();
+        let ctx = ui.ctx().clone();
+        if let Some(endereco) = self.abrir_depois.take() {
+            return Some(PedidoGaveta::AbrirLink(endereco));
+        }
+        let g = match &self.github {
+            Estado::Pronto(g) if g.origin && !g.branch.is_empty() && g.branch != g.base => g.clone(),
+            _ => return None,
+        };
+        let mut pedido = None;
+        let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
+
+        // A branch e, à direita, o resultado dos checks ou o botão de atualizar.
+        let (rect, _) = ui.allocate_exact_size(vec2(largura, 22.0), Sense::hover());
+        let y = rect.center().y;
+        let mut direita = rect.right();
+        let atualizar = tema::botao_icone_em(
+            ui,
+            Rect::from_center_size(pos2(direita - 10.0, y), vec2(20.0, 20.0)),
+            Id::new(("github-atualizar", self.tarefa)),
+            tema::Icone::Atualizar,
+        );
+        if atualizar.on_hover_text("Atualizar").clicked() {
+            self.pedir_github(&ctx);
+        }
+        direita -= 26.0;
+        if let Some(pr) = &g.pr {
+            let (texto, cor) = match pr.checks.resumo.as_str() {
+                "ok" => ("checks ok".to_string(), p.ok),
+                "falhou" => (if pr.checks.falhou == 1 { "1 check falhou".to_string() } else { format!("{} checks falharam", pr.checks.falhou) }, p.erro),
+                "rodando" => ("checks rodando".to_string(), p.alerta),
+                _ => (String::new(), p.suave),
+            };
+            if !texto.is_empty() {
+                let gal = ui.painter().layout_no_wrap(texto, FontId::proportional(11.5), cor);
+                direita -= gal.size().x;
+                let caixa = Rect::from_min_size(pos2(direita - 18.0, rect.top()), vec2(gal.size().x + 18.0, rect.height()));
+                ui.painter().galley(pos2(direita, y - gal.size().y / 2.0), gal, cor);
+                ui.painter().circle_filled(pos2(direita - 8.0, y), 3.0, cor);
+                let c = &pr.checks;
+                ui.interact(caixa, Id::new(("github-checks", self.tarefa)), Sense::hover())
+                    .on_hover_text(format!("{} ok · {} com falha · {} rodando, de {}", c.ok, c.falhou, c.rodando, c.total));
+                direita -= 18.0;
+            }
+        }
+        let ramo = tema::cortar(ui.painter(), &g.branch, egui::TextFormat::simple(forte(12.0), p.texto), (direita - rect.left() - 4.0).max(24.0), 1, true);
+        ui.painter().galley(pos2(rect.left(), y - ramo.size().y / 2.0), ramo, p.texto);
+
+        // A situação, em uma linha.
+        let commits = |n: usize| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+        let situacao = match &g.pr {
+            Some(pr) => {
+                let mut t = format!("PR #{} {}", pr.numero, pr.estado);
+                if g.a_enviar > 0 {
+                    t.push_str(&format!(" · {} ainda não enviado{}", commits(g.a_enviar), if g.a_enviar == 1 { "" } else { "s" }));
+                }
+                t
+            }
+            None if g.enviada && g.a_enviar > 0 => format!("enviada · {} novo{} depois", commits(g.a_enviar), if g.a_enviar == 1 { "" } else { "s" }),
+            None if g.enviada => format!("enviada ao {}", if g.repositorio.is_empty() { "origin" } else { "GitHub" }),
+            None if g.a_enviar > 0 => format!("{} a enviar", commits(g.a_enviar)),
+            None => "sem commits a enviar".to_string(),
+        };
+        let r = ui.label(egui::RichText::new(situacao).size(11.5).color(p.suave));
+        if g.enviada && g.pr.is_none() && !g.gh && !g.repositorio.is_empty() {
+            r.on_hover_text("Para ver o PR e os checks aqui, instale o gh (a linha de comando do GitHub) e entre com gh auth login.");
+        }
+        if let Some(e) = &self.erro_envio {
+            aviso(ui, e, true);
+        } else if !g.aviso.is_empty() && !g.aviso.starts_with("O origin não está no GitHub") {
+            aviso(ui, &g.aviso, false);
+        }
+
+        // O que dá para fazer.
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let pode = !self.enviando;
+            match &g.pr {
+                Some(pr) => {
+                    let dica = if pr.titulo.is_empty() { pr.url.clone() } else { pr.titulo.clone() };
+                    if tema::botao_secundario_com(ui, "Ver o PR", !pr.url.is_empty()).on_hover_text(dica).clicked() {
+                        pedido = Some(PedidoGaveta::AbrirLink(pr.url.clone()));
+                    }
+                    if g.a_enviar > 0 && tema::botao_secundario_com(ui, if self.enviando { "Enviando…" } else { "Enviar" }, pode).clicked() {
+                        self.enviar(&ctx, false);
+                    }
+                }
+                None if g.enviada => {
+                    if !g.comparar.is_empty()
+                        && tema::botao_secundario(ui, "Abrir o PR").on_hover_text("Abre a página do GitHub para criar o PR desta branch").clicked()
+                    {
+                        pedido = Some(PedidoGaveta::AbrirLink(g.comparar.clone()));
+                    }
+                    // Sem o gh não dá para saber se o PR já existe: a lista do GitHub diz.
+                    if !g.gh && !g.pulls.is_empty() && tema::link_com(ui, "PRs da branch", true).on_hover_text("Os PRs desta branch no GitHub").clicked() {
+                        pedido = Some(PedidoGaveta::AbrirLink(g.pulls.clone()));
+                    }
+                    if g.a_enviar > 0 && tema::botao_secundario_com(ui, if self.enviando { "Enviando…" } else { "Enviar" }, pode).clicked() {
+                        self.enviar(&ctx, false);
+                    }
+                }
+                None if g.a_enviar > 0 => {
+                    let rotulo = if self.enviando {
+                        "Enviando…"
+                    } else if g.comparar.is_empty() {
+                        "Enviar a branch"
+                    } else {
+                        "Enviar e abrir o PR"
+                    };
+                    let dica = if g.comparar.is_empty() { "git push ao origin" } else { "git push ao origin e a página do GitHub para criar o PR" };
+                    if tema::botao_secundario_com(ui, rotulo, pode).on_hover_text(dica).clicked() {
+                        self.enviar(&ctx, !g.comparar.is_empty());
+                    }
+                }
+                None => {}
+            }
+        });
+        ui.add_space(8.0);
+        ui.painter().hline(ui.cursor().x_range(), ui.cursor().top() - 4.0, Stroke::new(1.0, p.borda));
+        ui.add_space(6.0);
+        pedido
     }
 
     fn coluna_meio(&mut self, ui: &mut egui::Ui, editor: Option<&str>) -> Option<PedidoGaveta> {
@@ -556,34 +759,39 @@ impl AbaArquivos {
         let termo = self.texto_pedido.clone();
         let maiusculas = self.maiusculas;
         let mut abrir = None;
-        egui::ScrollArea::vertical().id_salt(("achados", self.tarefa)).auto_shrink(false).show_rows(ui, LINHA_ACHADO, fileiras.len(), |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for f in &fileiras[faixa] {
-                let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
-                match *f {
-                    Fileira::Arquivo(i) => {
-                        let (rect, _) = ui.allocate_exact_size(vec2(largura, LINHA_ACHADO), Sense::hover());
-                        let c = &achados.achados[i].caminho;
-                        tema::texto_sem_inicio(ui.painter(), pos2(rect.left() + 2.0, rect.center().y - 8.0), c, forte(12.5), p.texto, rect.width() - 4.0);
-                    }
-                    Fileira::Achado(i) => {
-                        let a = &achados.achados[i];
-                        let (rect, r) = ui.allocate_exact_size(vec2(largura, LINHA_ACHADO), Sense::click());
-                        if r.hovered() {
-                            ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), p.realce);
+        tema::linhas_coladas(
+            ui,
+            egui::ScrollArea::vertical().id_salt(("achados", self.tarefa)).auto_shrink(false),
+            LINHA_ACHADO,
+            fileiras.len(),
+            |ui, faixa| {
+                for f in &fileiras[faixa] {
+                    let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
+                    match *f {
+                        Fileira::Arquivo(i) => {
+                            let (rect, _) = ui.allocate_exact_size(vec2(largura, LINHA_ACHADO), Sense::hover());
+                            let c = &achados.achados[i].caminho;
+                            tema::texto_sem_inicio(ui.painter(), pos2(rect.left() + 2.0, rect.center().y - 8.0), c, forte(12.5), p.texto, rect.width() - 4.0);
                         }
-                        let y = rect.center().y;
-                        ui.painter().text(pos2(rect.left() + 34.0, y), Align2::RIGHT_CENTER, a.linha.to_string(), FontId::monospace(11.0), p.suave);
-                        let job = trecho_marcado(&a.texto, &termo, maiusculas, rect.width() - 46.0);
-                        let g = ui.painter().layout_job(job);
-                        ui.painter().galley(pos2(rect.left() + 42.0, y - g.size().y / 2.0), g, p.texto);
-                        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            abrir = Some((a.caminho.clone(), a.linha));
+                        Fileira::Achado(i) => {
+                            let a = &achados.achados[i];
+                            let (rect, r) = ui.allocate_exact_size(vec2(largura, LINHA_ACHADO), Sense::click());
+                            if r.hovered() {
+                                ui.painter().rect_filled(rect, CornerRadius::same(tema::RAIO_ETIQUETA), p.realce);
+                            }
+                            let y = rect.center().y;
+                            ui.painter().text(pos2(rect.left() + 34.0, y), Align2::RIGHT_CENTER, a.linha.to_string(), FontId::monospace(11.0), p.suave);
+                            let job = trecho_marcado(&a.texto, &termo, maiusculas, rect.width() - 46.0);
+                            let g = ui.painter().layout_job(job);
+                            ui.painter().galley(pos2(rect.left() + 42.0, y - g.size().y / 2.0), g, p.texto);
+                            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                abrir = Some((a.caminho.clone(), a.linha));
+                            }
                         }
                     }
                 }
-            }
-        });
+            },
+        );
         if achados.mais {
             ui.label(egui::RichText::new("Mostrando as primeiras 200 linhas.").size(11.5).color(p.suave));
         }
@@ -669,12 +877,12 @@ fn linhas_do_diff(ui: &mut egui::Ui, linhas: &[api::LinhaDiff], cortado: bool, c
     let fonte = FontId::monospace(12.5);
     let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::top_down(egui::Align::Min)));
     filho.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-    egui::ScrollArea::both().id_salt(("diff", caminho)).auto_shrink(false).show_rows(
+    tema::linhas_coladas(
         &mut filho,
+        egui::ScrollArea::both().id_salt(("diff", caminho)).auto_shrink(false),
         LINHA_DIFF,
         linhas.len() + usize::from(cortado),
         |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
             for n in faixa {
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().max(2.0 * calha + 24.0), LINHA_DIFF), Sense::hover());
                 let Some(l) = linhas.get(n) else {

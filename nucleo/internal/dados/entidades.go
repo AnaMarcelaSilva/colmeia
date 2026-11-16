@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 )
 
 type Perfil struct {
@@ -20,9 +21,10 @@ type Perfil struct {
 	// mostram quanto os agentes trabalharam e esperaram. Desligado por padrão
 	// (é informação sensível); os tempos continuam gravados nos eventos.
 	TempoAgentes bool `json:"tempo_agentes"`
-	// AutocompletarSQL: sugestões locais no console de bancos (palavras do
-	// SQL e nomes já carregados na árvore). Desligado por padrão.
-	AutocompletarSQL bool `json:"autocompletar_sql"`
+	// Montador: a lousa da reunião e o slide são montados com IA (um pedido
+	// ao Claude Code por tarefa, sem terminal) a cada mudança da tarefa.
+	// Ligado por padrão; desligado, fica a montagem simples, sem token.
+	Montador bool `json:"montador"`
 	// MascoteModelo e MascoteNome: o acabamento da abelha (um de
 	// ModelosMascote) e o nome que aparece no balão, no resumo e na abelha
 	// fixa. AbelhaFixa: a abelha num programa à parte, por cima das janelas.
@@ -80,11 +82,11 @@ var ModelosMascote = []string{"identidade", "antiga", "meio-termo", "favo", "zan
 // NomeMascotePadrao é o nome da abelha de um perfil novo.
 const NomeMascotePadrao = "Colmeia"
 
-const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, autocompletar_sql, mascote_modelo, mascote_nome, abelha_fixa, ditado,
+const colunasDoPerfil = `id, nome, tema, criado_em, aviso_captura, tempo_agentes, montador, mascote_modelo, mascote_nome, abelha_fixa, ditado,
 	voz_comandos, voz_abelha, voz_efeito, voz_nome, voz_sensibilidade, voz_ia, voz_modelo, voz_pausa`
 
 func (p *Perfil) campos() []any {
-	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.AutocompletarSQL, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado,
+	return []any{&p.ID, &p.Nome, &p.Tema, &p.CriadoEm, &p.AvisoCaptura, &p.TempoAgentes, &p.Montador, &p.MascoteModelo, &p.MascoteNome, &p.AbelhaFixa, &p.Ditado,
 		&p.Comandos, &p.Abelha, &p.Efeito, &p.OuvirNome, &p.Sensibilidade, &p.PerguntaIA, &p.Modelo, &p.PausaMs}
 }
 
@@ -136,15 +138,34 @@ type Tarefa struct {
 	AtualizadoEm string  `json:"atualizado_em"`
 	// ColunaAuto: a última mudança de coluna foi do núcleo, não sua.
 	ColunaAuto bool `json:"coluna_auto"`
+	// ConcluidaEm é quando a tarefa entrou no Concluído (RFC 3339, UTC) e
+	// ConcluidaDia o mesmo instante como dia local ("2026-10-21"), para o
+	// quadro mostrar só o concluído de hoje. Vazios fora do Concluído.
+	ConcluidaEm  string `json:"concluida_em"`
+	ConcluidaDia string `json:"concluida_dia"`
 }
 
 // Colunas lidas de uma tarefa, na ordem de escanearTarefa.
-const colunasTarefa = `id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em, coluna_auto`
+const colunasTarefa = `id, projeto_id, titulo, coluna, branch, local, copia, ordem, criado_em, atualizado_em, coluna_auto, concluida_em`
 
 type escaneavel interface{ Scan(...any) error }
 
 func escanearTarefa(l escaneavel, t *Tarefa) error {
-	return l.Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm, &t.ColunaAuto)
+	err := l.Scan(&t.ID, &t.ProjetoID, &t.Titulo, &t.Coluna, &t.Branch, &t.Local, &t.Copia, &t.Ordem, &t.CriadoEm, &t.AtualizadoEm, &t.ColunaAuto, &t.ConcluidaEm)
+	t.ConcluidaDia = diaLocal(t.ConcluidaEm)
+	return err
+}
+
+// diaLocal é o dia, no fuso do computador, de um instante RFC 3339 ("" se vazio ou inválido).
+func diaLocal(momento string) string {
+	if momento == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, momento)
+	if err != nil {
+		return ""
+	}
+	return t.Local().Format("2006-01-02")
 }
 
 // Origens de uma mudança: sua (pela tela), automática (regra do núcleo) ou
@@ -264,18 +285,17 @@ func (b *Banco) DefinirTempoAgentes(ctx context.Context, perfil int64, mostrar b
 	})
 }
 
-// DefinirAutocompletarSQL liga ou desliga as sugestões do console de bancos
-// deste perfil.
-func (b *Banco) DefinirAutocompletarSQL(ctx context.Context, perfil int64, ligado bool) error {
+// DefinirMontador liga ou desliga o montador da reunião com IA do perfil.
+func (b *Banco) DefinirMontador(ctx context.Context, perfil int64, ligado bool) error {
 	return b.emTransacao(ctx, func(tx *transacao) error {
-		r, err := tx.ExecContext(ctx, `UPDATE perfis SET autocompletar_sql = ? WHERE id = ?`, ligado, perfil)
+		r, err := tx.ExecContext(ctx, `UPDATE perfis SET montador = ? WHERE id = ?`, ligado, perfil)
 		if err != nil {
 			return err
 		}
 		if n, _ := r.RowsAffected(); n == 0 {
 			return ErrNaoEncontrado
 		}
-		return registrar(ctx, tx, "perfil.autocompletar_sql", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
+		return registrar(ctx, tx, "perfil.montador", Escopo{Perfil: perfil}, map[string]any{"perfil": perfil, "ligado": ligado})
 	})
 }
 
@@ -831,19 +851,92 @@ func (b *Banco) AtualizarTarefa(ctx context.Context, id int64, m Mudanca, origem
 			// Mudou de coluna: vai para o fim da coluna de destino.
 			t.Coluna = *m.Coluna
 			t.ColunaAuto = origem == OrigemAutomatica
+			// Entrando no Concluído a tarefa marca a hora; saindo, esquece.
+			t.ConcluidaEm = ""
+			if t.Coluna == "concluido" {
+				t.ConcluidaEm = agora()
+			}
+			t.ConcluidaDia = diaLocal(t.ConcluidaEm)
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordem), 0) + 1 FROM tarefas WHERE projeto_id = ? AND coluna = ?`, t.ProjetoID, t.Coluna).Scan(&t.Ordem); err != nil {
 				return err
 			}
 		}
 		t.AtualizadoEm = agora()
-		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET titulo = ?, coluna = ?, branch = ?, ordem = ?, atualizado_em = ?, coluna_auto = ? WHERE id = ?`,
-			t.Titulo, t.Coluna, t.Branch, t.Ordem, t.AtualizadoEm, t.ColunaAuto, t.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET titulo = ?, coluna = ?, branch = ?, ordem = ?, atualizado_em = ?, coluna_auto = ?, concluida_em = ? WHERE id = ?`,
+			t.Titulo, t.Coluna, t.Branch, t.Ordem, t.AtualizadoEm, t.ColunaAuto, t.ConcluidaEm, t.ID); err != nil {
 			return err
 		}
 		// A tarefa inteira vai no evento: a linha do tempo não depende de ela
 		// ainda existir, e a tela atualiza o cartão sem pedir de novo.
 		return registrar(ctx, tx, "tarefa.atualizada", Escopo{Perfil: perfil, Projeto: t.ProjetoID, Tarefa: t.ID}, map[string]any{
 			"tarefa": t, "mudanca": m, "coluna_antes": antes, "origem": origem, "projeto_nome": nomeProjeto,
+		})
+	})
+	return t, err
+}
+
+// TransferirTarefa leva a tarefa para outro projeto do mesmo perfil, na mesma
+// coluna, no fim dela. As notas, a lousa, os anexos, os pedidos e a linha do
+// tempo são da tarefa e vão junto. A branch passa a ser `branch`: a API manda
+// vazia quando a de antes não existe no destino (ou ele é uma pasta sem git).
+// A API também confere antes que a tarefa não tem agentes nem cópia isolada.
+func (b *Banco) TransferirTarefa(ctx context.Context, id, projeto int64, branch, origem string) (Tarefa, error) {
+	if branch != "" {
+		if err := BranchValida(branch); err != nil {
+			return Tarefa{}, err
+		}
+	}
+	if err := umDe("origem", origem, []string{OrigemVoce, OrigemAgente}); err != nil {
+		return Tarefa{}, err
+	}
+	var t Tarefa
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		err := escanearTarefa(tx.QueryRowContext(ctx, `SELECT `+colunasTarefa+` FROM tarefas WHERE id = ?`, id), &t)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		if t.ProjetoID == projeto {
+			return ErrInvalido{"a tarefa já está nesse projeto"}
+		}
+		if t.Local == "copia" {
+			return ErrInvalido{"uma tarefa com cópia isolada não muda de projeto"}
+		}
+		perfilDe, nomeDe, err := donoDoProjeto(ctx, tx, t.ProjetoID)
+		if err != nil {
+			return err
+		}
+		perfilPara, nomePara, err := donoDoProjeto(ctx, tx, projeto)
+		if errors.Is(err, ErrNaoEncontrado) {
+			return ErrInvalido{"o projeto de destino não existe"}
+		}
+		if err != nil {
+			return err
+		}
+		if perfilDe != perfilPara {
+			return ErrInvalido{"a tarefa só muda para um projeto do mesmo perfil"}
+		}
+		var tipo string
+		if err := tx.QueryRowContext(ctx, `SELECT tipo FROM projetos WHERE id = ?`, projeto).Scan(&tipo); err != nil {
+			return err
+		}
+		if tipo == "pasta" && branch != "" {
+			return ErrInvalido{"uma pasta sem git não tem branches"}
+		}
+		de := t.ProjetoID
+		t.ProjetoID, t.Branch, t.AtualizadoEm = projeto, branch, agora()
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordem), 0) + 1 FROM tarefas WHERE projeto_id = ? AND coluna = ?`, projeto, t.Coluna).Scan(&t.Ordem); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE tarefas SET projeto_id = ?, branch = ?, ordem = ?, atualizado_em = ? WHERE id = ?`,
+			t.ProjetoID, t.Branch, t.Ordem, t.AtualizadoEm, t.ID); err != nil {
+			return err
+		}
+		// O evento fica no projeto de destino: é lá que a tarefa está daqui em diante.
+		return registrar(ctx, tx, "tarefa.transferida", Escopo{Perfil: perfilPara, Projeto: projeto, Tarefa: t.ID}, map[string]any{
+			"tarefa": t, "de": de, "de_nome": nomeDe, "projeto_nome": nomePara, "origem": origem,
 		})
 	})
 	return t, err

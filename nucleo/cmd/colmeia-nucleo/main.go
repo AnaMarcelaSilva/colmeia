@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/api"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/atualizacao"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/chaveiro"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
@@ -29,7 +30,8 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/uso"
 )
 
-const versao = "0.4.0"
+// versao é var para a release (e o teste da atualização) trocar com -ldflags -X main.versao=.
+var versao = "0.4.0"
 
 func main() {
 	// "colmeia-nucleo mcp": o servidor MCP que o Claude Code de cada agente roda.
@@ -46,9 +48,20 @@ func main() {
 	modoDemo := flag.Bool("demo", false, "modo demonstração: terminais de teste e cargas que escrevem comandos neles")
 	encerrar := flag.Bool("encerrar", false, "encerra o núcleo que está rodando (e os agentes dele) e sai")
 	mostrarVersao := flag.Bool("versao", false, "mostra a versão e sai")
+	// A troca de versão (veja internal/atualizacao): o núcleo que vai sair
+	// abre a cópia dele com estes argumentos.
+	trocar := flag.String("trocar", "", "troca os programas pela versão preparada nesta pasta e sai")
+	esperar := flag.Int("esperar", 0, "com --trocar, o núcleo que precisa sair antes")
+	abrirTela := flag.Bool("abrir-tela", false, "com --trocar, abre a tela no fim")
 	flag.Parse()
 	if *mostrarVersao {
 		fmt.Println("colmeia-nucleo", versao)
+		return
+	}
+	if *trocar != "" {
+		if err := atualizacao.Trocar(*trocar, *esperar, *abrirTela); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	if *encerrar {
@@ -79,6 +92,13 @@ func main() {
 	dirDados, err := dados.Diretorio()
 	if err != nil {
 		log.Fatalf("sem diretório de dados: %v", err)
+	}
+	// O que o núcleo registra vai também para nucleo.log na pasta de dados:
+	// aberto pela tela, o stderr dele é o nada, e sem isso um pedido lento
+	// ou um erro some sem rastro.
+	if registro := abrirRegistro(dirDados); registro != nil {
+		defer registro.Close()
+		log.SetOutput(io.MultiWriter(os.Stderr, registro))
 	}
 	banco, err := dados.Abrir(dirDados)
 	if err != nil {
@@ -128,7 +148,7 @@ func main() {
 		AvisoHistorico: avisoHistorico, AoEncerrar: func() { parar <- syscall.SIGTERM },
 		Fichas: fichas, DirCanal: dirCanal, Executavel: executavel}
 	servidorHTTP := &http.Server{
-		Handler:           canal.Autenticar(token, fichas, servidor.Rotas()),
+		Handler:           canal.Autenticar(token, fichas, registrarLentos(servidor.Rotas())),
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
@@ -242,4 +262,44 @@ func pedirEncerramento() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil
+}
+
+// abrirRegistro abre nucleo.log (0600) na pasta de dados; passando de 2 MB,
+// o anterior vira nucleo.log.1.
+func abrirRegistro(dir string) *os.File {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil
+	}
+	caminho := filepath.Join(dir, "nucleo.log")
+	if info, err := os.Stat(caminho); err == nil && info.Size() > 2<<20 {
+		os.Rename(caminho, caminho+".1")
+	}
+	f, err := os.OpenFile(caminho, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// pedidoLento é a partir de quanto um pedido entra no log.
+const pedidoLento = 3 * time.Second
+
+// registrarLentos anota no log os pedidos que passam de pedidoLento: quando
+// a tela reclama que o núcleo não respondeu, aqui fica dito qual pedido
+// travou. Os que duram de propósito (terminais, eventos e as esperas do
+// agente) ficam de fora.
+func registrarLentos(proximo http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inicio := time.Now()
+		proximo.ServeHTTP(w, r)
+		if d := time.Since(inicio); d > pedidoLento && !demoraDeProposito(r.URL.Path) {
+			log.Printf("pedido lento: %s %s levou %s", r.Method, r.URL.Path, d.Round(100*time.Millisecond))
+		}
+	})
+}
+
+// demoraDeProposito: os caminhos que ficam abertos esperando (WebSocket,
+// eventos, o agente esperando a aprovação ou a resposta).
+func demoraDeProposito(caminho string) bool {
+	return strings.Contains(caminho, "/termina") || strings.HasSuffix(caminho, "/eventos") || strings.HasPrefix(caminho, "/v1/agente/")
 }

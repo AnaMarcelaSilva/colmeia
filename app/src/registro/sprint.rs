@@ -11,15 +11,14 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, CornerRadius, FontId, Rect, RichText, Sense, Shape, Stroke, pos2, vec2};
+use eframe::egui::{self, CornerRadius, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::comum::{self, desenhar_miniatura};
-use super::daily::{cabecalho, sozinha};
-use super::frase::{self, Frase};
+use super::daily::{cabecalho, sozinha, tiradas};
 use super::lista::{self, Arrasto, campo_nome};
-use super::{Acao, Escopo, Periodo, Registro};
+use super::{Acao, EdicaoTexto, Escopo, Periodo, Registro, leitor};
 use crate::api;
-use crate::tema::{self, Icone, cores, forte};
+use crate::tema::{self, Icone, cores};
 
 /// Uma seção da página: um assunto, "Sem assunto" ou um projeto.
 pub(super) struct Secao<'a> {
@@ -99,57 +98,94 @@ impl Registro {
             }
             return;
         };
-        let topo = ui.cursor().top();
-        let mut rolagem = egui::ScrollArea::vertical().id_salt("pagina-sprint").auto_shrink(false);
-        if std::mem::take(&mut self.ao_topo[1]) {
-            rolagem = rolagem.vertical_scroll_offset(0.0);
+        // A proposta gerada com IA toma a página inteira enquanto está aberta.
+        let mut proposta = false;
+        if self.gerar.is_some() {
+            egui::ScrollArea::vertical().id_salt("pagina-sprint-proposta").auto_shrink(false).show(ui, |ui| {
+                ui.set_max_width(ui.available_width() - comum::MARGEM_ROLAGEM);
+                proposta = self.proposta_lado_a_lado(ui, &deck);
+            });
         }
-        let saida = rolagem.show(ui, |ui| {
-            // A barra de rolagem fica numa faixa só dela, sem nada por baixo.
-            ui.set_max_width(ui.available_width() - comum::MARGEM_ROLAGEM);
-            if self.proposta_lado_a_lado(ui, &deck) {
-                return;
-            }
-            if deck.slides.is_empty() && deck.capa.novas.is_empty() {
-                self.sprint_vazia(ui, &deck, escopo, acoes);
-                return;
-            }
-            let fixa = deck.sprint_id != 0;
-            let mut soltas = None;
-            for secao in secoes(&deck) {
-                if let Some(s) = self.secao(ui, &deck, &secao, escrevendo, escopo.varios(), acoes) {
-                    soltas = Some(s);
-                }
-            }
+        if proposta {
+            return;
+        }
+        if deck.slides.is_empty() && deck.capa.novas.is_empty() {
+            self.sprint_vazia(ui, &deck, escopo, acoes);
+            return;
+        }
+        let fixa = deck.sprint_id != 0;
+        let secoes = secoes(&deck);
+        let mut leitor = std::mem::take(&mut self.leitor_sprint);
+        if let Some(t) = self.rolar_ate.take() {
+            leitor.escolhida = Some(t);
+        }
+        if leitor.escolhida.is_none_or(|id| !deck.slides.iter().any(|s| s.tarefa_id == id)) {
+            leitor.escolhida = deck.slides.iter().find(|s| !s.apresentada && !s.removida).or(deck.slides.first()).map(|s| s.tarefa_id);
+        }
+        let area = ui.available_rect_before_wrap();
+        let esquerda = Rect::from_min_size(area.min, vec2(leitor::PAUTA, area.height()));
+        let direita = Rect::from_min_max(pos2(esquerda.right() + 16.0, area.top()), area.max);
+        let op = leitor::OpcoesPauta {
+            compacta: false,
+            arrastavel: self.conectado,
+            assuntos: fixa,
+            daily: false,
+            sprint_fixa: fixa,
+            conectado: self.conectado,
+            recorte: escopo.recorte,
+        };
+        let mut pedidos = Vec::new();
+        let mut soltas = None;
+        let mut lista = ui.new_child(egui::UiBuilder::new().max_rect(esquerda).layout(egui::Layout::top_down(egui::Align::Min)));
+        egui::ScrollArea::vertical().id_salt("pauta-sprint").auto_shrink(false).show(&mut lista, |ui| {
+            ui.set_max_width(leitor::PAUTA - comum::MARGEM_ROLAGEM);
+            pedidos = self.pauta(ui, &deck, &secoes, &mut leitor, &op);
             if fixa {
                 ui.add_space(4.0);
-                if let Some(s) = self.novo_assunto(ui, &deck) {
-                    soltas = Some(s);
+                soltas = self.novo_assunto(ui, &deck);
+                if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado, false) {
+                    self.tirar_da_sprint(&ctx, deck.sprint_id, t, false);
                 }
             }
-            if let Some((assunto, tarefas, novo)) = soltas
-                && self.conectado
-            {
-                let sprint = deck.sprint_id;
-                self.mexer_assuntos(&ctx, move || {
-                    let assunto = match novo {
-                        Some(nome) => api::criar_assunto(sprint, &nome.chars().take(80).collect::<String>())?.id,
-                        None => assunto,
-                    };
-                    api::assunto_das_tarefas(sprint, &tarefas, assunto).map(|_| String::new())
-                });
-            }
             if deck.mais > 0 {
-                ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(13.5));
+                ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(12.5));
             }
             ui.add_space(12.0);
             self.galeria(ui);
-            ui.add_space(24.0);
+            ui.add_space(16.0);
             lista::rolar_no_arrasto(ui);
         });
-        lista::rotulo_do_arrasto(ui.ctx());
-        let area = egui::Rect::from_min_max(egui::pos2(saida.inner_rect.left(), topo), saida.inner_rect.right_bottom());
-        comum::sombra_rolagem(ui.painter(), area, saida.state.offset.y);
+        lista::rotulo_do_arrasto(&ctx);
+        if let Some((assunto, tarefas, novo)) = soltas
+            && self.conectado
+        {
+            let sprint = deck.sprint_id;
+            self.mexer_assuntos(&ctx, move || {
+                let assunto = match novo {
+                    Some(nome) => api::criar_assunto(sprint, &nome.chars().take(80).collect::<String>())?.id,
+                    None => assunto,
+                };
+                api::assunto_das_tarefas(sprint, &tarefas, assunto).map(|_| String::new())
+            });
+        }
+        let mut detalhe = ui.new_child(egui::UiBuilder::new().max_rect(direita).layout(egui::Layout::top_down(egui::Align::Min)));
+        if let Some(id) = leitor.escolhida
+            && let Some((indice, s)) = deck.slides.iter().enumerate().find(|(_, s)| s.tarefa_id == id)
+        {
+            if self.edicao.as_ref().is_some_and(|e| e.tarefa == id && !e.daily) {
+                self.linha_em_edicao(&mut detalhe, true);
+            } else {
+                let projeto = if escopo.varios() || fixa { s.projeto.clone() } else { String::new() };
+                let mais = self.painel(&mut detalhe, s, &projeto, indice + 1, deck.slides.len(), &mut leitor, 1.0, true, &op);
+                pedidos.extend(mais);
+            }
+        }
+        ui.allocate_rect(area, Sense::hover());
+        self.leitor_sprint = leitor;
+        if let Some(pd) = self.teclado_do_leitor(&ctx, &deck, false, false) {
+            pedidos.push(pd);
+        }
+        self.tratar_pedidos_leitor(&ctx, pedidos, &deck, false, escrevendo, acoes);
     }
 
     /// O chip do período: a sprint fixa, os últimos dias, o mês ou datas.
@@ -228,168 +264,109 @@ impl Registro {
 
     /// Uma seção: o cabeçalho (seta, nome, quantas e o lápis do assunto) e as
     /// linhas. A seção inteira, aberta ou recolhida, recebe o arrasto.
-    fn secao(
-        &mut self,
-        ui: &mut egui::Ui,
-        deck: &api::Deck,
-        secao: &Secao,
-        escrevendo: &HashSet<i64>,
-        com_projeto: bool,
-        acoes: &mut Vec<Acao>,
-    ) -> Option<Soltas> {
+    /// A fala do assunto, entre o cabeçalho e as tarefas: o texto escrito
+    /// por você ou gerado pela IA, a caixa para escrever, ou o aviso de que
+    /// o Claude Code está escrevendo. Sem fala e sem edição, nada aparece.
+    pub(super) fn texto_do_assunto(&mut self, ui: &mut egui::Ui, deck: &api::Deck, assunto: i64, recorte: api::Recorte) {
         let p = cores();
         let ctx = ui.ctx().clone();
-        let fixa = deck.sprint_id != 0;
-        let arrastando = fixa && egui::DragAndDrop::has_payload_of_type::<Arrasto>(&ctx);
-        // "Sem assunto" vazio só aparece como lugar de soltar.
-        if secao.slides.is_empty() && secao.assunto == Some(0) && !arrastando {
-            return None;
-        }
-        let id = egui::Id::new(("secao-sprint", secao.chave));
-        // O realce de soltar fica por baixo do que vem depois; o retângulo é o do quadro anterior.
-        let fundo = ui.painter().add(Shape::Noop);
-        let antes: Option<Rect> = ctx.data(|d| d.get_temp(id));
-        let sobre = arrastando && secao.assunto.is_some() && antes.zip(ctx.pointer_hover_pos()).is_some_and(|(r, ponto)| r.contains(ponto));
-        let aberta = !self.recolhidas.contains(&secao.chave);
-        let topo = ui.cursor().top();
-        let largura = ui.available_width();
-
-        // O cabeçalho.
-        let (rect, cabeca) = ui.allocate_exact_size(vec2(largura, 40.0), Sense::click());
-        let renomeando = matches!((self.nome_assunto.as_ref(), secao.assunto), (Some((a, _)), Some(b)) if *a == b && b > 0);
-        let cabeca = cabeca.on_hover_cursor(egui::CursorIcon::PointingHand);
-        tema::fundo_ao_passar(ui, &cabeca, rect, 10, !sobre);
-        let giro = ctx.animate_bool_with_time(id.with("seta"), aberta, tema::TRANSICAO);
-        seta(ui.painter(), pos2(rect.left() + 12.0, rect.center().y), giro, p.suave);
-        let mut x = rect.left() + 28.0;
-        let mut renomear = None;
-        let mut apagar = false;
-        if renomeando {
-            let campo = Rect::from_min_size(pos2(x, rect.center().y - 14.0), vec2(240.0, 28.0));
-            let mut pronto = None;
-            ui.scope_builder(egui::UiBuilder::new().max_rect(campo), |ui| {
-                if let Some((id, nome)) = self.nome_assunto.as_mut() {
-                    pronto = campo_nome(ui, nome, *id);
+        let moldura = egui::Frame::new()
+            .fill(p.destaque.gamma_multiply(0.07))
+            .stroke(Stroke::new(1.0, p.destaque.gamma_multiply(0.3)))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 });
+        if self.texto_assunto.as_ref().is_some_and(|e| e.assunto == assunto) {
+            let id = egui::Id::new(("texto-assunto", assunto));
+            let foco = ctx.memory(|m| m.has_focus(id));
+            let enter = foco && ctx.input_mut(|i| self.composicao.tirar_enters(&mut i.events));
+            let esc = foco && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            let mut cancelar = false;
+            let mut salvar = false;
+            let Some(e) = self.texto_assunto.as_mut() else { return };
+            moldura.stroke(Stroke::new(1.0, p.destaque.gamma_multiply(0.45))).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let r = tema::campo_mensagem(ui, &mut e.texto, 2, 200.0, id, e.salvando);
+                if std::mem::take(&mut e.focar) {
+                    r.request_focus();
                 }
-            });
-            if let Some(salvar) = pronto {
-                self.salvar_nome_assunto(&ctx, deck.sprint_id, salvar);
-            }
-            x += 248.0;
-        } else {
-            let cor = if secao.assunto == Some(0) { p.suave } else { p.texto };
-            let nome = ui.painter().layout_no_wrap(secao.nome.clone(), forte(15.5), cor);
-            let w = nome.size().x;
-            ui.painter().galley(pos2(x, rect.center().y - nome.size().y / 2.0), nome, cor);
-            x += w + 10.0;
-        }
-        let n = ui.painter().layout_no_wrap(secao.slides.len().to_string(), forte(11.5), p.suave);
-        let pilula = Rect::from_min_size(pos2(x, rect.center().y - 10.0), vec2((n.size().x + 12.0).max(20.0), 20.0));
-        ui.painter().rect_filled(pilula, CornerRadius::same(10), p.realce);
-        ui.painter().galley(pilula.center() - n.size() / 2.0, n, p.suave);
-        x = pilula.right() + 10.0;
-        if sobre {
-            ui.painter().text(pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, "Soltar aqui", FontId::proportional(12.5), p.destaque);
-        }
-        // O lápis do assunto, só com o mouse em cima.
-        if let Some(assunto) = secao.assunto.filter(|a| *a > 0 && self.conectado && !renomeando) {
-            let caixa = Rect::from_min_size(pos2(rect.right() - 32.0, rect.center().y - 13.0), vec2(26.0, 26.0));
-            let lapis = ui.interact(caixa, id.with("lapis"), Sense::click());
-            let t = tema::transicao(ui, id.with("lapis-aparece"), cabeca.hovered() || lapis.hovered());
-            if t > 0.0 {
-                if lapis.hovered() {
-                    ui.painter().rect_filled(caixa, CornerRadius::same(8), p.realce);
-                }
-                tema::desenhar_icone(ui.painter(), caixa.center(), Icone::Lapis, (if lapis.hovered() { p.texto } else { p.suave }).gamma_multiply(t));
-            }
-            if lapis.on_hover_text("Renomear o assunto").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                renomear = Some((assunto, secao.nome.clone()));
-            }
-            cabeca.context_menu(|ui| {
-                ui.set_min_width(180.0);
-                if tema::opcao_menu(ui, "Renomear", false) {
-                    renomear = Some((assunto, secao.nome.clone()));
-                    ui.close();
-                }
-                if tema::opcao_menu(ui, "Apagar assunto", false) {
-                    apagar = true;
-                    ui.close();
-                }
-            });
-            if apagar {
-                self.mexer_assuntos(&ctx, move || api::remover_assunto(assunto).map(|_| "Assunto apagado; as tarefas ficaram sem assunto".to_string()));
-            }
-        }
-        if cabeca.clicked() && !renomeando && renomear.is_none() {
-            self.alternar_secao(secao.chave);
-        }
-        if renomear.is_some() {
-            self.nome_assunto = renomear;
-        }
-
-        // As linhas, que aparecem com a transição ao abrir.
-        if aberta {
-            let t = ctx.animate_bool_with_time(id.with("corpo"), true, tema::TRANSICAO);
-            ui.scope(|ui| {
-                ui.set_opacity(t);
-                egui::Frame::new().inner_margin(egui::Margin { left: 22, ..Default::default() }).show(ui, |ui| {
-                    if secao.slides.is_empty() {
-                        ui.label(RichText::new("Nenhuma tarefa. Arraste uma para cá.").color(p.suave).size(13.0));
-                    }
-                    for s in &secao.slides {
-                        self.linha_da_sprint(ui, deck, s, escrevendo, com_projeto, acoes);
-                    }
+                ui.horizontal(|ui| {
+                    let dica =
+                        if e.salvando { "Salvando…" } else { "A fala deste assunto na reunião · Enter salva · Shift+Enter nova linha · Esc desfaz" };
+                    ui.label(RichText::new(dica).color(p.suave).size(11.5));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        salvar |= tema::botao_principal(ui, "Salvar", !e.salvando).clicked();
+                        ui.add_space(4.0);
+                        cancelar |= tema::link_com(ui, "Cancelar", !e.salvando).clicked();
+                    });
                 });
             });
-        } else {
-            ctx.animate_bool_with_time(id.with("corpo"), false, 0.0);
-        }
-        ui.add_space(8.0);
-        let area = Rect::from_min_max(pos2(rect.left() - 6.0, topo - 2.0), pos2(rect.right() + 6.0, ui.cursor().top()));
-        ctx.data_mut(|d| d.insert_temp(id, area));
-        if sobre {
-            ui.painter().set(fundo, frase::realce_de_soltar(area));
-        }
-        // Soltar: a área inteira da seção recebe.
-        let assunto = secao.assunto?;
-        let alvo = ui.interact(area, id.with("soltar"), Sense::hover());
-        alvo.dnd_release_payload::<Arrasto>().map(|a| (assunto, a.tarefas.clone(), None))
-    }
-
-    fn alternar_secao(&mut self, chave: i64) {
-        if !self.recolhidas.remove(&chave) {
-            self.recolhidas.insert(chave);
-        }
-    }
-
-    /// Uma tarefa da sprint: a linha, ou o título e a descrição em edição.
-    fn linha_da_sprint(&mut self, ui: &mut egui::Ui, deck: &api::Deck, s: &api::Slide, escrevendo: &HashSet<i64>, com_projeto: bool, acoes: &mut Vec<Acao>) {
-        let topo = ui.cursor().top();
-        if self.edicao.as_ref().is_some_and(|e| e.tarefa == s.tarefa_id && !e.daily) {
-            self.linha_em_edicao(ui, true);
+            let salvando = e.salvando;
+            if (esc || cancelar) && !salvando {
+                self.texto_assunto = None;
+                ctx.request_repaint();
+            } else if (enter || salvar) && !salvando {
+                self.salvar_texto_assunto(&ctx);
+            }
+            ui.add_space(8.0);
             return;
         }
-        let fixa = deck.sprint_id != 0;
-        let frase = frase::frase_do_slide(s, escrevendo.contains(&s.tarefa_id), false);
-        let op = frase::Opcoes {
-            projeto: com_projeto.then_some(s.projeto.as_str()),
-            editada: self.editadas.contains(&(false, s.tarefa_id)),
-            editavel: fixa && self.conectado && !s.removida && !matches!(frase, Frase::Escrevendo),
-            arrastavel: fixa && self.conectado && !s.removida,
-            daily: false,
-        };
-        match frase::linha(ui, s, &frase, &op) {
-            Some(frase::Clique::Editar) => self.abrir_edicao(s, false, &frase),
-            Some(frase::Clique::AbrirTarefa) => acoes.push(Acao::AbrirTarefa { tarefa: s.tarefa_id, agente: None, lousa: false }),
-            Some(frase::Clique::Apresentar) => {
-                acoes.push(Acao::Apresentar { deck: Box::new(deck.clone()), periodo: self.periodo_atual(), tarefa: Some(s.tarefa_id) });
-            }
-            Some(frase::Clique::TirarDaDaily) | None => {}
+        if self.gerando_texto == Some(assunto) {
+            moldura.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0).color(p.destaque));
+                    ui.label(RichText::new("O Claude Code está escrevendo a fala deste assunto…").color(p.destaque).size(13.5));
+                });
+            });
+            ui.add_space(8.0);
+            return;
         }
-        if self.rolar_ate == Some(s.tarefa_id) {
-            self.rolar_ate = None;
+        let Some(a) = deck.assuntos.iter().find(|a| a.id == assunto).filter(|a| !a.texto.trim().is_empty()) else { return };
+        let gerado = a.texto_origem == "ia";
+        let mut editar = false;
+        let mut gerar = false;
+        let mut apagar = false;
+        moldura.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            // O texto é pintado na largura da moldura: um galley solto não a alarga.
             let largura = ui.available_width();
-            ui.scroll_to_rect(Rect::from_min_size(pos2(ui.min_rect().left(), topo), vec2(largura, ui.cursor().top() - topo)), Some(egui::Align::Center));
+            let mut job =
+                egui::text::LayoutJob { wrap: egui::text::TextWrapping { max_width: (largura - 26.0).max(120.0), ..Default::default() }, ..Default::default() };
+            comum::anexar_nota(&mut job, a.texto.trim(), 14.0, p.texto, Some(22.0), 8.0);
+            let galeria = ui.painter().layout_job(job);
+            let (r, _) = ui.allocate_exact_size(vec2(largura, galeria.size().y.max(22.0)), Sense::hover());
+            tema::desenhar_icone(ui.painter(), pos2(r.left() + 9.0, r.top() + 11.0), if gerado { Icone::Agente } else { Icone::Lapis }, p.destaque);
+            ui.painter().galley(pos2(r.left() + 26.0, r.top()), galeria, p.texto);
+            ui.horizontal(|ui| {
+                ui.add_space(26.0);
+                let origem = if gerado {
+                    let n = a.texto_tarefas;
+                    format!("Gerado pela IA com {n} {} do assunto", if n == 1 { "tarefa" } else { "tarefas" })
+                } else {
+                    "Escrito por você".to_string()
+                };
+                ui.label(RichText::new(origem).color(p.suave).size(12.0));
+                ui.label(RichText::new("·").color(p.suave).size(12.0));
+                editar = tema::link_com(ui, "Editar", self.conectado).clicked();
+                if self.claude != Some(false) {
+                    gerar = tema::link_com(ui, "Gerar de novo", self.conectado && self.gerando_texto.is_none())
+                        .on_hover_text("O Claude Code escreve outra vez, com as tarefas que estão na sprint agora")
+                        .clicked();
+                }
+                apagar = tema::link_com(ui, "Apagar", self.conectado).clicked();
+            });
+        });
+        ui.add_space(8.0);
+        if editar {
+            self.composicao = Default::default();
+            self.texto_assunto = Some(EdicaoTexto { assunto, texto: a.texto.clone(), salvando: false, focar: true });
+        } else if gerar {
+            self.gerar_texto_assunto(&ctx, assunto, recorte);
+        } else if apagar {
+            self.texto_assunto = Some(EdicaoTexto { assunto, texto: String::new(), salvando: false, focar: false });
+            self.salvar_texto_assunto(&ctx);
         }
     }
 
@@ -485,14 +462,6 @@ impl Registro {
     }
 }
 
-/// A seta da seção: para a direita recolhida, para baixo aberta (`giro` de 0 a 1).
-fn seta(pintor: &egui::Painter, centro: egui::Pos2, giro: f32, cor: egui::Color32) {
-    let angulo = (giro - 1.0) * std::f32::consts::FRAC_PI_2;
-    let rot = egui::emath::Rot2::from_angle(angulo);
-    let pontos = [vec2(-4.0, -2.0), vec2(4.0, -2.0), vec2(0.0, 2.5)].map(|v| centro + rot * v).to_vec();
-    pintor.add(Shape::convex_polygon(pontos, cor, Stroke::NONE));
-}
-
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -505,7 +474,10 @@ mod testes {
     fn secoes_por_assunto_com_sem_assunto_no_fim() {
         let deck = api::Deck {
             sprint_id: 3,
-            assuntos: vec![api::Assunto { id: 7, nome: "Vendas".into() }, api::Assunto { id: 8, nome: "Vazio".into() }],
+            assuntos: vec![
+                api::Assunto { id: 7, nome: "Vendas".into(), ..Default::default() },
+                api::Assunto { id: 8, nome: "Vazio".into(), ..Default::default() },
+            ],
             slides: vec![slide(1, 7), slide(2, 0), slide(3, 7)],
             ..Default::default()
         };

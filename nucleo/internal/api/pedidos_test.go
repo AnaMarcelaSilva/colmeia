@@ -152,10 +152,18 @@ func TestTokenDoAgenteSoValeParaATarefaDele(t *testing.T) {
 		t.Errorf("configuração MCP: %+v", config)
 	}
 
-	// O token do agente lê a própria tarefa...
+	// O token do agente lê a própria tarefa, com a nota de ontem como descrição
+	// (a daily de hoje está vazia, mas a tarefa não)...
+	pedirComo(t, tokenTela, "PUT", srv.URL+"/v1/tarefas/1/notas", map[string]string{"tipo": "daily", "periodo": "2026-10-02", "texto": "Tela pronta, falta o filtro"})
 	status, r := pedirComo(t, token, "GET", srv.URL+"/v1/agente/tarefa", nil)
 	if tarefa, _ := r["tarefa"].(map[string]any); status != http.StatusOK || tarefa["titulo"] != "Nova tela de pedidos" {
 		t.Fatalf("ler a tarefa: %d %v", status, r)
+	}
+	if d, _ := r["descricao"].(map[string]any); d["texto"] != "Tela pronta, falta o filtro" || d["periodo"] != "2026-10-02" {
+		t.Errorf("descrição da tarefa: %v", r["descricao"])
+	}
+	if n, _ := r["nota_daily"].(map[string]any); n["texto"] != "" {
+		t.Errorf("a daily de hoje devia estar vazia: %v", r["nota_daily"])
 	}
 	// ...e não entra em nenhuma rota da tela, nem na tarefa de outro.
 	for _, rota := range []string{"/v1/tarefas/1/agentes", "/v1/tarefas/2/pedidos", "/v1/perfis", "/v1/anexos/1", "/v1/agentes/1/terminal"} {

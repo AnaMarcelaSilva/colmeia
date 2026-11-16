@@ -22,6 +22,8 @@ mod entrada;
 mod eventos;
 mod execucao;
 mod falada;
+#[cfg(test)]
+mod fotos;
 mod gaveta;
 mod icones;
 mod lateral;
@@ -29,6 +31,7 @@ mod lousa;
 mod pedido;
 mod quadro;
 mod registro;
+mod rotinas;
 mod sistema;
 mod tarefa;
 mod teclas;
@@ -110,6 +113,8 @@ enum Tela {
     Lousa(i64),
     /// A base de conhecimento do workspace.
     Conhecimento(i64),
+    /// As rotinas do workspace.
+    Rotinas(i64),
     /// Os bancos de dados do perfil.
     Banco,
 }
@@ -207,6 +212,12 @@ struct Colmeia {
     /// A opção do tempo dos agentes mandada ao núcleo e ainda sem resposta
     /// (o valor anterior, para desfazer se der erro).
     tempo_pendente: Option<(bool, Receiver<Result<(), String>>)>,
+    /// As tarefas cuja montagem o montador com IA está refazendo agora.
+    montando: HashSet<i64>,
+    /// Quando chegou o primeiro montagem.mudou ainda não aplicado: a página
+    /// busca de novo uma vez só por rajada (várias montagens seguidas), meio
+    /// segundo depois do primeiro aviso.
+    montagem_mudou_em: Option<f64>,
     modelo: dados::Modelo,
     branches: Vec<String>,
     /// Terminais dos agentes, pelo id do agente (na demonstração, o número do terminal de teste).
@@ -226,7 +237,7 @@ struct Colmeia {
     /// O destaque do resumo e o Concluído de hoje.
     quadro: quadro::Quadro,
     sem_abelha: bool,
-    /// A janela estava minimizada no último quadro (o núcleo avisa a abelha fixa).
+    /// A janela estava minimizada ou sem o foco no último quadro (o núcleo avisa a abelha fixa).
     minimizada: bool,
     /// No X11 a visibilidade vem de uma thread que escuta a janela (o egui
     /// não tem quadro ao minimizar): `Some(true)` com ela, `None` antes de tentar.
@@ -255,6 +266,8 @@ struct Colmeia {
     apresentacao: Option<Box<Apresentacao>>,
     /// A janela já estava em tela cheia antes da apresentação.
     tela_cheia_antes: bool,
+    /// O leitor da reunião em tela cheia (a daily ou a sprint).
+    leitor_cheio: Option<registro::Aba>,
     /// Último slide visto (daily ou sprint e a tarefa), para o Shift+F5.
     ultimo_slide: Option<(bool, i64)>,
     captura: Option<Captura>,
@@ -268,6 +281,9 @@ struct Colmeia {
     pediu_atencao: bool,
     /// Já confirmou fechar com agentes rodando.
     pode_fechar: bool,
+    /// A versão nova, como o núcleo vê; procurada uma vez ao conectar.
+    atualizacao: api::EstadoAtualizacao,
+    procurou_atualizacao: bool,
     /// Onde o aviso do rodapé aparece neste quadro.
     ancora_aviso: Option<egui::Pos2>,
     /// Quando cada agente respondeu um pedido pela última vez.
@@ -318,6 +334,7 @@ struct Colmeia {
     banco: banco::Bancos,
     /// A base de conhecimento do workspace aberto e as imagens dos workspaces.
     conhecimento: conhecimento::TelaConhecimento,
+    rotinas: rotinas::TelaRotinas,
     icones: icones::Icones,
     /// O "Play" dos projetos: configurações de execução e o painel da saída.
     play: execucao::Play,
@@ -334,6 +351,8 @@ struct Colmeia {
     vazao: u64,
     /// COLMEIA_FPS=1 mostra o contador de quadros também fora da demonstração (medição).
     mostrar_fps: bool,
+    /// O terminal que recebe o teclado assim que a tarefa abre (o agente em foco).
+    foco_pendente: Option<i64>,
 }
 
 impl Colmeia {
@@ -353,6 +372,8 @@ impl Colmeia {
             perfis: Vec::new(),
             nome_workspace: String::new(),
             tempo_pendente: None,
+            montando: HashSet::new(),
+            montagem_mudou_em: None,
             modelo: dados::Modelo::default(),
             branches: Vec::new(),
             terminais: HashMap::new(),
@@ -384,6 +405,7 @@ impl Colmeia {
             registro: registro::Registro::default(),
             apresentacao: None,
             tela_cheia_antes: false,
+            leitor_cheio: None,
             ultimo_slide: None,
             captura: None,
             clarao: None,
@@ -392,6 +414,8 @@ impl Colmeia {
             titulo: "Colmeia".into(),
             pediu_atencao: false,
             pode_fechar: false,
+            atualizacao: api::EstadoAtualizacao::default(),
+            procurou_atualizacao: false,
             ancora_aviso: None,
             respondeu_em: HashMap::new(),
             navegador: None,
@@ -415,6 +439,7 @@ impl Colmeia {
             palco: None,
             banco: banco::Bancos::novo(0),
             conhecimento: conhecimento::TelaConhecimento::default(),
+            rotinas: rotinas::TelaRotinas::default(),
             icones: icones::Icones::default(),
             play: execucao::Play::default(),
             tela_antes_do_banco: None,
@@ -428,6 +453,7 @@ impl Colmeia {
             fps: 0,
             vazao: 0,
             mostrar_fps: std::env::var("COLMEIA_FPS").is_ok_and(|v| v == "1"),
+            foco_pendente: None,
         };
 
         app.compositor.focar = true;
@@ -449,7 +475,7 @@ impl Colmeia {
             tema: escolha.chave().into(),
             aviso_captura: false,
             tempo_agentes: false,
-            autocompletar_sql: false,
+            montador: true,
             mascote_modelo: String::new(),
             mascote_nome: api::NOME_DA_ABELHA.into(),
             abelha_fixa: false,
@@ -546,7 +572,6 @@ impl Colmeia {
         // As senhas e os consoles do perfil anterior ficam para trás.
         self.banco = banco::Bancos::novo(perfil.id);
         self.banco.nome_perfil = perfil.nome.clone();
-        self.banco.autocompletar = perfil.autocompletar_sql;
         // O ditado do perfil anterior fecha (o microfone e o modelo junto),
         // e os comandos falados seguem as opções do perfil novo.
         self.ditado.desligar();
@@ -622,6 +647,10 @@ impl Colmeia {
                         self.play.recarregar();
                     }
                     self.conexao = Conexao::Ligado;
+                    if !self.procurou_atualizacao && !self.demo {
+                        self.procurou_atualizacao = true;
+                        self.procurar_atualizacao(agora);
+                    }
                     linha_mudou = true;
                     for l in self.lousas.values_mut() {
                         l.recarregar(ctx);
@@ -635,6 +664,40 @@ impl Colmeia {
                         && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
                     {
                         p.tempo_agentes = *mostrar;
+                    }
+                    if let dados::Evento::PerfilMontador { perfil_id, ligado, .. } = &e
+                        && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
+                    {
+                        p.montador = *ligado;
+                    }
+                    if let dados::Evento::MontagemMontando { tarefa_id, montando, .. } = &e {
+                        if *montando {
+                            self.montando.insert(*tarefa_id);
+                        } else {
+                            self.montando.remove(tarefa_id);
+                        }
+                    }
+                    // A montagem de uma tarefa mudou: a página busca o deck de novo
+                    // (juntando a rajada) e a apresentação se atualiza no mesmo
+                    // slide, sem "Novidades".
+                    if let dados::Evento::MontagemMudou { tarefa_id, .. } = &e {
+                        self.montando.remove(tarefa_id);
+                        match self.apresentacao.as_mut() {
+                            Some(a) => a.atualizar_pelo_agente(ctx),
+                            None => {
+                                self.montagem_mudou_em.get_or_insert(agora);
+                            }
+                        }
+                    }
+                    // A pauta mudou (ordem, visto, daily apresentada): a página
+                    // busca de novo, juntando a rajada.
+                    if matches!(e, dados::Evento::PautaMudou { .. } | dados::Evento::DailyApresentada { .. }) {
+                        match self.apresentacao.as_mut() {
+                            Some(a) => a.atualizar_pelo_agente(ctx),
+                            None => {
+                                self.montagem_mudou_em.get_or_insert(agora);
+                            }
+                        }
                     }
                     if let dados::Evento::PerfilMascote { perfil_id, modelo, nome, .. } = &e
                         && let Some(p) = self.perfil.as_mut().filter(|p| p.id == *perfil_id)
@@ -674,6 +737,9 @@ impl Colmeia {
                             pacote,
                             api::EstadoVoz { estado: estado.clone(), baixados: *baixados, tamanho: *tamanho, erro: erro.clone(), caminho: String::new() },
                         );
+                    }
+                    if let dados::Evento::Atualizacao { estado, .. } = &e {
+                        self.atualizacao_mudou(estado.clone(), ctx);
                     }
                     if let dados::Evento::TelaAbrir { tarefa_id, agente_id, ditar, .. } = &e {
                         self.atender_abertura(*tarefa_id, *agente_id, ctx);
@@ -823,6 +889,28 @@ impl Colmeia {
         self.chamar_atencao(atencoes, ctx, agora);
     }
 
+    /// Aplica a rajada de montagem.mudou meio segundo depois do primeiro
+    /// aviso: a página do registro busca de novo uma vez (fora dela, só fica
+    /// marcada). Na apresentação o aviso já foi aplicado na hora.
+    fn aplicar_montagens_mudadas(&mut self, ctx: &egui::Context, agora: f64) {
+        const JUNTAR: f64 = 0.5;
+        let Some(desde) = self.montagem_mudou_em else { return };
+        if agora - desde < JUNTAR {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(JUNTAR - (agora - desde)));
+            return;
+        }
+        self.montagem_mudou_em = None;
+        if self.apresentacao.is_some() {
+            return;
+        }
+        if let Tela::Registro(aba) = self.tela {
+            let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+            self.registro.novidade(aba, perfil, ctx);
+        } else {
+            self.registro.marcar_suja();
+        }
+    }
+
     /// Um agente passou a precisar de você. Se ele não está na tela, aparece um
     /// aviso (vários em pouco tempo viram um só); com a janela sem foco, ela
     /// pede atenção ao sistema uma vez por lote.
@@ -959,6 +1047,7 @@ impl Colmeia {
             titulo: t.titulo.clone(),
             coluna: t.coluna,
             copia: t.em_copia,
+            escolha: None,
             erro: None,
         });
         if let Err(e) = api::remover_agente(id) {
@@ -1079,7 +1168,12 @@ impl Colmeia {
         let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) else {
             return;
         };
-        let foco = agente.filter(|a| t.agentes.iter().any(|x| x.id == *a)).or_else(|| t.agentes.first().map(|a| a.id)).unwrap_or(0);
+        // Sem agente pedido, o que está rodando; só então o primeiro.
+        let foco = agente
+            .filter(|a| t.agentes.iter().any(|x| x.id == *a))
+            .or_else(|| t.agentes.iter().find(|a| a.ativo).map(|a| a.id))
+            .or_else(|| t.agentes.first().map(|a| a.id))
+            .unwrap_or(0);
         let projeto = t.projeto_id;
         if !self.escopo.contem(projeto, &self.modelo.projetos) {
             self.escopo = Escopo::Projeto(projeto);
@@ -1089,7 +1183,9 @@ impl Colmeia {
         self.tarefa_na_tela = Some(id);
         self.aba = tarefa::Aba::Terminal;
         self.abelha.resumo_aberto = false;
-        self.compositor.focar = true;
+        // O teclado vai para o terminal do agente, não para a caixa de mensagem.
+        self.foco_pendente = (foco != 0).then_some(foco);
+        self.compositor.focar = foco == 0;
         self.voltar_para_lousa = None;
     }
 
@@ -1339,7 +1435,9 @@ impl Colmeia {
             ui.set_height(34.0);
             let perfil = self.perfil.as_ref().map(|p| p.nome.clone()).unwrap_or_default();
             let workspace_da_lousa = match self.tela {
-                Tela::Lousa(ws) | Tela::Conhecimento(ws) => self.modelo.projetos.iter().find(|p| p.workspace_id == ws).map(|p| p.workspace.clone()),
+                Tela::Lousa(ws) | Tela::Conhecimento(ws) | Tela::Rotinas(ws) => {
+                    self.modelo.projetos.iter().find(|p| p.workspace_id == ws).map(|p| p.workspace.clone())
+                }
                 _ => None,
             };
             let fps = format!("{} FPS", self.fps);
@@ -1376,11 +1474,15 @@ impl Colmeia {
                     ir = Some(Escopo::Perfil);
                 }
                 if migalha(ui, &ws)
-                    && let Tela::Lousa(id) | Tela::Conhecimento(id) = self.tela
+                    && let Tela::Lousa(id) | Tela::Conhecimento(id) | Tela::Rotinas(id) = self.tela
                 {
                     ir = Some(Escopo::Workspace(id));
                 }
-                let pagina = if matches!(self.tela, Tela::Conhecimento(_)) { "Conhecimento" } else { "Lousa" };
+                let pagina = match self.tela {
+                    Tela::Conhecimento(_) => "Conhecimento",
+                    Tela::Rotinas(_) => "Rotinas",
+                    _ => "Lousa",
+                };
                 ui.label(texto_forte(pagina, 15.0).color(p.texto));
                 if self.mostrar_fps {
                     medir(ui);
@@ -1488,7 +1590,7 @@ impl Colmeia {
         });
         if let Some(escopo) = ir {
             // Da lousa e dos bancos volta ao quadro; o registro só troca o escopo.
-            if matches!(self.tela, Tela::Lousa(_) | Tela::Conhecimento(_) | Tela::Banco) {
+            if matches!(self.tela, Tela::Lousa(_) | Tela::Conhecimento(_) | Tela::Rotinas(_) | Tela::Banco) {
                 self.tela = Tela::Quadro;
             }
             self.mudar_escopo(escopo);
@@ -1508,7 +1610,10 @@ impl Colmeia {
         let mut avisar = None;
         let mut avisar_play = None;
         let mut apresentar = false;
+        let mut slides = false;
         let mut mudar_tempo = None;
+        let mut mudar_montador = None;
+        let mut alternar_lousa = false;
         let mut barra_arranjo: Option<ArranjoBarra> = None;
         ui.horizontal(|ui| {
             ui.set_height(40.0);
@@ -1639,6 +1744,14 @@ impl Colmeia {
                                 apresentar = tema::botao_principal(ui, "Apresentar", true).on_hover_text("F5").clicked();
                                 ui.add_space(8.0);
                             }
+                            // A lousa da reunião no lugar da página (e a página de volta).
+                            let aberta = self.registro.lousa_da_reuniao.is_some();
+                            let rotulo = if aberta { "Página" } else { "Lousa da reunião" };
+                            let dica = if aberta { "Volta para a lista" } else { "O quadro da reunião: uma coluna por tarefa, montada pela Colmeia" };
+                            if tema::botao_secundario_com(ui, rotulo, pode).on_hover_text(dica).clicked() {
+                                alternar_lousa = true;
+                            }
+                            ui.add_space(8.0);
                             if arranjo.copiar
                                 && let Some(texto) = &texto
                                 && tema::botao_secundario_com(ui, "Copiar texto", pode).clicked()
@@ -1648,8 +1761,9 @@ impl Colmeia {
                             }
                         }
                         // A caixa do tempo fica na barra quando cabe; senão é o
-                        // primeiro item do "⋯" (que então aparece nas duas abas).
-                        if arranjo.mais {
+                        // primeiro item do "⋯". O "⋯" aparece sempre: o montador
+                        // da reunião mora nele.
+                        if arranjo.mais || true {
                             ui.add_space(8.0);
                             let mais = tema::botao_icone(ui, tema::Icone::Mais, 32.0);
                             let aberto = egui::Popup::is_id_open(ui.ctx(), egui::Id::new("menu-registro"));
@@ -1664,6 +1778,21 @@ impl Colmeia {
                                         mudar_tempo = Some(!tempo);
                                         ui.close();
                                     }
+                                    let montador = self.perfil.as_ref().is_some_and(|p| p.montador);
+                                    let r = if pode {
+                                        tema::opcao_menu(ui, "Montar a reunião com IA", montador)
+                                    } else {
+                                        tema::opcao_menu_com(ui, "Montar a reunião com IA", Some(if montador { "ligado" } else { "desligado" }), false)
+                                    };
+                                    if r {
+                                        mudar_montador = Some(!montador);
+                                        ui.close();
+                                    }
+                                    if tema::opcao_menu_com(ui, "Apresentar em slides", Some("Shift+F5"), self.registro.deck(aba).is_some() && !atualizando) {
+                                        slides = true;
+                                        ui.close();
+                                    }
+                                    linha_do_menu(ui);
                                     if !arranjo.copiar {
                                         if arranjo.caixa.is_none() {
                                             linha_do_menu(ui);
@@ -1715,11 +1844,12 @@ impl Colmeia {
                         // O Play do projeto em foco (num workspace ou em todos, não há um só),
                         // à esquerda do "+ Nova tarefa".
                         if !self.demo
-                            && let Some(projeto) = self.projeto_em_foco().map(|p| (p.id, p.nome.clone()))
+                            && let Some(projeto) = self.projeto_em_foco().map(|p| p.id)
                         {
                             ui.add_space(8.0);
                             let bytes = self.bytes.clone();
-                            if let Some((tipo, texto)) = self.play.botao(ui, &bytes, projeto.0, &projeto.1, 0, self.pode_mudar()) {
+                            let (nome, outros) = tarefa::outros_do_workspace(&self.modelo.projetos, projeto);
+                            if let Some((tipo, texto)) = self.play.botao(ui, &bytes, projeto, &nome, 0, self.pode_mudar(), &outros) {
                                 avisar_play = Some((tipo, texto));
                             }
                         }
@@ -1731,14 +1861,24 @@ impl Colmeia {
         if let Some(mostrar) = mudar_tempo {
             self.mudar_tempo(ui.ctx(), mostrar);
         }
+        if let Some(ligado) = mudar_montador {
+            self.mudar_montador(ui.ctx(), ligado);
+        }
+        if alternar_lousa && let Some(aba) = aba {
+            let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+            self.registro.alternar_lousa_da_reuniao(aba, perfil, &sistema::hoje());
+        }
         if let Some(texto) = avisar {
             self.avisar(TipoAviso::Neutro, texto, agora);
         }
         if let Some((tipo, texto)) = avisar_play {
             self.avisar(tipo, &texto, agora);
         }
-        if apresentar {
+        if slides {
             self.apresentar(ui.ctx(), Inicio::Capa, true);
+        }
+        if apresentar && let Some(aba) = aba {
+            self.apresentar_leitor(ui.ctx(), aba);
         }
     }
 
@@ -1749,7 +1889,15 @@ impl Colmeia {
         let medir = |t: &str, fonte: egui::FontId| ui.painter().layout_no_wrap(t.to_owned(), fonte, p_texto()).size().x;
         let espaco = ui.spacing().item_spacing.x;
         let pecas = PecasBarra {
-            apresentar: medir("Apresentar", tema::forte(13.5)) + 32.0 + 8.0 + espaco * 2.0,
+            // "Apresentar" e, ao lado, "Lousa da reunião" (ou "Página").
+            apresentar: medir("Apresentar", tema::forte(13.5))
+                + 32.0
+                + 8.0
+                + espaco * 2.0
+                + medir("Lousa da reunião", egui::FontId::proportional(13.0))
+                + 28.0
+                + 8.0
+                + espaco * 2.0,
             copiar: medir("Copiar texto", egui::FontId::proportional(13.0)) + 28.0 + 8.0 + espaco * 2.0,
             mais: 32.0 + 8.0 + espaco * 2.0,
             caixa: medir("Mostrar tempo dos agentes", egui::FontId::proportional(13.5)) + 24.0 + 20.0 + espaco * 2.0,
@@ -1859,6 +2007,21 @@ impl Colmeia {
         // Um pedido anterior ainda sem resposta fica com o valor de antes dele.
         let antes = self.tempo_pendente.take().map_or(antes, |(a, _)| a);
         self.tempo_pendente = Some((antes, recebe));
+    }
+
+    /// Liga ou desliga o montador da reunião com IA: muda aqui na hora e
+    /// grava no núcleo numa thread (o evento confirma; um erro avisa).
+    fn mudar_montador(&mut self, ctx: &egui::Context, ligado: bool) {
+        let Some(perfil) = self.perfil.as_mut() else { return };
+        if perfil.montador == ligado {
+            return;
+        }
+        perfil.montador = ligado;
+        let (id, ctx) = (perfil.id, ctx.clone());
+        std::thread::spawn(move || {
+            let _ = api::definir_montador(id, ligado);
+            ctx.request_repaint();
+        });
     }
 
     /// O ditado ligou ou desligou (aqui, em outra tela ou no fim do download).
@@ -2018,6 +2181,7 @@ impl Colmeia {
             Tela::Tarefa { id, foco } => lateral::Lugar::Tarefa { id, foco },
             Tela::Lousa(ws) => lateral::Lugar::Lousa(ws),
             Tela::Conhecimento(ws) => lateral::Lugar::Conhecimento(ws),
+            Tela::Rotinas(ws) => lateral::Lugar::Rotinas(ws),
             Tela::Banco => lateral::Lugar::Banco,
             Tela::Quadro | Tela::Registro(_) | Tela::Entrada(_) => lateral::Lugar::Quadro,
         };
@@ -2042,6 +2206,7 @@ impl Colmeia {
             uso: &self.modelo.uso,
             icones: &self.icones,
             sugestoes: &self.modelo.sugestoes,
+            atualizacao: &self.atualizacao,
         };
         let saida = self.lateral.mostrar(ui, &mut self.abelha, &vista);
         // Na tela de bancos, o miolo do painel é o painel dos bancos.
@@ -2069,6 +2234,12 @@ impl Colmeia {
                 Acao::Conhecimento(ws) => {
                     self.conhecimento.abrir(ws);
                     self.tela = Tela::Conhecimento(ws);
+                    self.abelha.resumo_aberto = false;
+                    self.filtro = None;
+                }
+                Acao::Rotinas(ws) => {
+                    self.rotinas.abrir(ws);
+                    self.tela = Tela::Rotinas(ws);
                     self.abelha.resumo_aberto = false;
                     self.filtro = None;
                 }
@@ -2134,6 +2305,17 @@ impl Colmeia {
                         self.dialogo = Some(Dialogo::Voz(Box::new(ajustes_voz::AjustesVoz::pergunta(p))));
                     }
                 }
+                // Lido de novo ao abrir: os agentes rodando agora mudam o que atualizar faz.
+                Acao::Atualizacao => {
+                    if let Ok(e) = api::ver_atualizacao() {
+                        self.atualizacao = e;
+                    }
+                    self.dialogo = Some(Dialogo::Atualizacao(dialogos::Atualizacao::new(self.atualizacao.clone())));
+                }
+                Acao::ProcurarAtualizacao(ligado) => match api::procurar_ao_abrir(ligado) {
+                    Ok(()) => self.atualizacao.procurar = ligado,
+                    Err(e) => self.erro(format!("Não consegui mudar a opção: {e}"), ctx.input(|i| i.time)),
+                },
             }
         }
         abelha_clicada
@@ -2201,7 +2383,10 @@ impl Colmeia {
     fn receber_respostas_pedido(&mut self, agora: f64) {
         while let Ok((id, resultado)) = self.respostas_pedido.1.try_recv() {
             let Some(estado) = self.pedidos_consulta.get_mut(&id) else { continue };
-            estado.enviando = false;
+            // Aceita, a consulta ainda roda no núcleo (até 30 s): o cartão
+            // fica em "Conectando…" até o evento de resolvida tirá-lo, sem
+            // deixar aprovar de novo um pedido que já saiu da fila.
+            estado.enviando = resultado.is_ok();
             match resultado {
                 Ok(()) => {}
                 // Senha errada: o pedido continua (mesmo prazo); o campo volta
@@ -2330,7 +2515,7 @@ impl Colmeia {
         }
         // Na lousa do workspace, F5 apresenta a lousa (Shift+F5: do item selecionado).
         if let Tela::Lousa(ws) = self.tela {
-            let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
+            let dono = api::DonoLousa::workspace(ws);
             let desde = self.lousas.get(&dono).and_then(|l| l.selecao.first().copied());
             if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F5)) {
                 self.apresentar_lousa(dono, desde, ctx);
@@ -2344,7 +2529,8 @@ impl Colmeia {
             if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F5)) {
                 self.apresentar(ctx, Inicio::Retomar, true);
             } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
-                self.apresentar(ctx, Inicio::Capa, true);
+                let aba = if let Tela::Registro(registro::Aba::Sprint) = self.tela { registro::Aba::Sprint } else { registro::Aba::Daily };
+                self.apresentar_leitor(ctx, aba);
             }
         }
         if let Tela::Registro(registro::Aba::Sprint) = self.tela
@@ -2478,6 +2664,35 @@ impl Colmeia {
         self.apresentacao = Some(Box::new(a));
     }
 
+    /// Abre o leitor da reunião em tela cheia (o "Apresentar" e o F5).
+    fn apresentar_leitor(&mut self, ctx: &egui::Context, aba: registro::Aba) {
+        if self.demo || self.apresentacao.is_some() || self.leitor_cheio.is_some() || self.registro.deck(aba).is_none() {
+            return;
+        }
+        if !matches!(self.tela, Tela::Registro(_)) {
+            self.tela = Tela::Registro(aba);
+        }
+        self.tela_cheia_antes = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !self.tela_cheia_antes {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+        self.abelha.resumo_aberto = false;
+        self.leitor_cheio = Some(aba);
+    }
+
+    /// Sai do leitor em tela cheia: a tela cheia volta como estava e a
+    /// página mostra a mesma tarefa.
+    fn sair_do_leitor(&mut self, ctx: &egui::Context) {
+        if self.leitor_cheio.take().is_none() {
+            return;
+        }
+        if !self.tela_cheia_antes {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        self.registro.marcar_suja();
+        ctx.request_repaint();
+    }
+
     /// Sai da apresentação: a nota pendente já foi salva; a tela cheia, o
     /// tema e a página voltam como estavam, e os avisos guardados aparecem.
     fn sair_da_apresentacao(&mut self, ctx: &egui::Context, agora: f64) {
@@ -2516,11 +2731,17 @@ impl Colmeia {
             a.lousa_mudou(dono.tarefa_id);
         }
         if novos == 0 {
+            if agente != 0 && !removidos.is_empty() {
+                let quem = self.modelo.tarefas.iter().flat_map(|t| &t.agentes).find(|a| a.id == agente).map_or("O agente".to_string(), |a| a.nome());
+                let itens = if removidos.len() == 1 { "1 item".to_string() } else { format!("{} itens", removidos.len()) };
+                self.avisar(TipoAviso::Neutro, format!("{quem} apagou {itens} da lousa"), agora);
+            }
             return;
         }
         let visivel = match self.tela {
             Tela::Lousa(ws) => dono.workspace_id == ws,
             Tela::Tarefa { id, .. } => dono.tarefa_id == id && self.na_aba(id, tarefa::Aba::Lousa),
+            Tela::Registro(_) => dono.da_reuniao() && self.registro.lousa_da_reuniao == Some(dono),
             _ => false,
         };
         if !visivel {
@@ -2540,7 +2761,7 @@ impl Colmeia {
         self.tela = Tela::Lousa(workspace);
         // Aberta, a lousa já tem o teclado (colar um print logo de cara);
         // uma vez só, sem pedir foco a cada quadro.
-        let dono = api::DonoLousa { workspace_id: workspace, tarefa_id: 0 };
+        let dono = api::DonoLousa::workspace(workspace);
         self.lousa_ativa_ao_abrir = Some(dono);
         self.voltar_para_lousa = None;
         self.abelha.resumo_aberto = false;
@@ -2819,6 +3040,39 @@ impl Colmeia {
         }
     }
 
+    /// Ao conectar, uma vez: o núcleo olha a versão mais nova (a resposta vem
+    /// pelo evento) e diz como foi a última troca, se houve.
+    fn procurar_atualizacao(&mut self, agora: f64) {
+        match api::procurar_atualizacao() {
+            Ok(mut e) => {
+                let aviso = std::mem::take(&mut e.aviso);
+                self.atualizacao = e;
+                if !aviso.is_empty() {
+                    let tipo = if aviso.contains("voltou") { TipoAviso::Alerta } else { TipoAviso::Neutro };
+                    self.avisar(tipo, &aviso, agora);
+                }
+            }
+            // Um núcleo de antes da atualização não tem a rota: nada a mostrar.
+            Err(e) => eprintln!("procurando a versão nova: {e}"),
+        }
+    }
+
+    /// A versão nova mudou de estado. Reiniciando, a janela fecha: a troca
+    /// abre a tela da versão nova sozinha.
+    fn atualizacao_mudou(&mut self, e: api::EstadoAtualizacao, ctx: &egui::Context) {
+        if let Some(Dialogo::Atualizacao(d)) = &mut self.dialogo {
+            d.estado = e.clone();
+        }
+        if e.estado == "reiniciando" {
+            self.pode_fechar = true;
+            for l in self.lousas.values_mut() {
+                l.gravar_ja();
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        self.atualizacao = e;
+    }
+
     /// Fechar a janela não para os agentes: com algum rodando, a Colmeia pergunta.
     fn ao_fechar(&mut self, ctx: &egui::Context) {
         // Fechar a janela grava a lousa na hora (esperando a resposta).
@@ -3050,8 +3304,8 @@ impl eframe::App for Colmeia {
         if self.vigia_janela.is_none() {
             self.vigia_janela = Some(visivel::vigiar(frame, self.perfil_atual.clone()).is_ok());
         }
-        // Fora do X11, minimizar ou voltar chega como evento da janela (há um quadro nessa hora).
-        let minimizada = ui.input(|i| i.viewport().minimized.unwrap_or(false));
+        // Fora do X11, minimizar, perder o foco ou voltar chega como evento da janela (há um quadro nessa hora).
+        let minimizada = ui.input(|i| i.viewport().minimized.unwrap_or(false) || !i.viewport().focused.unwrap_or(true));
         if self.vigia_janela == Some(false) && minimizada != self.minimizada {
             self.minimizada = minimizada;
             if let Some(p) = &self.perfil {
@@ -3080,6 +3334,7 @@ impl eframe::App for Colmeia {
             return;
         }
         self.receber_eventos(&ctx, agora);
+        self.aplicar_montagens_mudadas(&ctx, agora);
         self.receber_tempo(agora);
         self.receber_ditado(agora);
         self.receber_falada(&ctx, agora);
@@ -3090,6 +3345,43 @@ impl eframe::App for Colmeia {
         self.ajustar_ritmos();
         self.ancora_aviso = None;
         self.avisar_tela(&ctx);
+
+        // O leitor em tela cheia: a pauta e a tarefa, sem barra lateral nem topo.
+        if let Some(aba) = self.leitor_cheio {
+            let mut pedido = None;
+            let mut acoes = Vec::new();
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.fundo)).show(ui, |ui| {
+                self.favo.desenhar(ui.painter(), ui.max_rect());
+                let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+                self.registro.montando = self.montando.clone();
+                self.registro.conectado = self.pode_mudar();
+                (acoes, pedido) = self.registro.mostrar_cheio(ui, aba, perfil, self.escopo.recorte());
+            });
+            for acao in acoes {
+                match acao {
+                    registro::Acao::AbrirTarefa { tarefa, agente, .. } => {
+                        self.sair_do_leitor(&ctx);
+                        self.abrir_tarefa(tarefa, agente);
+                    }
+                    registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
+                    registro::Acao::IrParaQuadro | registro::Acao::Reabrir(_) | registro::Acao::Recorte(_) => {}
+                }
+            }
+            match pedido {
+                Some(registro::PedidoCheio::Sair) => self.sair_do_leitor(&ctx),
+                Some(registro::PedidoCheio::Lousa) => {
+                    self.sair_do_leitor(&ctx);
+                    let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
+                    if self.registro.lousa_da_reuniao.is_none() {
+                        self.registro.alternar_lousa_da_reuniao(aba, perfil, &sistema::hoje());
+                    }
+                }
+                None => {}
+            }
+            self.andar_lousas(&ctx, agora);
+            self.atualizar_titulo(&ctx);
+            return;
+        }
 
         // A apresentação ocupa a janela inteira: sem barra lateral, topo nem avisos
         // (a tela está sendo compartilhada); os avisos guardados aparecem ao sair.
@@ -3235,10 +3527,19 @@ impl eframe::App for Colmeia {
                     let perfil = self.perfil.as_ref().map_or(0, |p| p.id);
                     self.registro.conectado = self.pode_mudar();
                     self.registro.mostrar_tempo = self.perfil.as_ref().is_some_and(|p| p.tempo_agentes);
-                    // O conteúdo das páginas tem as próprias margens (24 nas laterais).
-                    ui.add_space(4.0);
-                    acoes_linha =
-                        self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos, &self.modelo.tarefas, &self.modelo.frases);
+                    self.registro.montando = self.montando.clone();
+                    if let Some(dono) = self.registro.lousa_da_reuniao.filter(|_| matches!(aba, registro::Aba::Daily | registro::Aba::Sprint)) {
+                        // A lousa da reunião no lugar da página, até a borda do cartão.
+                        let topo = ui.cursor().top();
+                        let area = egui::Rect::from_min_max(egui::pos2(cartao.left() + 6.0, topo), cartao.max - egui::vec2(6.0, 6.0));
+                        self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
+                        acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
+                    } else {
+                        // O conteúdo das páginas tem as próprias margens (24 nas laterais).
+                        ui.add_space(4.0);
+                        acoes_linha =
+                            self.registro.mostrar(ui, aba, perfil, self.escopo.recorte(), &self.modelo.projetos, &self.modelo.tarefas, &self.modelo.frases);
+                    }
                 }
                 Tela::Tarefa { id, foco } => self.painel_tarefa(ui, id, foco, agora),
                 Tela::Lousa(ws) => {
@@ -3246,7 +3547,7 @@ impl eframe::App for Colmeia {
                     // para dentro, os cantos dela não passam da curva do cartão.
                     let topo = ui.max_rect().top() - 6.0;
                     let area = egui::Rect::from_min_max(egui::pos2(cartao.left() + 6.0, topo), cartao.max - egui::vec2(6.0, 6.0));
-                    let dono = api::DonoLousa { workspace_id: ws, tarefa_id: 0 };
+                    let dono = api::DonoLousa::workspace(ws);
                     // Os avisos da lousa ficam centrados nela, como na da tarefa.
                     self.ancora_aviso = Some(area.center_bottom() - egui::vec2(0.0, 16.0));
                     acoes_lousa = Some((dono, self.mostrar_lousa(ui, area, dono, agora)));
@@ -3269,6 +3570,13 @@ impl eframe::App for Colmeia {
                         None => self.tela = Tela::Quadro,
                     }
                 }
+                Tela::Rotinas(ws) => match self.modelo.projetos.iter().find(|p| p.workspace_id == ws) {
+                    Some(primeiro) => {
+                        let cx = rotinas::Contexto { nome: &primeiro.workspace, versao: self.modelo.versao_rotinas, pode: self.pode_mudar() };
+                        self.rotinas.mostrar(ui, &cx);
+                    }
+                    None => self.tela = Tela::Quadro,
+                },
                 Tela::Banco => {
                     let modelo = &self.modelo;
                     let nomes = |agente: i64| {
@@ -3295,15 +3603,6 @@ impl eframe::App for Colmeia {
                 banco::Acao::AbrirTarefa { tarefa, agente } => self.abrir_tarefa(tarefa, Some(agente)),
                 banco::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
                 banco::Acao::Responder { id, resposta } => respostas.push((id, resposta)),
-                banco::Acao::Autocompletar(ligado) => {
-                    if let Some(perfil) = &mut self.perfil {
-                        perfil.autocompletar_sql = ligado;
-                        let id = perfil.id;
-                        std::thread::spawn(move || {
-                            let _ = api::definir_autocompletar_sql(id, ligado);
-                        });
-                    }
-                }
             }
         }
         if matches!(self.tela, Tela::Banco) {
@@ -3316,6 +3615,27 @@ impl eframe::App for Colmeia {
                 quadro::Acao::Moveu(id, coluna) => self.mover(id, coluna, &ctx, agora),
                 quadro::Acao::NovaNaColuna(coluna) => self.nova_tarefa(coluna),
                 quadro::Acao::VerHistorico => self.tela = Tela::Registro(registro::Aba::Historico),
+                quadro::Acao::Renomear(id) => {
+                    if let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) {
+                        self.dialogo = Some(Dialogo::RenomearTarefa { id, titulo: t.titulo.clone(), original: t.titulo.clone(), erro: None });
+                    }
+                }
+                quadro::Acao::Transferir(id) => {
+                    if let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) {
+                        let projetos = self.modelo.projetos.iter().filter(|p| p.id != t.projeto_id).cloned().collect();
+                        self.dialogo = Some(Dialogo::TransferirTarefa(dialogos::TransferirTarefa {
+                            id,
+                            titulo: t.titulo.clone(),
+                            projeto: t.projeto.clone(),
+                            branch: t.branch.clone(),
+                            copia: t.em_copia,
+                            agentes: t.agentes.iter().map(|a| a.id).collect(),
+                            projetos,
+                            escolha: None,
+                            erro: None,
+                        }));
+                    }
+                }
                 quadro::Acao::Remover(id) if self.demo => self.modelo.tarefas.retain(|t| t.id != id),
                 quadro::Acao::Remover(id) => {
                     if let Some(t) = self.modelo.tarefas.iter().find(|t| t.id == id) {
@@ -3331,7 +3651,7 @@ impl eframe::App for Colmeia {
                     if lousa {
                         // O agente mexeu na lousa: a tarefa abre na Lousa, enquadrada no que ele pôs.
                         self.mudar_aba(tarefa, tarefa::Aba::Lousa, &ctx);
-                        let dono = api::DonoLousa { workspace_id: 0, tarefa_id: tarefa };
+                        let dono = api::DonoLousa::tarefa(tarefa);
                         self.lousas.entry(dono).or_insert_with(|| lousa::Lousa::nova(&ctx, dono, agora)).enquadrar_agente = true;
                     }
                 }
@@ -3339,9 +3659,6 @@ impl eframe::App for Colmeia {
                 registro::Acao::Reabrir(id) => self.reabrir(id, &ctx, agora),
                 registro::Acao::Recorte(r) => self.mudar_escopo(Escopo::do_recorte(r)),
                 registro::Acao::Avisar(tipo, texto) => self.avisar(tipo, texto, agora),
-                registro::Acao::Apresentar { deck, periodo, tarefa } => {
-                    self.abrir_apresentacao(&ctx, Some(*deck), periodo, tarefa.map_or(Inicio::Capa, Inicio::Tarefa), false)
-                }
             }
         }
         if let Some((dono, acoes)) = acoes_lousa {

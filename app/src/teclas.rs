@@ -46,20 +46,29 @@ impl Composicao {
     /// Tira da fila os Enter que não são quebra de linha (antes de o campo
     /// ver) e diz se algum deles envia. Os de quebra ficam para o campo, como
     /// Shift+Enter (a tecla que ele conhece).
-    /// Um Enter no mesmo quadro de um evento de IME também é ignorado.
+    /// Um Enter no mesmo quadro de uma composição (Preedit com texto ou
+    /// Commit) é o que a confirma: também é ignorado. Texto digitado, outra
+    /// tecla, um Preedit vazio ou qualquer outro aviso do IME encerram a
+    /// composição, porque nem toda integração manda o Commit (o ibus no X11
+    /// desiste de um acento sem avisar) e, sem isso, o Enter ficaria preso.
     pub fn tirar_enters(&mut self, eventos: &mut Vec<Event>) -> bool {
-        let mut ime_no_quadro = false;
+        let mut compondo_no_quadro = false;
         for e in eventos.iter() {
-            if let Event::Ime(ime) = e {
-                ime_no_quadro = true;
-                match ime {
-                    egui::ImeEvent::Preedit { text, .. } => self.compondo = !text.is_empty(),
-                    egui::ImeEvent::Commit(_) => self.compondo = false,
-                    _ => {}
+            match e {
+                Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                    self.compondo = !text.is_empty();
+                    compondo_no_quadro |= self.compondo;
                 }
+                Event::Ime(egui::ImeEvent::Commit(_)) => {
+                    self.compondo = false;
+                    compondo_no_quadro = true;
+                }
+                Event::Ime(_) | Event::Text(_) => self.compondo = false,
+                Event::Key { key, pressed: true, .. } if *key != Key::Enter => self.compondo = false,
+                _ => {}
             }
         }
-        let compondo = self.compondo || ime_no_quadro;
+        let compondo = self.compondo || compondo_no_quadro;
         let mut enviar = false;
         eventos.retain(|e| match e {
             Event::Key { key: Key::Enter, pressed, modifiers, .. } => match regra_enter(*modifiers, compondo) {
@@ -131,6 +140,33 @@ mod testes {
         assert!(!c.tirar_enters(&mut eventos));
         assert!(!c.compondo);
         let mut eventos = vec![enter(Modifiers::NONE)];
+        assert!(c.tirar_enters(&mut eventos));
+    }
+
+    #[test]
+    fn composicao_sem_commit_se_solta_com_o_que_vem_depois() {
+        // Preedit sem Commit (o ibus no X11 desistindo do acento): texto
+        // digitado, outra tecla ou um Preedit vazio encerram, e o Enter volta.
+        let tecla_a = Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let vazio = Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None });
+        for solta in [Event::Text("a".into()), tecla_a, vazio] {
+            let mut c = Composicao::default();
+            let mut eventos = vec![Event::Ime(egui::ImeEvent::Preedit { text: "´".into(), active_range_chars: None })];
+            assert!(!c.tirar_enters(&mut eventos));
+            assert!(c.compondo);
+            let mut eventos = vec![solta];
+            assert!(!c.tirar_enters(&mut eventos));
+            assert!(!c.compondo);
+            let mut eventos = vec![enter(Modifiers::NONE)];
+            assert!(c.tirar_enters(&mut eventos));
+        }
+    }
+
+    #[test]
+    fn preedit_vazio_no_mesmo_quadro_nao_segura_o_enter() {
+        let mut c = Composicao::default();
+        let vazio = Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None });
+        let mut eventos = vec![vazio, enter(Modifiers::NONE)];
         assert!(c.tirar_enters(&mut eventos));
     }
 }

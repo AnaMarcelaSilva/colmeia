@@ -6,17 +6,21 @@
 //! gaveta só redesenha com entrada ou resposta: nada roda por tempo.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, TextureHandle, pos2, vec2};
 
 use crate::api;
+use crate::lousa::{desenho, markdown};
 use crate::registro;
 use crate::sistema;
 use crate::tema::{self, cores, forte};
 
 const ALTURA_LINHA: f32 = 26.0;
 const ALTURA_LINHA_TEXTO: f32 = 18.0;
+/// Margem do markdown lido dentro da caixa.
+const RECUO_LEITURA: f32 = 20.0;
 
 enum EstadoPasta {
     Carregando,
@@ -36,6 +40,10 @@ struct PreviaAberta {
     /// A linha pedida (a busca por texto): marcada e rolada até ela uma vez.
     linha: Option<usize>,
     rolar: bool,
+    /// Markdown formatado em vez do código.
+    ler: bool,
+    /// A leitura montada, com a largura e o fundo do tema em que foi feita.
+    lido: Option<(u32, Color32, Arc<desenho::Composicao>)>,
 }
 
 enum Resposta {
@@ -51,6 +59,8 @@ pub enum PedidoGaveta {
     AbrirNoEditor(String, Option<usize>),
     AbrirNoSistema(String),
     Citar(String),
+    /// Um endereço https (a página do PR no GitHub).
+    AbrirLink(String),
 }
 
 /// Uma linha da árvore, já achatada na ordem em que aparece.
@@ -70,6 +80,8 @@ pub struct Arvore {
     abertas: HashSet<String>,
     cursor: Option<String>,
     previa: Option<PreviaAberta>,
+    /// O markdown abre formatado (a última escolha entre Ler e Código).
+    ler_markdown: bool,
     /// Pedir o teclado para a gaveta (uma vez só).
     pub focar: bool,
     canal: (Sender<Resposta>, Receiver<Resposta>),
@@ -85,7 +97,16 @@ fn pai(caminho: &str) -> Option<&str> {
 
 impl Arvore {
     pub fn nova(ctx: &egui::Context, tarefa: i64) -> Arvore {
-        let mut a = Arvore { tarefa, pastas: HashMap::new(), abertas: HashSet::new(), cursor: None, previa: None, focar: true, canal: mpsc::channel() };
+        let mut a = Arvore {
+            tarefa,
+            pastas: HashMap::new(),
+            abertas: HashSet::new(),
+            cursor: None,
+            previa: None,
+            ler_markdown: true,
+            focar: true,
+            canal: mpsc::channel(),
+        };
         a.pedir_pasta(ctx, String::new());
         a
     }
@@ -125,7 +146,9 @@ impl Arvore {
     /// Abre o arquivo e, com `linha`, marca e rola até ela.
     pub fn abrir_na_linha(&mut self, ctx: &egui::Context, caminho: &str, linha: Option<usize>, mostrar: bool) {
         self.cursor = Some(caminho.to_string());
-        self.previa = Some(PreviaAberta { caminho: caminho.to_string(), estado: EstadoPrevia::Carregando, linha, rolar: linha.is_some() });
+        // Aberto numa linha (a busca): o código, que tem o número da linha.
+        let ler = self.ler_markdown && linha.is_none();
+        self.previa = Some(PreviaAberta { caminho: caminho.to_string(), estado: EstadoPrevia::Carregando, linha, rolar: linha.is_some(), ler, lido: None });
         let (tarefa, caminho) = (self.tarefa, caminho.to_string());
         registro::em_segundo_plano(&self.canal.0, ctx, move || {
             let r = api::ver_arquivo(tarefa, &caminho, mostrar);
@@ -302,14 +325,19 @@ impl Arvore {
         });
         ui.add_space(8.0 - ui.spacing().item_spacing.y);
         let topo = ui.cursor().top();
-        let saida = egui::ScrollArea::vertical().id_salt(("arvore", self.tarefa)).auto_shrink(false).show_rows(ui, ALTURA_LINHA, linhas.len(), |ui, faixa| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for linha in &linhas[faixa] {
-                if let Some(pg) = self.linha(ui, linha, &ctx, id_foco, mudadas) {
-                    pedido = Some(pg);
+        let saida = tema::linhas_coladas(
+            ui,
+            egui::ScrollArea::vertical().id_salt(("arvore", self.tarefa)).auto_shrink(false),
+            ALTURA_LINHA,
+            linhas.len(),
+            |ui, faixa| {
+                for linha in &linhas[faixa] {
+                    if let Some(pg) = self.linha(ui, linha, &ctx, id_foco, mudadas) {
+                        pedido = Some(pg);
+                    }
                 }
-            }
-        });
+            },
+        );
         let area = Rect::from_min_max(pos2(saida.inner_rect.left(), topo), saida.inner_rect.right_bottom());
         registro::sombra_rolagem(ui.painter(), area, saida.state.offset.y);
         pedido
@@ -427,13 +455,36 @@ impl Arvore {
         }
     }
 
+    /// O markdown aberto, formatado na `largura`; refeito só quando ela ou o
+    /// tema mudam. None quando não é markdown ou está no código.
+    fn leitura(&mut self, pintor: &egui::Painter, largura: f32) -> Option<Arc<desenho::Composicao>> {
+        let aberta = self.previa.as_mut().filter(|a| a.ler && markdown_pelo_nome(&a.caminho))?;
+        let EstadoPrevia::Pronta { previa, .. } = &aberta.estado else { return None };
+        if previa.tipo != "texto" {
+            return None;
+        }
+        let largura = largura.max(80.0);
+        let chave = (largura as u32, cores().fundo);
+        if let Some((l, f, c)) = &aberta.lido
+            && (*l, *f) == chave
+        {
+            return Some(c.clone());
+        }
+        let c = Arc::new(desenho::compor_markdown(pintor, &markdown::ler(&previa.texto), desenho::tinta_da_tela(), largura, 1.0));
+        aberta.lido = Some((chave.0, chave.1, c.clone()));
+        Some(c)
+    }
+
     fn coluna_previa(&mut self, ui: &mut egui::Ui, editor: Option<&str>) -> Option<PedidoGaveta> {
         let p = cores();
         let ctx = ui.ctx().clone();
         let mut pedido = None;
         // Rola até a linha pedida uma vez, quando o texto chega.
         let rolar = self.previa.as_mut().is_some_and(|p| matches!(p.estado, EstadoPrevia::Pronta { .. }) && std::mem::take(&mut p.rolar));
+        let lido = self.leitura(ui.painter(), ui.max_rect().width() - 12.0 - 2.0 * RECUO_LEITURA);
         let Some(aberta) = &self.previa else { return None };
+        let e_markdown = markdown_pelo_nome(&aberta.caminho) && matches!(&aberta.estado, EstadoPrevia::Pronta { previa, .. } if previa.tipo == "texto");
+        let mut trocar_leitura = None;
         let aberta_linha = aberta.linha;
         let caminho = aberta.caminho.clone();
         let nome = caminho.rsplit('/').next().unwrap_or(&caminho).to_string();
@@ -443,7 +494,7 @@ impl Arvore {
         // Cabeçalho: o caminho, o nome, o que é e o ×.
         ui.horizontal(|ui| {
             ui.set_height(40.0);
-            let largura = ui.available_width() - 28.0 - 24.0;
+            let largura = ui.available_width() - 28.0 - 24.0 - if e_markdown { LARGURA_LER_CODIGO } else { 0.0 };
             let (r, _) = ui.allocate_exact_size(vec2(largura.max(40.0), 40.0), Sense::hover());
             let pintor = ui.painter();
             let g = pintor.layout_no_wrap(nome.clone(), forte(14.0), p.texto);
@@ -467,6 +518,9 @@ impl Arvore {
                 _ => String::new(),
             };
             pintor.text(r.min + vec2(0.0, 22.0), Align2::LEFT_TOP, meta, FontId::proportional(12.0), p.suave);
+            if e_markdown && let Some(i) = tema::segmentado(ui, &["Ler", "Código"], usize::from(!aberta.ler)) {
+                trocar_leitura = Some(i == 0);
+            }
             if tema::botao_icone(ui, tema::Icone::Fechar, 28.0).on_hover_text("Fechar a pré-visualização (Esc)").clicked() {
                 fechar = true;
             }
@@ -488,7 +542,10 @@ impl Arvore {
                 absoluto = previa.caminho_absoluto.clone();
                 cortado = previa.cortado;
                 match previa.tipo.as_str() {
-                    "texto" => texto(ui, corpo, linhas, previa.cortado, &caminho, aberta_linha, rolar),
+                    "texto" => match &lido {
+                        Some(c) => leitura(ui, corpo, c, previa.cortado, &caminho),
+                        None => texto(ui, corpo, linhas, previa.cortado, &caminho, aberta_linha, rolar),
+                    },
                     "imagem" => {
                         ui.painter().rect(corpo, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie, Stroke::NONE, StrokeKind::Inside);
                         match imagem {
@@ -560,10 +617,42 @@ impl Arvore {
         if fechar {
             self.previa = None;
         }
+        if let Some(ler) = trocar_leitura
+            && let Some(aberta) = self.previa.as_mut()
+        {
+            aberta.ler = ler;
+            self.ler_markdown = ler;
+        }
         if mostrar_mesmo_assim {
             self.abrir_previa(&ctx, &caminho, true);
         }
         pedido
+    }
+}
+
+/// Espaço do "Ler | Código" no cabeçalho.
+const LARGURA_LER_CODIGO: f32 = 140.0;
+
+fn markdown_pelo_nome(caminho: &str) -> bool {
+    let nome = caminho.rsplit('/').next().unwrap_or(caminho).to_ascii_lowercase();
+    nome.ends_with(".md") || nome.ends_with(".markdown")
+}
+
+/// O markdown lido: títulos, listas, caixas, tabelas e código formatados,
+/// com rolagem. Links e imagens ficam como texto (nada abre a rede).
+fn leitura(ui: &mut egui::Ui, corpo: Rect, c: &desenho::Composicao, cortado: bool, caminho: &str) {
+    let p = cores();
+    ui.painter().rect(corpo, CornerRadius::same(tema::RAIO_CONTROLE), p.fundo, Stroke::new(1.0, p.borda), StrokeKind::Inside);
+    let faixa_corte = if cortado { 32.0 } else { 0.0 };
+    let area = Rect::from_min_max(corpo.min + vec2(1.0, 1.0), corpo.max - vec2(1.0, faixa_corte + 1.0));
+    let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
+    egui::ScrollArea::vertical().id_salt(("previa-ler", caminho)).auto_shrink(false).show(&mut filho, |ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), c.altura + 2.0 * RECUO_LEITURA), Sense::hover());
+        let origem = r.min.to_vec2() + vec2(RECUO_LEITURA, RECUO_LEITURA);
+        desenho::pintar_pecas(ui.painter(), origem, &c.pecas, p.texto, ui.clip_rect().bottom());
+    });
+    if cortado {
+        faixa_cortado(ui, corpo, faixa_corte);
     }
 }
 
@@ -589,8 +678,7 @@ fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, camin
         // A linha achada fica no terço de cima.
         rolagem = rolagem.vertical_scroll_offset((n.saturating_sub(1) as f32 * ALTURA_LINHA_TEXTO - area.height() / 3.0).max(0.0));
     }
-    rolagem.show_rows(&mut filho, ALTURA_LINHA_TEXTO, linhas.len(), |ui, faixa| {
-        ui.spacing_mut().item_spacing.y = 0.0;
+    tema::linhas_coladas(&mut filho, rolagem, ALTURA_LINHA_TEXTO, linhas.len(), |ui, faixa| {
         for n in faixa {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().max(calha + 8.0), ALTURA_LINHA_TEXTO), Sense::hover());
             if alvo == Some(n + 1) {
@@ -607,11 +695,17 @@ fn texto(ui: &mut egui::Ui, corpo: Rect, linhas: &[String], cortado: bool, camin
         }
     });
     if cortado {
-        let faixa = Rect::from_min_max(pos2(corpo.left(), corpo.bottom() - faixa_corte), corpo.max);
-        ui.painter().rect_filled(faixa, CornerRadius { nw: 0, ne: 0, sw: tema::RAIO_CONTROLE, se: tema::RAIO_CONTROLE }, p.superficie);
-        let g = ui.painter().layout_no_wrap("Mostrando os primeiros 256 KB · abra no editor para ver tudo".into(), FontId::proportional(12.5), p.texto);
-        ui.painter().galley(pos2(faixa.left() + 12.0, faixa.center().y - g.size().y / 2.0), g, Color32::WHITE);
+        faixa_cortado(ui, corpo, faixa_corte);
     }
+}
+
+/// A faixa embaixo do arquivo que veio cortado.
+fn faixa_cortado(ui: &egui::Ui, corpo: Rect, altura: f32) {
+    let p = cores();
+    let faixa = Rect::from_min_max(pos2(corpo.left(), corpo.bottom() - altura), corpo.max);
+    ui.painter().rect_filled(faixa, CornerRadius { nw: 0, ne: 0, sw: tema::RAIO_CONTROLE, se: tema::RAIO_CONTROLE }, p.superficie);
+    let g = ui.painter().layout_no_wrap("Mostrando os primeiros 256 KB · abra no editor para ver tudo".into(), FontId::proportional(12.5), p.texto);
+    ui.painter().galley(pos2(faixa.left() + 12.0, faixa.center().y - g.size().y / 2.0), g, Color32::WHITE);
 }
 
 /// A cor da letra da mudança: A novo, M mudou, D apagado.
@@ -690,7 +784,16 @@ mod testes {
 
     #[test]
     fn arvore_achata_so_as_pastas_abertas() {
-        let mut a = Arvore { tarefa: 1, pastas: HashMap::new(), abertas: HashSet::new(), cursor: None, previa: None, focar: false, canal: mpsc::channel() };
+        let mut a = Arvore {
+            tarefa: 1,
+            pastas: HashMap::new(),
+            abertas: HashSet::new(),
+            cursor: None,
+            previa: None,
+            ler_markdown: true,
+            focar: false,
+            canal: mpsc::channel(),
+        };
         assert_eq!(a.linhas(), vec![Linha::Carregando { nivel: 0 }]);
         let mut git = entrada(".git", true);
         git.ignorada = true;
@@ -709,6 +812,14 @@ mod testes {
         assert_eq!(a.linhas()[2], Linha::Vazia { nivel: 1 });
         assert_eq!(pai("src/main.rs"), Some("src"));
         assert_eq!(pai("README.md"), Some(""));
+    }
+
+    #[test]
+    fn markdown_pelo_final_do_nome() {
+        assert!(markdown_pelo_nome("docs/LEIAME.md"));
+        assert!(markdown_pelo_nome("notas.Markdown"));
+        assert!(!markdown_pelo_nome("md/config.toml"));
+        assert!(!markdown_pelo_nome("mdx"));
     }
 
     #[test]

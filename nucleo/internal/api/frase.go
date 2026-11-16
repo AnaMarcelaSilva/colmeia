@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/dados"
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/formato"
 )
 
 // A frase da reunião: quando a tarefa entra em Revisão ou Concluído, o núcleo
@@ -30,6 +31,9 @@ type fraseEmCurso struct {
 	pedido int64
 	perfil int64
 	timer  *time.Timer
+	// Você concluiu a tarefa: com a frase pronta (ou o prazo vencido), os
+	// agentes dela são removidos.
+	removerAgentes bool
 }
 
 type frases struct {
@@ -91,7 +95,13 @@ func (s *Servidor) aoGravarParaFrase(e dados.Evento, m map[string]any) {
 		}
 		lerDados(e, &antes)
 		if (t.Coluna == "revisao" || t.Coluna == "concluido") && antes.ColunaAntes != t.Coluna {
-			s.frases.rodar(func() { s.pedirFrase(e.Escopo.Perfil, t.ID) })
+			// Indo ao Concluído (por você ou pelo agente a seu pedido): os agentes
+			// saem logo depois da frase, como no Remover de cada um (a linha do
+			// tempo guarda o que fizeram). O agente que conclui pela ferramenta
+			// ainda recebe a resposta dela e o pedido da frase antes de sair.
+			origem, _ := m["origem"].(string)
+			remover := t.Coluna == "concluido" && (origem == dados.OrigemVoce || origem == dados.OrigemAgente)
+			s.frases.rodar(func() { s.pedirFrase(e.Escopo.Perfil, t.ID, remover) })
 		}
 	case "pedido.respondido", "pedido.falhou", "pedido.cancelado":
 		pedido, _ := m["pedido_id"].(int64)
@@ -111,18 +121,27 @@ func textoDoPedidoDeFrase(coluna string) string {
 	if coluna == "concluido" {
 		onde = "Concluído"
 	}
-	return "A tarefa foi para " + onde + ". Escreva uma frase curta para eu falar na reunião, dizendo o que foi feito " +
-		"e o resultado, em linguagem simples, sem termos técnicos (sem nomes de arquivo, função, commit, tabela ou SQL)."
+	return formato.PedidoDaily(onde)
 }
 
-func (s *Servidor) pedirFrase(perfil, tarefa int64) {
+func (s *Servidor) pedirFrase(perfil, tarefa int64, removerAgentes bool) {
 	ctx := context.Background()
 	s.frases.mu.Lock()
-	_, ja := s.frases.emCurso[tarefa]
+	em, ja := s.frases.emCurso[tarefa]
+	if ja && removerAgentes {
+		em.removerAgentes = true
+	}
 	s.frases.mu.Unlock()
 	if ja {
 		return
 	}
+	// Sem pedido ao agente (frase já gravada, montada ou erro), a remoção é agora.
+	pediu := false
+	defer func() {
+		if removerAgentes && !pediu {
+			s.removerAgentesSeConcluida(ctx, tarefa)
+		}
+	}()
 	nota, err := s.Banco.Nota(ctx, tarefa, "daily", hoje())
 	if err != nil {
 		return
@@ -155,8 +174,9 @@ func (s *Servidor) pedirFrase(perfil, tarefa int64) {
 		s.frases.mu.Unlock()
 		return
 	}
-	s.frases.emCurso[tarefa] = &fraseEmCurso{pedido: p.ID, perfil: perfil,
+	s.frases.emCurso[tarefa] = &fraseEmCurso{pedido: p.ID, perfil: perfil, removerAgentes: removerAgentes,
 		timer: time.AfterFunc(PrazoFrase, func() { s.frases.rodar(func() { s.terminarFrase(tarefa) }) })}
+	pediu = true
 	s.frases.mu.Unlock()
 	s.Avisos.Publicar(perfil, map[string]any{"tipo": "tarefa.frase", "tarefa_id": tarefa, "escrevendo": true})
 	s.tentarEntregar(agente)
@@ -191,6 +211,9 @@ func (s *Servidor) terminarFrase(tarefa int64) {
 	}
 	ctx := context.Background()
 	defer s.Avisos.Publicar(em.perfil, map[string]any{"tipo": "tarefa.frase", "tarefa_id": tarefa, "escrevendo": false})
+	if em.removerAgentes {
+		defer s.removerAgentesSeConcluida(ctx, tarefa)
+	}
 	// O pedido sem resposta sai da fila (ou falha, se já foi entregue).
 	if p, err := s.Banco.Pedido(ctx, em.pedido); err == nil && p.Aberto() {
 		s.Banco.MudarPedido(ctx, p.ID, []string{dados.PedidoFila}, dados.PedidoCancelado, "")
@@ -209,6 +232,18 @@ func (s *Servidor) terminarFrase(tarefa int64) {
 		return
 	}
 	s.gravarNaSprint(ctx, em.perfil, tarefa, daily.Texto)
+}
+
+// removerAgentesSeConcluida remove os agentes da tarefa se ela ainda está
+// no Concluído (você pode ter voltado atrás enquanto a frase era escrita).
+func (s *Servidor) removerAgentesSeConcluida(ctx context.Context, tarefa int64) {
+	t, _, _, err := s.Banco.Tarefa(ctx, tarefa)
+	if err != nil || t.Coluna != "concluido" {
+		return
+	}
+	if err := s.removerAgentesDaTarefa(ctx, tarefa); err != nil {
+		log.Printf("tarefa %d: removendo os agentes ao concluir: %v", tarefa, err)
+	}
 }
 
 // fraseMontada: "Concluí a tarefa “X”. O último pedido foi: “…”."

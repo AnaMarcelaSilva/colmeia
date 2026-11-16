@@ -66,6 +66,27 @@ pub fn ponteiro() -> Option<(f32, f32, bool)> {
     None
 }
 
+/// Há quanto tempo você não mexe no teclado nem no mouse, pelo X11 (a
+/// extensão de proteção de tela conta desde a última entrada). Sem X11,
+/// nada: a abelha não sabe quando você saiu.
+#[cfg(target_os = "linux")]
+pub fn ocioso() -> Option<std::time::Duration> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::screensaver::ConnectionExt;
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return None;
+    }
+    let (conexao, tela) = x11rb::connect(None).ok()?;
+    let raiz = conexao.setup().roots[tela].root;
+    let r = conexao.screensaver_query_info(raiz).ok()?.reply().ok()?;
+    Some(std::time::Duration::from_millis(u64::from(r.ms_since_user_input)))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ocioso() -> Option<std::time::Duration> {
+    None
+}
+
 /// O tamanho da tela em pixels, pelo X11: o egui às vezes não sabe o
 /// monitor (um servidor sem RandR, como o Xephyr, diz 1 x 1).
 #[cfg(target_os = "linux")]
@@ -100,3 +121,35 @@ pub fn tem_compositor() -> bool {
 pub fn tem_compositor() -> bool {
     true
 }
+
+/// Traz a janela da Colmeia para a frente pelo X11, como um paginador pede
+/// (_NET_ACTIVE_WINDOW com a origem 2). A própria janela também pede quando
+/// recebe o "abrir", mas o GNOME recusa o pedido de quem está em segundo
+/// plano, e a abelha é quem acabou de receber o clique.
+#[cfg(target_os = "linux")]
+pub fn trazer_a_colmeia() {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return;
+    }
+    let Ok((conexao, tela)) = x11rb::connect(None) else { return };
+    let raiz = conexao.setup().roots[tela].root;
+    let atomo = |nome: &str| conexao.intern_atom(false, nome.as_bytes()).ok().and_then(|c| c.reply().ok()).map(|r| r.atom);
+    let (Some(lista), Some(ativa)) = (atomo("_NET_CLIENT_LIST"), atomo("_NET_ACTIVE_WINDOW")) else { return };
+    let Some(janelas) = conexao.get_property(false, raiz, lista, AtomEnum::WINDOW, 0, 1024).ok().and_then(|c| c.reply().ok()) else { return };
+    let Some(janelas) = janelas.value32() else { return };
+    for janela in janelas.collect::<Vec<_>>() {
+        let Some(classe) = conexao.get_property(false, janela, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64).ok().and_then(|c| c.reply().ok()) else { continue };
+        // WM_CLASS é "instância\0classe\0"; a janela principal tem a classe "colmeia".
+        if !classe.value.split(|b| *b == 0).any(|parte| parte == b"colmeia") {
+            continue;
+        }
+        let pedido = ClientMessageEvent::new(32, janela, ativa, [2, 0, 0, 0, 0]);
+        let _ = conexao.send_event(false, raiz, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, pedido);
+    }
+    let _ = conexao.get_input_focus().ok().and_then(|c| c.reply().ok());
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn trazer_a_colmeia() {}

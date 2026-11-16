@@ -85,7 +85,7 @@ func (b *Barramento) Publicar(perfil int64, mensagem map[string]any) {
 type Assinatura struct {
 	perfil int64
 	abelha bool
-	// janela é o nome que a tela se dá (para dizer depois que minimizou).
+	// janela é o nome que a tela se dá (para dizer depois que minimizou ou perdeu o foco).
 	janela     string
 	minimizada bool
 	fila       chan []byte
@@ -109,8 +109,9 @@ func (b *Barramento) assinar(perfil int64, abelha bool) (*Assinatura, error) {
 	return a, nil
 }
 
-// Visiveis conta as janelas do perfil abertas e não minimizadas (sem a
-// abelha fixa): com alguma, a abelha fixa se esconde para não cobrir a janela.
+// Visiveis conta as janelas do perfil abertas, não minimizadas e com o foco
+// (sem a abelha fixa): com alguma, a abelha fixa se esconde para não cobrir
+// a janela em uso.
 func (b *Barramento) Visiveis(perfil int64) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -145,6 +146,19 @@ func (b *Barramento) Janelas(perfil int64) int {
 	n := 0
 	for a := range b.assinaturas {
 		if a.perfil == perfil && !a.abelha {
+			n++
+		}
+	}
+	return n
+}
+
+// Telas conta as janelas da Colmeia abertas, de qualquer perfil, sem a abelha fixa.
+func (b *Barramento) Telas() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for a := range b.assinaturas {
+		if !a.abelha {
 			n++
 		}
 	}

@@ -4,6 +4,7 @@
 //! balões. Nada aqui fala com o núcleo nem desenha.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use mascote::Estado;
 use serde::Deserialize;
@@ -12,6 +13,11 @@ use serde::Deserialize;
 pub struct Projeto {
     pub id: i64,
     pub nome: String,
+    /// "git" ou "pasta" (sem branches) e a branch base: a tarefa nova vai nela.
+    #[serde(default)]
+    pub tipo: String,
+    #[serde(default)]
+    pub branch_padrao: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -150,16 +156,37 @@ pub enum Tipo {
     Erro,
     Espera,
     Concluiu,
+    /// Um agente terminou sem erro (só no diário, não vira balão).
+    Terminou,
 }
 
 /// Um aviso que sai da abelha: o que aconteceu, onde e a tarefa para abrir.
+/// O balão mostra `titulo` e `detalhe`; o resumo põe a tarefa em destaque e
+/// o projeto e o que aconteceu embaixo.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Aviso {
     pub tipo: Tipo,
     pub titulo: String,
     pub detalhe: String,
+    /// O título da tarefa e o nome do projeto, soltos, para o resumo.
+    pub tarefa_titulo: String,
+    pub projeto: String,
+    /// Quem é o agente ("Claude Code (dev)"), para a bolinha do resumo; vazio sem agente.
+    pub quem: String,
     pub tarefa: i64,
     pub agente: Option<i64>,
+}
+
+/// Uma tarefa na lista de trocar a conversa.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Escolha {
+    pub tarefa: i64,
+    pub agente: Option<i64>,
+    pub titulo: String,
+    pub projeto: String,
+    /// "pede aprovação", "trabalhando", "parou", "sem agente"…
+    pub estado: String,
+    pub espera: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -172,14 +199,22 @@ pub struct Contagem {
 #[derive(Default)]
 pub struct Resumo {
     projetos: HashMap<i64, String>,
+    /// A branch base de cada projeto git (vazia num projeto sem git).
+    branches: HashMap<i64, String>,
     tarefas: HashMap<i64, Tarefa>,
     agentes: HashMap<i64, Agente>,
     /// Erros que chegaram com a abelha ligada e você ainda não abriu (os de
     /// antes dela, como na janela, contam como vistos).
     erros: Vec<(i64, String)>,
+    /// O que aconteceu com a abelha ligada, do mais velho ao mais novo, para
+    /// contar o que se passou enquanto você esteve fora.
+    diario: Vec<(Instant, Aviso)>,
     /// O número da última mensagem incluída no retrato.
     pub base: Option<u64>,
 }
+
+/// Quantas coisas o diário guarda.
+const DIARIO: usize = 60;
 
 /// O que a abelha faz depois de um evento.
 #[derive(Debug, PartialEq)]
@@ -217,7 +252,48 @@ fn acao_de_espera(motivo: &str) -> &'static str {
 }
 
 impl Resumo {
+    /// O agente mais novo da tarefa, rodando ou não: é com ele que a conversa
+    /// abre (e ele que "Retomar" liga de novo).
+    pub fn ultimo_agente(&self, tarefa: i64) -> Option<&Agente> {
+        self.agentes.values().filter(|a| a.tarefa_id == tarefa).max_by_key(|a| a.id)
+    }
+
+    /// Se a tarefa pede você: está em "Aguardando você" ou tem agente esperando.
+    pub fn pede_voce(&self, tarefa: i64) -> bool {
+        self.tarefas.get(&tarefa).is_some_and(|t| t.coluna == "aguardando") || self.agentes.values().any(|a| a.tarefa_id == tarefa && Self::espera(a))
+    }
+
+    /// Se o agente está rodando agora.
+    pub fn ativo(&self, agente: i64) -> bool {
+        self.agentes.get(&agente).is_some_and(|a| a.ativo)
+    }
+
+    /// O título da tarefa e quem é o agente ("Claude Code (dev)"), mesmo
+    /// parado; sem agente, "sem agente".
+    pub fn sobre(&self, tarefa: i64, agente: Option<i64>) -> (String, String) {
+        let titulo = self.tarefas.get(&tarefa).map(|t| t.titulo.clone()).unwrap_or_else(|| "Tarefa".to_string());
+        let quem = agente.and_then(|a| self.agentes.get(&a)).map(Self::quem).unwrap_or_else(|| "sem agente".to_string());
+        (titulo, quem)
+    }
+
+    /// Os projetos do perfil, por nome, com a branch em que uma tarefa nova entra.
+    pub fn projetos_lista(&self) -> Vec<(i64, String, String)> {
+        let mut lista: Vec<(i64, String, String)> =
+            self.projetos.iter().map(|(id, nome)| (*id, nome.clone(), self.branches.get(id).cloned().unwrap_or_default())).collect();
+        lista.sort_by_key(|(_, nome, _)| nome.to_lowercase());
+        lista
+    }
+
+    fn guardar_branch(&mut self, p: &Projeto) {
+        let branch = if p.tipo == "pasta" { String::new() } else { p.branch_padrao.clone() };
+        self.branches.insert(p.id, branch);
+    }
+
     pub fn carregar(&mut self, q: Quadro) {
+        self.branches.clear();
+        for p in &q.projetos {
+            self.guardar_branch(p);
+        }
         self.projetos = q.projetos.into_iter().map(|p| (p.id, p.nome)).collect();
         self.tarefas = q.tarefas.into_iter().map(|t| (t.id, t)).collect();
         self.agentes = q.agentes.into_iter().map(|a| (a.id, a)).collect();
@@ -238,6 +314,22 @@ impl Resumo {
         }
     }
 
+    /// Monta um aviso com a tarefa e o projeto preenchidos a partir do retrato.
+    fn aviso(&self, tipo: Tipo, titulo: String, tarefa: i64, agente: Option<i64>) -> Aviso {
+        let t = self.tarefas.get(&tarefa);
+        let projeto = t.and_then(|t| self.projetos.get(&t.projeto_id)).cloned().unwrap_or_default();
+        let quem = agente.and_then(|a| self.agentes.get(&a)).map(Self::quem).unwrap_or_default();
+        Aviso { tipo, titulo, detalhe: self.onde(tarefa), tarefa_titulo: t.map(|t| t.titulo.clone()).unwrap_or_default(), projeto, quem, tarefa, agente }
+    }
+
+    /// Guarda no diário o que acabou de acontecer.
+    fn anotar(&mut self, aviso: Aviso) {
+        if self.diario.len() >= DIARIO {
+            self.diario.remove(0);
+        }
+        self.diario.push((Instant::now(), aviso));
+    }
+
     fn quem(a: &Agente) -> String {
         format!("{} ({})", nome_da_ferramenta(&a.ferramenta), a.papel)
     }
@@ -256,6 +348,7 @@ impl Resumo {
         match evento {
             Evento::Ola {} | Evento::Recarregar {} => efeitos.push(Efeito::Recarregar),
             Evento::ProjetoCriado { projeto, .. } => {
+                self.guardar_branch(&projeto);
                 self.projetos.insert(projeto.id, projeto.nome);
             }
             Evento::ProjetoRemovido { projeto_id, .. } => {
@@ -266,20 +359,14 @@ impl Resumo {
             }
             Evento::TarefaMudou { tarefa, .. } => {
                 let antes = self.tarefas.get(&tarefa.id).map(|t| t.coluna.clone());
-                if tarefa.coluna == "concluido" && antes.is_some_and(|c| c != "concluido") {
-                    efeitos.push(Efeito::Comemorar);
-                    efeitos.push(Efeito::Avisar(Aviso {
-                        tipo: Tipo::Concluiu,
-                        titulo: "Tarefa concluída".into(),
-                        detalhe: String::new(),
-                        tarefa: tarefa.id,
-                        agente: None,
-                    }));
-                }
+                let concluiu = tarefa.coluna == "concluido" && antes.is_some_and(|c| c != "concluido");
                 let id = tarefa.id;
                 self.tarefas.insert(id, tarefa);
-                if let Some(Efeito::Avisar(a)) = efeitos.last_mut() {
-                    a.detalhe = self.onde(id);
+                if concluiu {
+                    let aviso = self.aviso(Tipo::Concluiu, "Tarefa concluída".into(), id, None);
+                    self.anotar(aviso.clone());
+                    efeitos.push(Efeito::Comemorar);
+                    efeitos.push(Efeito::Avisar(aviso));
                 }
             }
             Evento::TarefaRemovida { tarefa_id, .. } => {
@@ -305,24 +392,28 @@ impl Resumo {
                 (a.ativo, a.estado, a.motivo) = (true, estado, motivo);
                 if !esperava && Self::espera(a) {
                     let a = a.clone();
-                    efeitos.push(Efeito::Avisar(Aviso {
-                        tipo: Tipo::Espera,
-                        titulo: format!("{} {}", Self::quem(&a), acao_de_espera(&a.motivo)),
-                        detalhe: self.onde(a.tarefa_id),
-                        tarefa: a.tarefa_id,
-                        agente: Some(a.id),
-                    }));
+                    let titulo = format!("{} {}", Self::quem(&a), acao_de_espera(&a.motivo));
+                    let aviso = self.aviso(Tipo::Espera, titulo, a.tarefa_id, Some(a.id));
+                    self.anotar(aviso.clone());
+                    efeitos.push(Efeito::Avisar(aviso));
                 }
             }
             Evento::AgenteTerminou { agente_id, fim, .. } => {
                 let Some(a) = self.agentes.get_mut(&agente_id) else { return efeitos };
                 (a.ativo, a.estado, a.motivo) = (false, String::new(), String::new());
+                let a = a.clone();
                 if fim.erro {
-                    let a = a.clone();
                     let titulo = if fim.texto.is_empty() { format!("{} parou com erro", Self::quem(&a)) } else { fim.texto };
                     self.erros.retain(|(id, _)| *id != a.id);
                     self.erros.push((a.id, titulo.clone()));
-                    efeitos.push(Efeito::Avisar(Aviso { tipo: Tipo::Erro, titulo, detalhe: self.onde(a.tarefa_id), tarefa: a.tarefa_id, agente: Some(a.id) }));
+                    let aviso = self.aviso(Tipo::Erro, titulo, a.tarefa_id, Some(a.id));
+                    self.anotar(aviso.clone());
+                    efeitos.push(Efeito::Avisar(aviso));
+                } else {
+                    // Sem erro não há balão, mas o diário guarda a frase de fim.
+                    let titulo = if fim.texto.is_empty() { format!("{} terminou", Self::quem(&a)) } else { fim.texto };
+                    let aviso = self.aviso(Tipo::Terminou, titulo, a.tarefa_id, Some(a.id));
+                    self.anotar(aviso);
                 }
             }
             Evento::PerfilMascote { modelo, nome } => efeitos.push(Efeito::Vestir { modelo, nome }),
@@ -342,6 +433,29 @@ impl Resumo {
         self.erros.retain(|(id, _)| agentes.get(id).is_none_or(|a| a.tarefa_id != tarefa));
     }
 
+    /// O que aconteceu desde `quando` e ainda vale, para o cartão de quando
+    /// você volta: os erros que ainda estão de pé, os agentes que ainda
+    /// esperam, as tarefas que continuam concluídas e os agentes que
+    /// terminaram. Na ordem do resumo (erro, espera, concluiu, terminou),
+    /// o mais novo primeiro, cada tarefa uma vez por tipo.
+    pub fn desde(&self, quando: Instant) -> Vec<Aviso> {
+        let vale = |a: &Aviso| match a.tipo {
+            Tipo::Erro => a.agente.is_some_and(|id| self.erros.iter().any(|(e, _)| *e == id)),
+            Tipo::Espera => a.agente.and_then(|id| self.agentes.get(&id)).is_some_and(Self::espera),
+            Tipo::Concluiu => self.tarefas.get(&a.tarefa).is_some_and(|t| t.coluna == "concluido"),
+            Tipo::Terminou => self.tarefas.contains_key(&a.tarefa),
+        };
+        let mut lista: Vec<Aviso> = Vec::new();
+        for tipo in [Tipo::Erro, Tipo::Espera, Tipo::Concluiu, Tipo::Terminou] {
+            for (_, a) in self.diario.iter().rev().filter(|(em, a)| *em >= quando && a.tipo == tipo) {
+                if vale(a) && !lista.iter().any(|l| l.tarefa == a.tarefa && l.tipo == a.tipo) {
+                    lista.push(a.clone());
+                }
+            }
+        }
+        lista
+    }
+
     pub fn contagem(&self) -> Contagem {
         let agentes = self.agentes.values().filter(|a| self.tarefas.contains_key(&a.tarefa_id));
         let esperando = agentes.clone().filter(|a| Self::espera(a)).count();
@@ -352,6 +466,45 @@ impl Resumo {
             trabalhando: agentes.filter(|a| a.ativo && a.estado == "trabalhando").count(),
             com_erro: self.erros.len(),
         }
+    }
+
+    /// Todas as tarefas abertas (as concluídas ficam de fora), para trocar a
+    /// conversa: as que esperam você primeiro, depois as trabalhando, depois
+    /// as outras; dentro do grupo, pelo projeto e pelo título.
+    pub fn tarefas_lista(&self) -> Vec<Escolha> {
+        let mut lista: Vec<Escolha> = self
+            .tarefas
+            .values()
+            .filter(|t| t.coluna != "concluido")
+            .map(|t| {
+                let agente = self.ultimo_agente(t.id);
+                let estado = match agente {
+                    Some(a) if Self::espera(a) => acao_de_espera(&a.motivo).to_string(),
+                    _ if t.coluna == "aguardando" => "espera você".to_string(),
+                    Some(a) if a.ativo => "trabalhando".to_string(),
+                    Some(_) => "parou".to_string(),
+                    None => "sem agente".to_string(),
+                };
+                let projeto = self.projetos.get(&t.projeto_id).cloned().unwrap_or_default();
+                Escolha { tarefa: t.id, agente: agente.map(|a| a.id), titulo: t.titulo.clone(), projeto, estado, espera: self.pede_voce(t.id) }
+            })
+            .collect();
+        let grupo = |e: &Escolha| {
+            if e.espera {
+                0
+            } else if e.estado == "trabalhando" {
+                1
+            } else {
+                2
+            }
+        };
+        lista.sort_by(|a, b| {
+            grupo(a)
+                .cmp(&grupo(b))
+                .then_with(|| a.projeto.to_lowercase().cmp(&b.projeto.to_lowercase()))
+                .then_with(|| a.titulo.to_lowercase().cmp(&b.titulo.to_lowercase()))
+        });
+        lista
     }
 
     /// O estado da abelha: erro, espera, trabalho ou sono, nessa ordem.
@@ -368,28 +521,35 @@ impl Resumo {
         }
     }
 
-    /// O que mais pede você, para o destaque do resumo: o erro mais novo
-    /// ou o primeiro agente esperando (ou o cartão em "Aguardando você").
+    /// O que mais pede você, para o destaque do balão: o primeiro da lista do resumo.
+    #[cfg(test)]
     pub fn destaque(&self) -> Option<Aviso> {
-        if let Some((agente, titulo)) = self.erros.last()
-            && let Some(a) = self.agentes.get(agente)
-        {
-            return Some(Aviso { tipo: Tipo::Erro, titulo: titulo.clone(), detalhe: self.onde(a.tarefa_id), tarefa: a.tarefa_id, agente: Some(a.id) });
+        self.destaques().into_iter().next()
+    }
+
+    /// Tudo o que pede você, na ordem do resumo: os erros (o mais novo
+    /// primeiro), os agentes esperando e os cartões em "Aguardando você"
+    /// que não têm agente esperando (cada tarefa uma vez).
+    pub fn destaques(&self) -> Vec<Aviso> {
+        let mut lista = Vec::new();
+        for (agente, titulo) in self.erros.iter().rev() {
+            if let Some(a) = self.agentes.get(agente) {
+                lista.push(self.aviso(Tipo::Erro, titulo.clone(), a.tarefa_id, Some(a.id)));
+            }
         }
         let mut esperando: Vec<&Agente> = self.agentes.values().filter(|a| Self::espera(a) && self.tarefas.contains_key(&a.tarefa_id)).collect();
         esperando.sort_by_key(|a| a.id);
-        if let Some(a) = esperando.first() {
-            return Some(Aviso {
-                tipo: Tipo::Espera,
-                titulo: format!("{} {}", Self::quem(a), acao_de_espera(&a.motivo)),
-                detalhe: self.onde(a.tarefa_id),
-                tarefa: a.tarefa_id,
-                agente: Some(a.id),
-            });
+        for a in esperando {
+            lista.push(self.aviso(Tipo::Espera, format!("{} {}", Self::quem(a), acao_de_espera(&a.motivo)), a.tarefa_id, Some(a.id)));
         }
         let mut cartoes: Vec<&Tarefa> = self.tarefas.values().filter(|t| t.coluna == "aguardando").collect();
         cartoes.sort_by_key(|t| t.id);
-        cartoes.first().map(|t| Aviso { tipo: Tipo::Espera, titulo: "Aguardando você".into(), detalhe: self.onde(t.id), tarefa: t.id, agente: None })
+        for t in cartoes {
+            if !lista.iter().any(|a| a.tarefa == t.id && a.tipo == Tipo::Espera) {
+                lista.push(self.aviso(Tipo::Espera, "esperando você, sem agente".into(), t.id, None));
+            }
+        }
+        lista
     }
 }
 
@@ -432,6 +592,9 @@ mod testes {
             tipo: Tipo::Espera,
             titulo: "Claude Code (dev) pede aprovação".into(),
             detalhe: "“Corrigir frete” · loja-web".into(),
+            tarefa_titulo: "Corrigir frete".into(),
+            projeto: "loja-web".into(),
+            quem: "Claude Code (dev)".into(),
             tarefa: 10,
             agente: Some(7),
         };
@@ -443,6 +606,19 @@ mod testes {
         assert_eq!(r.contagem(), Contagem { esperam: 1, trabalhando: 0, com_erro: 0 });
         assert_eq!(r.estado(), Estado::Aguardando);
         assert_eq!(r.destaque(), Some(aviso));
+    }
+
+    #[test]
+    fn resumo_lista_todos_que_esperam_cada_tarefa_uma_vez() {
+        let mut r = quadro();
+        r.aplicar(evento(r#"{"tipo":"agente.estado","seq":6,"agente_id":7,"tarefa_id":10,"estado":"aguardando","motivo":"pede aprovação"}"#));
+        // A outra tarefa vai para "Aguardando você" sem agente esperando.
+        r.aplicar(evento(
+            r#"{"tipo":"tarefa.atualizada","seq":7,"tarefa":{"id":11,"projeto_id":1,"titulo":"Tela de cupons","coluna":"aguardando","branch":"main"}}"#,
+        ));
+        let lista = r.destaques();
+        assert_eq!(lista.iter().map(|a| (a.tarefa, a.agente)).collect::<Vec<_>>(), vec![(10, Some(7)), (11, None)]);
+        assert_eq!(r.destaque().map(|a| a.tarefa), Some(10));
     }
 
     #[test]
@@ -480,6 +656,27 @@ mod testes {
             r.aplicar(evento(r#"{"tipo":"tarefa.atualizada","seq":10,"tarefa":{"id":11,"projeto_id":1,"titulo":"Tela de cupons","coluna":"concluido"}}"#))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn diario_conta_o_que_aconteceu_desde_a_pausa_e_ainda_vale() {
+        let mut r = quadro();
+        let antes = Instant::now();
+        // Terminou sem erro (não vira balão), outra tarefa foi concluída e o agente dela esperou.
+        assert!(
+            r.aplicar(evento(r#"{"tipo":"agente.terminou","seq":6,"agente_id":7,"tarefa_id":10,"fim":{"erro":false,"texto":"Claude Code (dev) terminou"}}"#))
+                .is_empty()
+        );
+        r.aplicar(evento(r#"{"tipo":"tarefa.atualizada","seq":7,"tarefa":{"id":11,"projeto_id":1,"titulo":"Tela de cupons","coluna":"concluido"}}"#));
+        r.aplicar(evento(r#"{"tipo":"agente.iniciou","seq":8,"agente_id":8,"tarefa_id":11}"#));
+        r.aplicar(evento(r#"{"tipo":"agente.estado","seq":9,"agente_id":8,"tarefa_id":11,"estado":"aguardando","motivo":"pede aprovação"}"#));
+        let lista = r.desde(antes);
+        assert_eq!(lista.iter().map(|a| (a.tipo, a.tarefa)).collect::<Vec<_>>(), vec![(Tipo::Espera, 11), (Tipo::Concluiu, 11), (Tipo::Terminou, 10)]);
+        assert_eq!(lista[2].titulo, "Claude Code (dev) terminou");
+        // O agente voltou a trabalhar: a espera já não vale. Nada aconteceu depois de agora.
+        r.aplicar(evento(r#"{"tipo":"agente.estado","seq":10,"agente_id":8,"tarefa_id":11,"estado":"trabalhando"}"#));
+        assert_eq!(r.desde(antes).iter().map(|a| a.tipo).collect::<Vec<_>>(), vec![Tipo::Concluiu, Tipo::Terminou]);
+        assert!(r.desde(Instant::now()).is_empty());
     }
 
     #[test]

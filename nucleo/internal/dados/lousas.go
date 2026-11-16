@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -19,7 +20,7 @@ import (
 // ligações entre eles. Mexer na lousa (mover, editar, apagar) fica fora da
 // corrente de eventos: cada arrasto seria uma linha imutável para sempre e o
 // texto ficaria preso no hash (decisão 0008). Só o que o agente acrescenta
-// entra no histórico, como "lousa.agente", sem texto.
+// ou apaga entra no histórico, como "lousa.agente", sem texto.
 
 // Limites da lousa, conferidos aqui (a tela só repete).
 const (
@@ -45,16 +46,22 @@ var (
 	tiposDoAgente = []string{"nota", "texto", "codigo", "ligacao", "imagem"}
 )
 
-const esquemaLousas = `
-CREATE TABLE IF NOT EXISTS lousas (
+// colunasTabelaLousas e colunasTabelaElementos são as definições das duas
+// tabelas desde a versão 15 do banco (a lousa da reunião: donos dia e
+// sprint, autor montador e a tarefa de cada peça montada); a migração refaz
+// as tabelas com elas.
+const colunasTabelaLousas = `
 	id INTEGER PRIMARY KEY,
 	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
 	workspace_id INTEGER UNIQUE REFERENCES workspaces(id) ON DELETE CASCADE,
 	tarefa_id INTEGER UNIQUE REFERENCES tarefas(id) ON DELETE CASCADE,
+	dia TEXT,
+	sprint_id INTEGER UNIQUE REFERENCES sprints(id) ON DELETE CASCADE,
 	criada_em TEXT NOT NULL,
-	CHECK ((workspace_id IS NULL) <> (tarefa_id IS NULL))
-);
-CREATE TABLE IF NOT EXISTS lousa_elementos (
+	UNIQUE (perfil_id, dia),
+	CHECK ((workspace_id IS NOT NULL) + (tarefa_id IS NOT NULL) + (dia IS NOT NULL) + (sprint_id IS NOT NULL) = 1)`
+
+const colunasTabelaElementos = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	lousa_id INTEGER NOT NULL REFERENCES lousas(id) ON DELETE CASCADE,
 	tipo TEXT NOT NULL CHECK (tipo IN ('nota', 'texto', 'codigo', 'imagem', 'video', 'tarefa', 'ligacao')),
@@ -70,10 +77,16 @@ CREATE TABLE IF NOT EXISTS lousa_elementos (
 	tarefa_ref INTEGER REFERENCES tarefas(id) ON DELETE SET NULL,
 	de_id INTEGER REFERENCES lousa_elementos(id) ON DELETE CASCADE,
 	para_id INTEGER REFERENCES lousa_elementos(id) ON DELETE CASCADE,
-	autor TEXT NOT NULL CHECK (autor IN ('voce', 'agente')),
+	autor TEXT NOT NULL CHECK (autor IN ('voce', 'agente', 'montador')),
 	agente_id INTEGER,
+	montagem_de INTEGER,
 	versao INTEGER NOT NULL DEFAULT 1,
-	atualizado_em TEXT NOT NULL
+	atualizado_em TEXT NOT NULL`
+
+const esquemaLousas = `
+CREATE TABLE IF NOT EXISTS lousas (` + colunasTabelaLousas + `
+);
+CREATE TABLE IF NOT EXISTS lousa_elementos (` + colunasTabelaElementos + `
 );
 CREATE INDEX IF NOT EXISTS lousa_elementos_por_lousa ON lousa_elementos (lousa_id, z);
 CREATE INDEX IF NOT EXISTS lousa_ligacoes_de ON lousa_elementos (de_id);
@@ -81,11 +94,18 @@ CREATE INDEX IF NOT EXISTS lousa_ligacoes_para ON lousa_elementos (para_id);
 CREATE INDEX IF NOT EXISTS lousa_cartoes_de_tarefa ON lousa_elementos (tarefa_ref);
 `
 
-// DonoLousa: um workspace ou uma tarefa (só um dos dois).
+// DonoLousa: um workspace, uma tarefa, a daily de um dia do perfil ou uma
+// sprint (só um dos quatro). PerfilID só acompanha o dia.
 type DonoLousa struct {
-	WorkspaceID int64 `json:"workspace_id,omitempty"`
-	TarefaID    int64 `json:"tarefa_id,omitempty"`
+	WorkspaceID int64  `json:"workspace_id,omitempty"`
+	TarefaID    int64  `json:"tarefa_id,omitempty"`
+	PerfilID    int64  `json:"perfil_id,omitempty"`
+	Dia         string `json:"dia,omitempty"`
+	SprintID    int64  `json:"sprint_id,omitempty"`
 }
+
+// DaReuniao diz se a lousa é a de uma daily ou de uma sprint.
+func (d DonoLousa) DaReuniao() bool { return d.Dia != "" || d.SprintID != 0 }
 
 type Lousa struct {
 	ID       int64     `json:"id"`
@@ -120,9 +140,11 @@ type Elemento struct {
 	TarefaRef int64            `json:"tarefa_ref,omitempty"`
 	De        int64            `json:"de,omitempty"`
 	Para      int64            `json:"para,omitempty"`
-	// Autor: "voce" ou "agente" (com o agente que acrescentou).
+	// Autor: "voce", "agente" (com o agente que acrescentou) ou "montador"
+	// (o núcleo, na lousa da reunião; MontagemDe é a tarefa da peça).
 	Autor        string `json:"autor"`
 	AgenteID     int64  `json:"agente_id,omitempty"`
+	MontagemDe   int64  `json:"montagem_de,omitempty"`
 	Versao       int64  `json:"versao"`
 	AtualizadoEm string `json:"atualizado_em"`
 }
@@ -170,6 +192,8 @@ type NovoElemento struct {
 	TarefaRef int64        `json:"tarefa_ref,omitempty"`
 	De        *RefElemento `json:"de,omitempty"`
 	Para      *RefElemento `json:"para,omitempty"`
+	// MontagemDe: a tarefa da peça, só pelo montador (nunca pela tela).
+	MontagemDe int64 `json:"-"`
 }
 
 // CamposElemento: só os campos enviados mudam.
@@ -223,10 +247,15 @@ type autorLousa struct {
 	agente int64
 	// soDaTarefa: o agente só usa anexos da própria tarefa.
 	soDaTarefa int64
+	// montador: o núcleo montando a lousa da reunião.
+	montador bool
 }
 
 func (a autorLousa) nome() string {
-	if a.agente != 0 {
+	switch {
+	case a.montador:
+		return "montador"
+	case a.agente != 0:
 		return "agente"
 	}
 	return "voce"
@@ -235,7 +264,7 @@ func (a autorLousa) nome() string {
 // Leitura
 
 const colunasElemento = `e.id, e.lousa_id, e.tipo, e.x, e.y, e.largura, e.altura, e.z, e.cor, e.titulo, e.texto,
-	COALESCE(e.anexo_id, 0), COALESCE(e.tarefa_ref, 0), COALESCE(e.de_id, 0), COALESCE(e.para_id, 0), e.autor, COALESCE(e.agente_id, 0),
+	COALESCE(e.anexo_id, 0), COALESCE(e.tarefa_ref, 0), COALESCE(e.de_id, 0), COALESCE(e.para_id, 0), e.autor, COALESCE(e.agente_id, 0), COALESCE(e.montagem_de, 0),
 	e.versao, e.atualizado_em, COALESCE(a.nome, ''), COALESCE(a.bytes, 0), COALESCE(a.largura, 0), COALESCE(a.altura, 0)`
 
 const deElementos = ` FROM lousa_elementos e LEFT JOIN anexos a ON a.id = e.anexo_id `
@@ -255,7 +284,7 @@ func lerElementos(ctx context.Context, c consultavel, onde string, args ...any) 
 		var e Elemento
 		var info AnexoDoElemento
 		if err := linhas.Scan(&e.ID, &e.LousaID, &e.Tipo, &e.X, &e.Y, &e.Largura, &e.Altura, &e.Z, &e.Cor, &e.Titulo, &e.Texto,
-			&e.AnexoID, &e.TarefaRef, &e.De, &e.Para, &e.Autor, &e.AgenteID, &e.Versao, &e.AtualizadoEm,
+			&e.AnexoID, &e.TarefaRef, &e.De, &e.Para, &e.Autor, &e.AgenteID, &e.MontagemDe, &e.Versao, &e.AtualizadoEm,
 			&info.Nome, &info.Bytes, &info.Largura, &info.Altura); err != nil {
 			return nil, err
 		}
@@ -288,12 +317,16 @@ func lerLousa(ctx context.Context, c interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }, id int64) (Lousa, error) {
 	var l Lousa
-	var ws, tarefa sql.NullInt64
-	err := c.QueryRowContext(ctx, `SELECT id, perfil_id, workspace_id, tarefa_id FROM lousas WHERE id = ?`, id).Scan(&l.ID, &l.PerfilID, &ws, &tarefa)
+	var ws, tarefa, sprint sql.NullInt64
+	var dia sql.NullString
+	err := c.QueryRowContext(ctx, `SELECT id, perfil_id, workspace_id, tarefa_id, dia, sprint_id FROM lousas WHERE id = ?`, id).Scan(&l.ID, &l.PerfilID, &ws, &tarefa, &dia, &sprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return l, ErrNaoEncontrado
 	}
-	l.Dono = DonoLousa{WorkspaceID: ws.Int64, TarefaID: tarefa.Int64}
+	l.Dono = DonoLousa{WorkspaceID: ws.Int64, TarefaID: tarefa.Int64, Dia: dia.String, SprintID: sprint.Int64}
+	if l.Dono.Dia != "" {
+		l.Dono.PerfilID = l.PerfilID
+	}
 	return l, err
 }
 
@@ -324,43 +357,99 @@ func (b *Banco) AbrirLousa(ctx context.Context, dono DonoLousa) (Lousa, []Elemen
 
 // garantirLousa acha (ou cria) a lousa do dono e diz o perfil dele.
 func garantirLousa(ctx context.Context, tx *transacao, dono DonoLousa) (int64, int64, error) {
-	if (dono.WorkspaceID == 0) == (dono.TarefaID == 0) {
-		return 0, 0, ErrInvalido{"a lousa é de um workspace ou de uma tarefa"}
-	}
-	var perfil int64
-	if dono.WorkspaceID != 0 {
-		err := tx.QueryRowContext(ctx, `SELECT perfil_id FROM workspaces WHERE id = ?`, dono.WorkspaceID).Scan(&perfil)
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, ErrNaoEncontrado
-		}
-		if err != nil {
-			return 0, 0, err
-		}
-	} else {
-		var projeto int64
-		err := tx.QueryRowContext(ctx, `SELECT projeto_id FROM tarefas WHERE id = ?`, dono.TarefaID).Scan(&projeto)
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, ErrNaoEncontrado
-		}
-		if err != nil {
-			return 0, 0, err
-		}
-		if perfil, _, err = donoDoProjeto(ctx, tx, projeto); err != nil {
-			return 0, 0, err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO lousas (perfil_id, workspace_id, tarefa_id, criada_em) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-		perfil, nulo(dono.WorkspaceID), nulo(dono.TarefaID), agora()); err != nil {
+	perfil, err := perfilDoDono(ctx, tx, dono)
+	if err != nil {
 		return 0, 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO lousas (perfil_id, workspace_id, tarefa_id, dia, sprint_id, criada_em) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		perfil, nulo(dono.WorkspaceID), nulo(dono.TarefaID), textoNulo(dono.Dia), nulo(dono.SprintID), agora()); err != nil {
+		return 0, 0, err
+	}
+	id, err := lousaDoDono(ctx, tx, dono, perfil)
+	return id, perfil, err
+}
+
+// perfilDoDono confere que o dono é um só e existe, e diz o perfil dele.
+func perfilDoDono(ctx context.Context, tx *transacao, dono DonoLousa) (int64, error) {
+	donos := 0
+	for _, tem := range []bool{dono.WorkspaceID != 0, dono.TarefaID != 0, dono.Dia != "", dono.SprintID != 0} {
+		if tem {
+			donos++
+		}
+	}
+	if donos != 1 {
+		return 0, ErrInvalido{"a lousa é de um workspace, de uma tarefa, de uma daily ou de uma sprint"}
+	}
+	var perfil int64
+	var err error
+	switch {
+	case dono.WorkspaceID != 0:
+		err = tx.QueryRowContext(ctx, `SELECT perfil_id FROM workspaces WHERE id = ?`, dono.WorkspaceID).Scan(&perfil)
+	case dono.TarefaID != 0:
+		var projeto int64
+		if err = tx.QueryRowContext(ctx, `SELECT projeto_id FROM tarefas WHERE id = ?`, dono.TarefaID).Scan(&projeto); err == nil {
+			perfil, _, err = donoDoProjeto(ctx, tx, projeto)
+		}
+	case dono.Dia != "":
+		if !dataReal(dono.Dia) {
+			return 0, ErrInvalido{"o dia da daily precisa ser AAAA-MM-DD"}
+		}
+		if dono.PerfilID == 0 {
+			return 0, ErrInvalido{"a lousa da daily precisa do perfil"}
+		}
+		err = tx.QueryRowContext(ctx, `SELECT id FROM perfis WHERE id = ?`, dono.PerfilID).Scan(&perfil)
+	default:
+		err = tx.QueryRowContext(ctx, `SELECT perfil_id FROM sprints WHERE id = ?`, dono.SprintID).Scan(&perfil)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNaoEncontrado
+	}
+	return perfil, err
+}
+
+// lousaDoDono acha a lousa de um dono (0 se não existe).
+func lousaDoDono(ctx context.Context, tx *transacao, dono DonoLousa, perfil int64) (int64, error) {
 	var id int64
 	var err error
-	if dono.WorkspaceID != 0 {
+	switch {
+	case dono.WorkspaceID != 0:
 		err = tx.QueryRowContext(ctx, `SELECT id FROM lousas WHERE workspace_id = ?`, dono.WorkspaceID).Scan(&id)
-	} else {
+	case dono.TarefaID != 0:
 		err = tx.QueryRowContext(ctx, `SELECT id FROM lousas WHERE tarefa_id = ?`, dono.TarefaID).Scan(&id)
+	case dono.Dia != "":
+		err = tx.QueryRowContext(ctx, `SELECT id FROM lousas WHERE perfil_id = ? AND dia = ?`, perfil, dono.Dia).Scan(&id)
+	default:
+		err = tx.QueryRowContext(ctx, `SELECT id FROM lousas WHERE sprint_id = ?`, dono.SprintID).Scan(&id)
 	}
-	return id, perfil, err
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
+// LousaExistente acha a lousa de um dono sem criar (ok false se não há).
+func (b *Banco) LousaExistente(ctx context.Context, dono DonoLousa) (Lousa, bool, error) {
+	var id int64
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		perfil, err := perfilDoDono(ctx, tx, dono)
+		if err != nil {
+			return err
+		}
+		id, err = lousaDoDono(ctx, tx, dono, perfil)
+		return err
+	})
+	if err != nil || id == 0 {
+		return Lousa{}, false, err
+	}
+	l, err := lerLousa(ctx, b.db, id)
+	return l, err == nil, err
+}
+
+func textoNulo(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 // ResumoLousa: a lousa de uma tarefa e quantos elementos ela tem.
@@ -618,7 +707,7 @@ func aplicarLote(ctx context.Context, tx *transacao, l Lousa, ops []Operacao, au
 			tocados = append(tocados, id)
 		case "alterar":
 			if autor.agente != 0 {
-				return r, ErrInvalido{"o agente só acrescenta à lousa"}
+				return r, ErrInvalido{"o agente não altera itens da lousa: acrescenta e apaga"}
 			}
 			if op.Campos == nil {
 				return r, ErrInvalido{"faltam os campos a alterar"}
@@ -628,9 +717,6 @@ func aplicarLote(ctx context.Context, tx *transacao, l Lousa, ops []Operacao, au
 			}
 			tocados = append(tocados, op.ID)
 		case "remover":
-			if autor.agente != 0 {
-				return r, ErrInvalido{"o agente só acrescenta à lousa"}
-			}
 			// As ligações do item saem junto (em cascata): a tela fica sabendo.
 			linhas, err := tx.QueryContext(ctx, `SELECT id FROM lousa_elementos WHERE de_id = ? OR para_id = ?`, op.ID, op.ID)
 			if err != nil {
@@ -782,9 +868,9 @@ func criarElemento(ctx context.Context, tx *transacao, l Lousa, n NovoElemento, 
 	if n.Tipo != "imagem" && n.Tipo != "video" && n.AnexoID != 0 || n.Tipo != "tarefa" && n.TarefaRef != 0 || n.Tipo != "ligacao" && (n.De != nil || n.Para != nil) {
 		return 0, ErrInvalido{"campo que não vale para este tipo de item"}
 	}
-	resultado, err := tx.ExecContext(ctx, `INSERT INTO lousa_elementos (lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto, anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, versao, atualizado_em)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-		l.ID, n.Tipo, x, y, largura, altura, z, cor, titulo, texto, nulo(anexo), nulo(tarefa), nulo(de), nulo(para), autor.nome(), nulo(autor.agente), momento)
+	resultado, err := tx.ExecContext(ctx, `INSERT INTO lousa_elementos (lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto, anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, montagem_de, versao, atualizado_em)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+		l.ID, n.Tipo, x, y, largura, altura, z, cor, titulo, texto, nulo(anexo), nulo(tarefa), nulo(de), nulo(para), autor.nome(), nulo(autor.agente), nulo(n.MontagemDe), momento)
 	if err != nil {
 		return 0, err
 	}
@@ -868,9 +954,14 @@ func alterarElemento(ctx context.Context, tx *transacao, l Lousa, id int64, c Ca
 			}
 		}
 	}
+	// Uma peça do montador que você move ou edita vira sua: remontar a
+	// coluna não mexe mais nela.
+	if e.Autor == "montador" {
+		e.Autor = "voce"
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE lousa_elementos SET tipo = ?, x = ?, y = ?, largura = ?, altura = ?, z = ?, cor = ?, titulo = ?, texto = ?,
-		de_id = ?, para_id = ?, versao = versao + 1, atualizado_em = ? WHERE id = ?`,
-		e.Tipo, e.X, e.Y, e.Largura, e.Altura, e.Z, e.Cor, e.Titulo, e.Texto, nulo(e.De), nulo(e.Para), momento, id)
+		de_id = ?, para_id = ?, autor = ?, versao = versao + 1, atualizado_em = ? WHERE id = ?`,
+		e.Tipo, e.X, e.Y, e.Largura, e.Altura, e.Z, e.Cor, e.Titulo, e.Texto, nulo(e.De), nulo(e.Para), e.Autor, momento, id)
 	return err
 }
 
@@ -942,6 +1033,87 @@ func (b *Banco) AcrescentarDoAgente(ctx context.Context, tarefa, agente int64, n
 		return registrar(ctx, tx, "lousa.agente", escopo, map[string]any{
 			"lousa": l.ID, "tarefa": tarefa, "titulo": titulo, "projeto_nome": projetoNome, "quantidade": len(novos), "tipos": tipos,
 			"elementos": ids, "agente": agente, "ferramenta": ferramenta, "papel": papel,
+		})
+	})
+	return r, err
+}
+
+// ApagarDoAgente apaga da lousa da tarefa os itens que o agente pediu pelo
+// id, ou todos (tudo). As ligações dos itens apagados saem junto. O agente
+// não acompanha versões: vale o que está gravado agora (a tela que tinha um
+// desses itens aberto fica sabendo pelo aviso, como quando outra tela apaga).
+// Grava o evento "lousa.agente" com a ação "apagou" (só os ids e a conta).
+func (b *Banco) ApagarDoAgente(ctx context.Context, tarefa, agente int64, ids []int64, tudo bool) (ResultadoLousa, error) {
+	var r ResultadoLousa
+	if !tudo && len(ids) == 0 {
+		return r, ErrInvalido{"diga os ids dos itens a apagar, ou tudo"}
+	}
+	if len(ids) > MaxOperacoesLousa {
+		return r, ErrInvalido{fmt.Sprintf("apague no máximo %d itens por vez", MaxOperacoesLousa)}
+	}
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		var ferramenta, papel string
+		err := tx.QueryRowContext(ctx, `SELECT ferramenta, papel FROM agentes WHERE id = ? AND tarefa_id = ?`, agente, tarefa).Scan(&ferramenta, &papel)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrInvalido{"o agente não é desta tarefa"}
+		}
+		if err != nil {
+			return err
+		}
+		escopo, titulo, projetoNome, err := escopoDaTarefa(ctx, tx, tarefa)
+		if err != nil {
+			return err
+		}
+		id, _, err := garantirLousa(ctx, tx, DonoLousa{TarefaID: tarefa})
+		if err != nil {
+			return err
+		}
+		l, err := lerLousa(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		// As versões atuais: o que não está nesta lousa é recusado.
+		versoes := map[int64]int64{}
+		linhas, err := tx.QueryContext(ctx, `SELECT id, versao FROM lousa_elementos WHERE lousa_id = ?`, l.ID)
+		if err != nil {
+			return err
+		}
+		for linhas.Next() {
+			var id, versao int64
+			if err := linhas.Scan(&id, &versao); err != nil {
+				linhas.Close()
+				return err
+			}
+			versoes[id] = versao
+		}
+		linhas.Close()
+		if tudo {
+			ids = ids[:0]
+			for id := range versoes {
+				ids = append(ids, id)
+			}
+		}
+		ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+		if len(ids) == 0 {
+			r = ResultadoLousa{Lousa: l, Elementos: []Elemento{}, Removidos: []int64{}, Refs: map[string]int64{}}
+			return nil
+		}
+		ops := make([]Operacao, len(ids))
+		for i, id := range ids {
+			versao, ok := versoes[id]
+			if !ok {
+				return ErrInvalido{fmt.Sprintf("o item %d não está na lousa desta tarefa", id)}
+			}
+			ops[i] = Operacao{Op: "remover", ID: id, Versao: versao}
+		}
+		r, err = aplicarLote(ctx, tx, l, ops, autorLousa{agente: agente, soDaTarefa: tarefa})
+		if err != nil {
+			return err
+		}
+		escopo.Agente = agente
+		return registrar(ctx, tx, "lousa.agente", escopo, map[string]any{
+			"lousa": l.ID, "tarefa": tarefa, "titulo": titulo, "projeto_nome": projetoNome, "acao": "apagou", "quantidade": len(r.Removidos),
+			"removidos": r.Removidos, "agente": agente, "ferramenta": ferramenta, "papel": papel,
 		})
 	})
 	return r, err
@@ -1137,4 +1309,101 @@ func tamanhoEstimado(tipo, titulo, texto string) (float64, float64) {
 		}
 	}
 	return largura, limitar(altura+28+faixa+8, 48, MaxLadoLousa)
+}
+
+// O montador (a lousa da reunião)
+
+// SubstituirMontador refaz o que é do montador numa lousa da reunião: apaga
+// as peças com autor montador (as ligações delas saem junto, inclusive as
+// suas que apontavam para elas) e cria as novas, com os refs resolvidos no
+// lote. O que é seu, inclusive uma peça montada que você moveu ou editou,
+// fica onde está. Tudo ou nada; não grava evento (decisão 0008).
+func (b *Banco) SubstituirMontador(ctx context.Context, lousa int64, novos []NovoDoAgente) (ResultadoLousa, error) {
+	var r ResultadoLousa
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		l, err := lerLousa(ctx, tx, lousa)
+		if err != nil {
+			return err
+		}
+		if !l.Dono.DaReuniao() {
+			return ErrInvalido{"só a lousa da daily ou da sprint é montada pelo núcleo"}
+		}
+		r = ResultadoLousa{Lousa: l, Elementos: []Elemento{}, Removidos: []int64{}, Refs: map[string]int64{}}
+		linhas, err := tx.QueryContext(ctx, `SELECT id FROM lousa_elementos WHERE lousa_id = ? AND (autor = 'montador'
+			OR de_id IN (SELECT id FROM lousa_elementos WHERE lousa_id = ? AND autor = 'montador')
+			OR para_id IN (SELECT id FROM lousa_elementos WHERE lousa_id = ? AND autor = 'montador'))`, l.ID, l.ID, l.ID)
+		if err != nil {
+			return err
+		}
+		removidos := map[int64]bool{}
+		for linhas.Next() {
+			var id int64
+			if err := linhas.Scan(&id); err != nil {
+				linhas.Close()
+				return err
+			}
+			removidos[id] = true
+		}
+		linhas.Close()
+		for id := range removidos {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM lousa_elementos WHERE id = ?`, id); err != nil {
+				return err
+			}
+			r.Removidos = append(r.Removidos, id)
+		}
+		sort.Slice(r.Removidos, func(i, j int) bool { return r.Removidos[i] < r.Removidos[j] })
+		var z int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(z), 0) FROM lousa_elementos WHERE lousa_id = ?`, l.ID).Scan(&z); err != nil {
+			return err
+		}
+		momento := agora()
+		criados := []int64{}
+		for _, n := range novos {
+			if n.Ref != "" {
+				if _, repetido := r.Refs[n.Ref]; repetido {
+					return ErrInvalido{"o mesmo ref aparece duas vezes na montagem"}
+				}
+			}
+			z++
+			id, err := criarElemento(ctx, tx, l, n.NovoElemento, r.Refs, map[int64]bool{}, z, autorLousa{montador: true}, momento)
+			if err != nil {
+				return err
+			}
+			if n.Ref != "" {
+				r.Refs[n.Ref] = id
+			}
+			criados = append(criados, id)
+		}
+		var total int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM lousa_elementos WHERE lousa_id = ?`, l.ID).Scan(&total); err != nil {
+			return err
+		}
+		if total > MaxElementosLousa {
+			return ErrInvalido{fmt.Sprintf("A lousa chegou ao limite de %d itens", MaxElementosLousa)}
+		}
+		r.Elementos, err = elementosPorID(ctx, tx, criados)
+		return err
+	})
+	return r, err
+}
+
+// TarefasMontadas diz quais tarefas têm peças do montador na lousa, com a
+// hora da montagem mais antiga de cada uma.
+func (b *Banco) TarefasMontadas(ctx context.Context, lousa int64) (map[int64]string, error) {
+	linhas, err := b.db.QueryContext(ctx, `SELECT montagem_de, MIN(atualizado_em) FROM lousa_elementos
+		WHERE lousa_id = ? AND autor = 'montador' AND montagem_de IS NOT NULL GROUP BY montagem_de`, lousa)
+	if err != nil {
+		return nil, err
+	}
+	defer linhas.Close()
+	tarefas := map[int64]string{}
+	for linhas.Next() {
+		var id int64
+		var quando string
+		if err := linhas.Scan(&id, &quando); err != nil {
+			return nil, err
+		}
+		tarefas[id] = quando
+	}
+	return tarefas, linhas.Err()
 }

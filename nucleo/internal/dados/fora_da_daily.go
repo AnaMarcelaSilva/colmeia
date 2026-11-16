@@ -3,12 +3,15 @@ package dados
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 )
 
 // TirarDaDaily tira a tarefa da daily do dia (AAAA-MM-DD), ou a traz de
 // volta com fora falso. Só a daily daquele dia muda: a sprint, a linha do
-// tempo e as dailies dos outros dias continuam com a tarefa.
+// tempo e as dailies dos outros dias continuam com a tarefa. Uma tarefa
+// já removida também sai: ela segue na daily pelo histórico, e o perfil e
+// o projeto dela vêm do evento da remoção.
 func (b *Banco) TirarDaDaily(ctx context.Context, tarefa int64, dia string, fora bool) error {
 	if err := PeriodoNotaValido("daily", dia); err != nil {
 		return ErrInvalido{"o dia da daily precisa ser uma data AAAA-MM-DD"}
@@ -17,19 +20,23 @@ func (b *Banco) TirarDaDaily(ctx context.Context, tarefa int64, dia string, fora
 		var projeto int64
 		var titulo string
 		err := tx.QueryRowContext(ctx, `SELECT projeto_id, titulo FROM tarefas WHERE id = ?`, tarefa).Scan(&projeto, &titulo)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNaoEncontrado
-		}
-		if err != nil {
+		var perfil int64
+		var nomeProjeto string
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if perfil, projeto, nomeProjeto, titulo, err = tarefaRemovida(ctx, tx, tarefa); err != nil {
+				return err
+			}
+		case err != nil:
 			return err
-		}
-		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, projeto)
-		if err != nil {
-			return err
+		default:
+			if perfil, nomeProjeto, err = donoDoProjeto(ctx, tx, projeto); err != nil {
+				return err
+			}
 		}
 		var r sql.Result
 		if fora {
-			r, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fora_da_daily (tarefa_id, dia) VALUES (?, ?)`, tarefa, dia)
+			r, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO fora_da_daily (tarefa_id, dia, perfil_id) VALUES (?, ?, ?)`, tarefa, dia, perfil)
 		} else {
 			r, err = tx.ExecContext(ctx, `DELETE FROM fora_da_daily WHERE tarefa_id = ? AND dia = ?`, tarefa, dia)
 		}
@@ -44,14 +51,33 @@ func (b *Banco) TirarDaDaily(ctx context.Context, tarefa int64, dia string, fora
 	})
 }
 
-// ForaDaDaily traz as tarefas do perfil tiradas da daily do dia.
+// tarefaRemovida acha, pelo evento da remoção, o perfil, o projeto e o
+// título de uma tarefa que não existe mais. Sem o evento, não encontrada.
+func tarefaRemovida(ctx context.Context, tx *transacao, tarefa int64) (perfil, projeto int64, nomeProjeto, titulo string, err error) {
+	var bruto string
+	err = tx.QueryRowContext(ctx, `SELECT perfil_id, projeto_id, dados FROM eventos
+		WHERE tipo = 'tarefa.removida' AND tarefa_id = ? ORDER BY id DESC LIMIT 1`, tarefa).Scan(&perfil, &projeto, &bruto)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, "", "", ErrNaoEncontrado
+	}
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+	var dados struct {
+		Titulo      string `json:"titulo"`
+		ProjetoNome string `json:"projeto_nome"`
+	}
+	if err := json.Unmarshal([]byte(bruto), &dados); err != nil {
+		return 0, 0, "", "", err
+	}
+	return perfil, projeto, dados.ProjetoNome, dados.Titulo, nil
+}
+
+// ForaDaDaily traz as tarefas do perfil tiradas da daily do dia, inclusive
+// as já removidas.
 func (b *Banco) ForaDaDaily(ctx context.Context, perfil int64, dia string) (map[int64]bool, error) {
 	fora := map[int64]bool{}
-	linhas, err := b.db.QueryContext(ctx, `SELECT f.tarefa_id FROM fora_da_daily f
-		JOIN tarefas t ON t.id = f.tarefa_id
-		JOIN projetos p ON p.id = t.projeto_id
-		JOIN workspaces w ON w.id = p.workspace_id
-		WHERE f.dia = ? AND w.perfil_id = ?`, dia, perfil)
+	linhas, err := b.db.QueryContext(ctx, `SELECT tarefa_id FROM fora_da_daily WHERE dia = ? AND perfil_id = ?`, dia, perfil)
 	if err != nil {
 		return nil, err
 	}

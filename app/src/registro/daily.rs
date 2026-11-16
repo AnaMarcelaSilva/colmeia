@@ -1,8 +1,8 @@
-//! Página da daily: o roteiro da fala, numa coluna só. Os grupos são o dia
-//! anterior (Ontem), Hoje e Esperando minha resposta; cada tarefa é uma linha
-//! com o estado, o título e a frase que o agente deixou quando ela foi para
-//! Revisão ou Concluído. Com mais de um projeto no recorte, a linha diz o
-//! projeto.
+//! Página da daily: um bloco por projeto, na ordem da barra lateral, como
+//! a pessoa fala na reunião. Dentro do bloco, uma tarefa por linha com a
+//! nota que o agente deixou (ou que você escreveu), em itens quando ela tem
+//! itens. O dia (quando não é hoje) e o estado que pede atenção viram selos
+//! na linha; as tarefas que esperam resposta são contadas no alto.
 //!
 //! Uma tarefa já apresentada pode sair da daily de hoje pelo botão direito
 //! ("Tirar desta daily"); ela fica listada no fim, com "Trazer de volta". A
@@ -10,40 +10,81 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, Id, RichText, vec2};
+use eframe::egui::{self, Id, Rect, RichText, UiBuilder, pos2, vec2};
 
-use super::frase::{self, Frase};
-use super::{Acao, Escopo, Registro, comum};
+use super::{Acao, Escopo, Registro, comum, leitor, lista, sprint};
 use crate::api;
 use crate::tema::{self, Icone, TipoAviso, cores};
 
-/// Os grupos da daily: o título e as tarefas, na ordem do deck.
-fn grupos(deck: &api::Deck) -> Vec<(String, bool, Vec<&api::Slide>)> {
-    let (mut antes, mut hoje, mut esperando) = (Vec::new(), Vec::new(), Vec::new());
-    let mut nome_antes = None;
-    for s in &deck.slides {
-        if s.grupo == "aguardando" {
-            esperando.push(s);
-        } else if s.partes.iter().any(|p| p == "Hoje") || s.partes.is_empty() {
-            hoje.push(s);
-        } else {
-            nome_antes = nome_antes.or_else(|| s.partes.first().cloned());
-            antes.push(s);
-        }
+/// A parte do dia que vira selo na linha: a primeira que não é "Hoje",
+/// só quando a tarefa não aparece hoje.
+fn parte_do_slide(s: &api::Slide) -> Option<&str> {
+    if s.partes.iter().any(|p| p == "Hoje") {
+        return None;
     }
-    [(nome_antes.unwrap_or_else(|| "Ontem".into()), false, antes), ("Hoje".into(), false, hoje), ("Esperando minha resposta".into(), true, esperando)]
-        .into_iter()
-        .filter(|(_, _, lista)| !lista.is_empty())
-        .collect()
+    s.partes.iter().find(|p| *p != "No período").map(String::as_str)
 }
 
-/// "8 frases · cerca de 1 min de fala": umas 130 palavras por minuto.
-pub(super) fn tempo_de_fala(frases: &[&str]) -> String {
-    let palavras: usize = frases.iter().map(|f| f.split_whitespace().count()).sum();
-    let minutos = palavras.div_ceil(130).max(1);
-    let n = frases.len();
-    let frases = if n == 1 { "1 frase".to_string() } else { format!("{n} frases") };
-    format!("{frases} · cerca de {minutos} min de fala")
+/// O texto para copiar, montado do deck: um bloco por projeto com as notas
+/// de cada tarefa (uma linha segue o título; itens vão embaixo, recuados),
+/// e no fim as tarefas que esperam resposta, com o projeto entre
+/// parênteses. Com um projeto só, sem a linha do nome.
+pub(super) fn texto_em_blocos(deck: &api::Deck) -> String {
+    let secoes = comum::secoes_do_deck(deck);
+    let varios = secoes.len() > 1;
+    let mut blocos: Vec<String> = Vec::new();
+    let mut esperando: Vec<String> = Vec::new();
+    for secao in &secoes {
+        let mut linhas = Vec::new();
+        for s in &secao.slides {
+            if s.grupo == "aguardando" && !s.removida {
+                let projeto = if varios { format!(" ({})", secao.projeto) } else { String::new() };
+                esperando.push(format!("- {}{projeto}", s.titulo.trim_end_matches('.')));
+                continue;
+            }
+            linhas.push(linha_do_texto(s));
+        }
+        if linhas.is_empty() {
+            continue;
+        }
+        let corpo = linhas.join("\n");
+        blocos.push(if varios { format!("{}\n{corpo}", secao.projeto) } else { corpo });
+    }
+    if !esperando.is_empty() {
+        blocos.push(format!("Esperando minha resposta\n{}", esperando.join("\n")));
+    }
+    blocos.join("\n\n")
+}
+
+/// Uma tarefa no texto: o título, o estado entre parênteses quando conta,
+/// e a nota (de hoje ou de ontem).
+fn linha_do_texto(s: &api::Slide) -> String {
+    let titulo = s.titulo.trim_end_matches('.');
+    let anterior = !matches!(s.grupo.as_str(), "trabalhando" | "aguardando" | "erros");
+    let nota = if !s.nota.trim().is_empty() {
+        Some(s.nota.trim().to_string())
+    } else {
+        s.nota_anterior.as_ref().filter(|a| anterior && !a.texto.trim().is_empty()).map(|a| a.texto.trim().to_string())
+    };
+    let mut estados = Vec::new();
+    if parte_do_slide(s).is_some() {
+        estados.push("ontem");
+    }
+    match s.grupo.as_str() {
+        "trabalhando" => estados.push("em andamento"),
+        "revisao" => estados.push("em revisão"),
+        "erros" => estados.push("parou com erro"),
+        _ => {}
+    }
+    let estado = if estados.is_empty() { String::new() } else { format!(" ({})", estados.join(", ")) };
+    match nota {
+        Some(n) if n.contains('\n') || comum::tem_itens(&n) => {
+            let itens: Vec<String> = n.lines().map(|l| format!("  {}", l.trim_end())).collect();
+            format!("- {titulo}{estado}\n{}", itens.join("\n"))
+        }
+        Some(n) => format!("- {titulo}{estado}. {n}"),
+        None => format!("- {titulo}{estado}"),
+    }
 }
 
 /// A faixa que explica, uma vez, que a página se escreve sozinha.
@@ -63,13 +104,38 @@ impl Registro {
         let p = cores();
         let ctx = ui.ctx().clone();
         let deck = self.deck_daily.clone();
-        match &deck {
-            Some(d) => cabecalho(ui, &d.titulo, &d.periodo, escopo, acoes),
-            None => cabecalho(ui, "Daily", &escopo.nome, escopo, acoes),
-        }
+        // O cabeçalho; à direita, "N de M apresentadas" e "Daily apresentada".
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| match &deck {
+                Some(d) => cabecalho(ui, &d.titulo, &d.periodo, escopo, acoes),
+                None => cabecalho(ui, "Daily", &escopo.nome, escopo, acoes),
+            });
+            if let Some(d) = deck.as_ref().filter(|d| !d.slides.is_empty()) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                    ui.add_space(4.0);
+                    if d.fechada_em.is_empty() {
+                        let b = tema::botao_secundario_com(ui, "Daily apresentada", self.conectado)
+                            .on_hover_text("Fecha a daily de hoje: a próxima começa daqui, com o que ficou aberto, e os vistos zeram");
+                        if b.clicked() {
+                            self.fechar_daily(&ctx, d.chave_nota.clone());
+                        }
+                    } else {
+                        if tema::link_com(ui, "fechar de novo", self.conectado).on_hover_text("A próxima daily começa de agora").clicked() {
+                            self.fechar_daily(&ctx, d.chave_nota.clone());
+                        }
+                        ui.label(RichText::new(format!("Daily apresentada às {}", d.fechada_em)).color(p.ok).size(13.0));
+                    }
+                    ui.add_space(12.0);
+                    leitor::progresso(ui, d.apresentadas, d.slides.iter().filter(|s| !s.removida).count());
+                });
+            }
+        });
         ui.add_space(10.0);
-        sozinha(ui, "Quando uma tarefa vai para Revisão ou Concluído, o agente deixa uma frase para a reunião. É só ler.");
-        ui.add_space(16.0);
+        sozinha(
+            ui,
+            "A pauta à esquerda, na ordem em que você fala (arraste para mudar). À direita a tarefa inteira, com a frase, os cartões e as imagens. O visto marca o que já foi apresentado.",
+        );
+        ui.add_space(14.0);
         if let Some(e) = self.erro_daily.clone() {
             if comum::faixa_erro(ui, &format!("Não consegui montar a daily: {e}")) {
                 self.erro_daily = None;
@@ -83,103 +149,93 @@ impl Registro {
             }
             return;
         };
-        let topo = ui.cursor().top();
-        let mut rolagem = egui::ScrollArea::vertical().id_salt("pagina-daily").auto_shrink(false);
-        if std::mem::take(&mut self.ao_topo[0]) {
-            rolagem = rolagem.vertical_scroll_offset(0.0);
-        }
-        let saida = rolagem.show(ui, |ui| {
-            // A barra de rolagem fica numa faixa só dela, sem nada por baixo.
-            ui.set_max_width(ui.available_width() - comum::MARGEM_ROLAGEM);
-            if deck.slides.is_empty() && deck.capa.novas.is_empty() {
-                let desde = deck.periodo.split(" · ").next().unwrap_or_default().to_string();
-                if !deck.fora.is_empty() {
-                    comum::vazio(ui, "Nada para a daily", "O que houve no período já foi tirado desta daily.", None);
-                } else if escopo.recorte == api::Recorte::Perfil {
-                    let texto = format!("Nenhuma tarefa trabalhada ({desde}). Quando um agente trabalhar numa tarefa, ela aparece aqui com a frase dela.");
-                    comum::vazio(ui, "Nada para a daily", &texto, None);
-                } else if comum::vazio(
-                    ui,
-                    &format!("Nada para a daily em {}", escopo.nome),
-                    &format!("Nenhuma tarefa trabalhada ({desde})."),
-                    Some("Ver todos os projetos"),
-                ) {
-                    acoes.push(Acao::Recorte(api::Recorte::Perfil));
-                }
-                if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado) {
-                    self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), false);
-                }
-                return;
+        if deck.slides.is_empty() && deck.capa.novas.is_empty() {
+            let desde = deck.periodo.split(" · ").next().unwrap_or_default().to_string();
+            if !deck.fora.is_empty() {
+                comum::vazio(ui, "Nada para a daily", "O que houve no período já foi tirado desta daily.", None);
+            } else if !deck.fechada_em.is_empty() {
+                comum::vazio(ui, "Daily apresentada", "A próxima daily começa com o que acontecer daqui em diante e com o que ficou aberto.", None);
+            } else if escopo.recorte == api::Recorte::Perfil {
+                let texto = format!("Nenhuma tarefa trabalhada ({desde}). Quando um agente trabalhar numa tarefa, ela aparece aqui na pauta do projeto dela.");
+                comum::vazio(ui, "Nada para a daily", &texto, None);
+            } else if comum::vazio(
+                ui,
+                &format!("Nada para a daily em {}", escopo.nome),
+                &format!("Nenhuma tarefa trabalhada ({desde})."),
+                Some("Ver todos os projetos"),
+            ) {
+                acoes.push(Acao::Recorte(api::Recorte::Perfil));
             }
-            let mut faladas = Vec::new();
-            for (titulo, espera, slides) in grupos(&deck) {
-                cabecalho_grupo(ui, &titulo, espera);
-                for s in slides {
-                    // A frase de ontem só vale para quem parou; quem segue trabalhando ganha outra.
-                    let anterior = !matches!(s.grupo.as_str(), "trabalhando" | "aguardando" | "erros");
-                    let frase = frase::frase_do_slide(s, escrevendo.contains(&s.tarefa_id), anterior);
-                    if let Frase::Pronta(t) = frase {
-                        faladas.push(t);
-                    }
-                    self.linha_da_daily(ui, &deck, s, &frase, escopo.varios(), acoes);
-                }
-                ui.add_space(18.0);
-            }
-            if deck.slides.is_empty() {
-                let novas = deck.capa.novas.join(", ");
-                ui.label(RichText::new(format!("Só tarefas novas: {novas}.")).color(p.suave).size(13.5));
-            }
-            if deck.mais > 0 {
-                ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(13.5));
-            }
-            if !faladas.is_empty() {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 18.0), egui::Sense::hover());
-                    tema::desenhar_icone(ui.painter(), r.center(), Icone::Relogio, p.suave);
-                    ui.label(RichText::new(format!("{} · cada frase vira um slide", tempo_de_fala(&faladas))).color(p.suave).size(12.5));
-                });
-            }
-            if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado) {
+            if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado, true) {
                 self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), false);
             }
-            ui.add_space(16.0);
-            self.texto_da_daily(ui, acoes);
-            ui.add_space(24.0);
-        });
-        let area = egui::Rect::from_min_max(egui::pos2(saida.inner_rect.left(), topo), saida.inner_rect.right_bottom());
-        comum::sombra_rolagem(ui.painter(), area, saida.state.offset.y);
-    }
-
-    /// Uma tarefa da daily: a linha, ou o campo da frase quando em edição.
-    fn linha_da_daily(&mut self, ui: &mut egui::Ui, deck: &api::Deck, s: &api::Slide, frase: &Frase, com_projeto: bool, acoes: &mut Vec<Acao>) {
-        let topo = ui.cursor().top();
-        if self.edicao.as_ref().is_some_and(|e| e.tarefa == s.tarefa_id && e.daily) {
-            self.linha_em_edicao(ui, false);
             return;
         }
-        let op = frase::Opcoes {
-            projeto: com_projeto.then_some(s.projeto.as_str()),
-            editada: self.editadas.contains(&(true, s.tarefa_id)),
-            editavel: self.conectado && !s.removida && !matches!(frase, Frase::Escrevendo),
-            arrastavel: false,
-            daily: self.conectado,
+
+        // A pauta e o painel. A tarefa aberta, de começo, é a primeira ainda
+        // não apresentada; ao voltar da tela cheia, a última vista.
+        let secoes = sprint::secoes(&deck);
+        let mut leitor = std::mem::take(&mut self.leitor_daily);
+        if let Some(t) = self.rolar_ate.take() {
+            leitor.escolhida = Some(t);
+        }
+        if leitor.escolhida.is_none_or(|id| !deck.slides.iter().any(|s| s.tarefa_id == id)) {
+            leitor.escolhida = deck.slides.iter().find(|s| !s.apresentada && !s.removida).or(deck.slides.first()).map(|s| s.tarefa_id);
+        }
+        let area = ui.available_rect_before_wrap();
+        let esquerda = Rect::from_min_size(area.min, vec2(leitor::PAUTA, area.height()));
+        let direita = Rect::from_min_max(pos2(esquerda.right() + 16.0, area.top()), area.max);
+        let op = leitor::OpcoesPauta {
+            compacta: false,
+            arrastavel: self.conectado,
+            assuntos: false,
+            daily: true,
+            sprint_fixa: false,
+            conectado: self.conectado,
+            recorte: escopo.recorte,
         };
-        match frase::linha(ui, s, frase, &op) {
-            Some(frase::Clique::Editar) => self.abrir_edicao(s, true, frase),
-            Some(frase::Clique::AbrirTarefa) => acoes.push(Acao::AbrirTarefa { tarefa: s.tarefa_id, agente: None, lousa: false }),
-            Some(frase::Clique::Apresentar) => acoes.push(Acao::Apresentar { deck: Box::new(deck.clone()), periodo: None, tarefa: Some(s.tarefa_id) }),
-            Some(frase::Clique::TirarDaDaily) => self.tirar_da_daily(ui.ctx(), s.tarefa_id, deck.chave_nota.clone(), true),
-            None => {}
+        let mut pedidos = Vec::new();
+        let esperando = deck.slides.iter().filter(|s| s.grupo == "aguardando" && !s.removida).count();
+        let mut lista = ui.new_child(UiBuilder::new().max_rect(esquerda).layout(egui::Layout::top_down(egui::Align::Min)));
+        egui::ScrollArea::vertical().id_salt("pauta-daily").auto_shrink(false).show(&mut lista, |ui| {
+            ui.set_max_width(leitor::PAUTA - comum::MARGEM_ROLAGEM);
+            if esperando > 0 {
+                let texto = if esperando == 1 { "1 tarefa espera minha resposta".to_string() } else { format!("{esperando} tarefas esperam minha resposta") };
+                ui.label(tema::texto_forte(texto, 13.0).color(p.alerta));
+                ui.add_space(8.0);
+            }
+            pedidos = self.pauta(ui, &deck, &secoes, &mut leitor, &op);
+            if deck.mais > 0 {
+                ui.label(RichText::new(format!("E mais {} tarefas que não cabem na apresentação.", deck.mais)).color(p.suave).size(12.5));
+            }
+            if let Some(t) = tiradas(ui, &deck.fora, escopo.varios(), self.conectado, true) {
+                self.tirar_da_daily(&ctx, t, deck.chave_nota.clone(), false);
+            }
+            ui.add_space(14.0);
+            self.texto_da_daily(ui, acoes);
+            ui.add_space(16.0);
+            lista::rolar_no_arrasto(ui);
+        });
+        lista::rotulo_do_arrasto(&ctx);
+        let mut detalhe = ui.new_child(UiBuilder::new().max_rect(direita).layout(egui::Layout::top_down(egui::Align::Min)));
+        if let Some(id) = leitor.escolhida
+            && let Some((indice, s)) = deck.slides.iter().enumerate().find(|(_, s)| s.tarefa_id == id)
+        {
+            if self.edicao.as_ref().is_some_and(|e| e.tarefa == id && e.daily) {
+                self.linha_em_edicao(&mut detalhe, true);
+            } else {
+                let projeto = secoes.iter().find(|sec| sec.slides.iter().any(|x| x.tarefa_id == id)).map(|sec| sec.nome.clone()).unwrap_or_default();
+                let mais = self.painel(&mut detalhe, s, &projeto, indice + 1, deck.slides.len(), &mut leitor, 1.0, true, &op);
+                pedidos.extend(mais);
+            }
         }
-        // Ao voltar da apresentação, a página mostra a tarefa do último slide visto.
-        if self.rolar_ate == Some(s.tarefa_id) {
-            self.rolar_ate = None;
-            let largura = ui.available_width();
-            ui.scroll_to_rect(
-                egui::Rect::from_min_size(egui::pos2(ui.min_rect().left(), topo), vec2(largura, ui.cursor().top() - topo)),
-                Some(egui::Align::Center),
-            );
+        ui.allocate_rect(area, egui::Sense::hover());
+        self.leitor_daily = leitor;
+        // O teclado mexe no estado já devolvido ao registro.
+        if let Some(pd) = self.teclado_do_leitor(&ctx, &deck, true, false) {
+            pedidos.push(pd);
         }
+        self.tratar_pedidos_leitor(&ctx, pedidos, &deck, true, escrevendo, acoes);
     }
 
     /// O texto para copiar, recolhido no fim (Ctrl+Shift+D abre e põe o foco).
@@ -197,11 +253,10 @@ impl Registro {
                         ui.ctx().copy_text(self.texto_daily.clone());
                         acoes.push(Acao::Avisar(TipoAviso::Neutro, "Copiado".into()));
                     }
-                    if self.texto_daily != daily.texto {
+                    if self.texto_daily != self.texto_daily_base {
                         ui.add_space(8.0);
                         if tema::botao_secundario(ui, "Refazer texto").clicked() {
-                            self.texto_daily = daily.texto.clone();
-                            self.texto_daily_com_tempo = daily.tempo_agentes && super::tem_tempo(&daily.texto);
+                            self.texto_daily = self.texto_daily_base.clone();
                         }
                     }
                 });
@@ -218,15 +273,6 @@ impl Registro {
             resposta.request_focus();
         }
     }
-}
-
-/// O nome do grupo, com um fio embaixo; "Esperando minha resposta" em âmbar.
-fn cabecalho_grupo(ui: &mut egui::Ui, titulo: &str, espera: bool) {
-    let p = cores();
-    ui.label(tema::texto_forte(titulo, 15.0).color(if espera { p.alerta } else { p.texto }));
-    let r = ui.available_rect_before_wrap();
-    ui.painter().hline(r.x_range(), r.top() + 2.0, egui::Stroke::new(1.0, p.borda.gamma_multiply(0.6)));
-    ui.add_space(8.0);
 }
 
 /// O cabeçalho da página: o título e o período. Na visão de um projeto de um
@@ -251,14 +297,15 @@ pub(super) fn cabecalho(ui: &mut egui::Ui, titulo: &str, explicacao: &str, escop
 
 /// As tarefas tiradas da daily de hoje, cada uma com "Trazer de volta".
 /// Devolve a que deve voltar.
-fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: bool, conectado: bool) -> Option<i64> {
+pub(super) fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: bool, conectado: bool, daily: bool) -> Option<i64> {
     if fora.is_empty() {
         return None;
     }
     let p = cores();
     let mut voltar = None;
     ui.add_space(16.0);
-    ui.label(RichText::new(format!("Tiradas desta daily · {}", fora.len())).color(p.suave).size(13.5));
+    let onde = if daily { "daily" } else { "sprint" };
+    ui.label(RichText::new(format!("Tiradas desta {onde} · {}", fora.len())).color(p.suave).size(13.5));
     ui.add_space(4.0);
     for t in fora {
         ui.horizontal(|ui| {
@@ -268,7 +315,7 @@ fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: bool, conec
             }
             ui.label(RichText::new(texto).color(p.texto).size(13.5));
             let r = tema::link_com(ui, "Trazer de volta", conectado);
-            if r.on_hover_text("Volta para a daily de hoje").clicked() {
+            if r.on_hover_text(if daily { "Volta para a daily de hoje" } else { "Volta para esta sprint" }).clicked() {
                 voltar = Some(t.tarefa_id);
             }
         });
@@ -280,34 +327,72 @@ fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: bool, conec
 mod testes {
     use super::*;
 
-    fn slide(id: i64, grupo: &str, partes: &[&str]) -> api::Slide {
-        api::Slide { tarefa_id: id, grupo: grupo.into(), partes: partes.iter().map(|p| p.to_string()).collect(), ..Default::default() }
+    fn slide(id: i64, grupo: &str, partes: &[&str], secao: i64, projeto: &str, nota: &str) -> api::Slide {
+        api::Slide {
+            tarefa_id: id,
+            titulo: format!("Tarefa {id}"),
+            grupo: grupo.into(),
+            coluna: match grupo {
+                "concluidas" => "concluido",
+                "revisao" => "revisao",
+                "aguardando" => "aguardando",
+                _ => "trabalhando",
+            }
+            .into(),
+            partes: partes.iter().map(|p| p.to_string()).collect(),
+            secao: projeto.into(),
+            secao_id: secao,
+            projeto: projeto.into(),
+            nota: nota.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn grupos_da_daily_ontem_hoje_e_esperando() {
+    fn parte_so_quando_nao_e_de_hoje() {
+        assert_eq!(parte_do_slide(&slide(1, "concluidas", &["Ontem"], 1, "a", "")), Some("Ontem"));
+        assert_eq!(parte_do_slide(&slide(1, "concluidas", &["Ontem", "Hoje"], 1, "a", "")), None);
+        assert_eq!(parte_do_slide(&slide(1, "concluidas", &["Sexta"], 1, "a", "")), Some("Sexta"));
+        assert_eq!(parte_do_slide(&slide(1, "trabalhando", &[], 1, "a", "")), None);
+    }
+
+    #[test]
+    fn texto_em_blocos_por_projeto() {
         let deck = api::Deck {
             slides: vec![
-                slide(1, "concluidas", &["Ontem"]),
-                slide(2, "concluidas", &["Ontem", "Hoje"]),
-                slide(3, "aguardando", &["Hoje"]),
-                slide(4, "trabalhando", &[]),
+                slide(1, "concluidas", &["Hoje"], 1, "loja-web", "Correção da leitura do código de barras."),
+                slide(2, "concluidas", &["Ontem"], 1, "loja-web", "Validando o dígito verificador."),
+                slide(3, "revisao", &["Hoje"], 2, "hub", "1. Campo novo no instalador.\n2. A central grava o endereço.\n- Falta subir para revisão."),
+                slide(4, "trabalhando", &[], 2, "hub", ""),
+                slide(5, "aguardando", &["Hoje"], 3, "app-lojista", ""),
             ],
             ..Default::default()
         };
-        let g = grupos(&deck);
-        let ids: Vec<(String, Vec<i64>)> = g.iter().map(|(t, _, l)| (t.clone(), l.iter().map(|s| s.tarefa_id).collect())).collect();
-        assert_eq!(ids, vec![("Ontem".into(), vec![1]), ("Hoje".into(), vec![2, 4]), ("Esperando minha resposta".into(), vec![3])]);
-        assert!(g[2].1);
-        // O dia anterior pode ser outro ("Sexta", depois do fim de semana).
-        let deck = api::Deck { slides: vec![slide(1, "concluidas", &["Sexta"])], ..Default::default() };
-        assert_eq!(grupos(&deck)[0].0, "Sexta");
-    }
-
-    #[test]
-    fn tempo_de_fala_pelas_palavras() {
-        assert_eq!(tempo_de_fala(&["A busca acha o cliente pelo telefone."]), "1 frase · cerca de 1 min de fala");
-        let longa = "palavra ".repeat(200);
-        assert_eq!(tempo_de_fala(&[&longa, "outra"]), "2 frases · cerca de 2 min de fala");
+        let esperado = concat!(
+            "loja-web\n",
+            "- Tarefa 1. Correção da leitura do código de barras.\n",
+            "- Tarefa 2 (ontem). Validando o dígito verificador.\n",
+            "\n",
+            "hub\n",
+            "- Tarefa 3 (em revisão)\n",
+            "  1. Campo novo no instalador.\n",
+            "  2. A central grava o endereço.\n",
+            "  - Falta subir para revisão.\n",
+            "- Tarefa 4 (em andamento)\n",
+            "\n",
+            "Esperando minha resposta\n",
+            "- Tarefa 5 (app-lojista)"
+        );
+        assert_eq!(texto_em_blocos(&deck), esperado);
+        // Um projeto só: sem a linha do nome e sem o projeto entre parênteses.
+        let um = api::Deck {
+            slides: vec![slide(1, "concluidas", &["Hoje"], 1, "loja-web", "Pronto."), slide(5, "aguardando", &["Hoje"], 1, "loja-web", "")],
+            ..Default::default()
+        };
+        assert_eq!(texto_em_blocos(&um), "- Tarefa 1. Pronto.\n\nEsperando minha resposta\n- Tarefa 5");
+        // Sem nota de hoje, a de ontem vale para quem parou.
+        let mut s = slide(6, "concluidas", &["Ontem"], 1, "loja-web", "");
+        s.nota_anterior = Some(api::NotaAnterior { texto: "Ficou pronto.".into(), periodo: "ontem".into() });
+        assert_eq!(linha_do_texto(&s), "- Tarefa 6 (ontem). Ficou pronto.");
     }
 }

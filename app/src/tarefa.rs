@@ -196,7 +196,7 @@ impl Colmeia {
             Aba::Arquivos => self.aba_arquivos(ui, id, &pasta, agora),
             Aba::Lousa => {
                 let area = ui.available_rect_before_wrap();
-                let dono = api::DonoLousa { workspace_id: 0, tarefa_id: id };
+                let dono = api::DonoLousa::tarefa(id);
                 self.ancora_aviso = Some(area.center_bottom() - vec2(0.0, 16.0));
                 let acoes = self.mostrar_lousa(ui, area, dono, agora);
                 self.tratar_lousa(dono, acoes, ui.ctx(), agora);
@@ -547,6 +547,9 @@ impl Colmeia {
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         match self.terminais.get_mut(&agente.id) {
             Some(t) => {
+                if self.foco_pendente.take_if(|f| *f == agente.id).is_some() {
+                    t.focar();
+                }
                 t.mostrar(&mut filho, 13.0, true);
             }
             None => {
@@ -697,6 +700,11 @@ impl Colmeia {
                 self.compositor.citar(&texto);
                 self.mudar_aba(id, Aba::Terminal, &ctx);
             }
+            Some(gaveta::PedidoGaveta::AbrirLink(endereco)) => {
+                if let Err(e) = sistema::abrir_link(&endereco) {
+                    self.erro(format!("Não consegui abrir o navegador: {e}"), agora);
+                }
+            }
         }
     }
 
@@ -751,7 +759,7 @@ impl Colmeia {
         let resto = Rect::from_min_max(pos2(area.left(), faixa.bottom() + 12.0), area.max);
         ui.painter().rect(resto, CornerRadius::same(14), p.superficie, Stroke::new(1.0, p.borda.gamma_multiply(0.7)), StrokeKind::Inside);
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(resto.shrink2(vec2(16.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
-        let nome_projeto = self.modelo.projetos.iter().find(|p| p.id == projeto).map(|p| p.nome.clone()).unwrap_or_default();
+        let (nome_projeto, outros) = outros_do_workspace(&self.modelo.projetos, projeto);
         let bytes = self.bytes.clone();
         let mut aviso = None;
         filho.horizontal(|ui| {
@@ -760,11 +768,13 @@ impl Colmeia {
             ui.label(texto_forte("Rodar", 14.5).color(p.texto));
             ui.label(RichText::new("na pasta da tarefa · Shift+F10 roda, Ctrl+F2 para").size(12.5).color(p.suave));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                aviso = self.play.botao(ui, &bytes, projeto, &nome_projeto, id, pode);
+                aviso = self.play.botao(ui, &bytes, projeto, &nome_projeto, id, pode, &outros);
             });
         });
         filho.add_space(10.0);
-        if self.play.painel_do_projeto(projeto) && !self.demo {
+        // A saída da última execução, deste projeto ou de outro do workspace
+        // rodado daqui.
+        if self.play.painel.is_some() && !self.demo {
             if let Some(a) = self.play.mostrar_painel(&mut filho, &bytes, pode) {
                 aviso = Some(a);
             }
@@ -799,6 +809,14 @@ pub fn proximo_passo(coluna: Coluna) -> Option<(&'static str, &'static str, Colu
         Coluna::Trabalhando | Coluna::AguardandoVoce => Some(("Enviar para revisão", "Levar a tarefa para Revisão", Coluna::Revisao)),
         Coluna::Backlog | Coluna::Concluido => None,
     }
+}
+
+/// O nome do projeto e os outros projetos do mesmo workspace (id e nome),
+/// para o menu do Play trazer as configurações deles.
+pub fn outros_do_workspace(projetos: &[crate::dados::Projeto], projeto: i64) -> (String, Vec<(i64, String)>) {
+    let Some(p) = projetos.iter().find(|p| p.id == projeto) else { return (String::new(), Vec::new()) };
+    let outros = projetos.iter().filter(|o| o.workspace_id == p.workspace_id && o.id != projeto).map(|o| (o.id, o.nome.clone())).collect();
+    (p.nome.clone(), outros)
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ jobs:
           cargo test --workspace --locked
       - name: Compilar
         run: |
-          CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo ./cmd/colmeia-nucleo
+          CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w -X main.versao=${GITHUB_REF_NAME#v}" -o ../dist/colmeia-nucleo ./cmd/colmeia-nucleo
           # O whisper.cpp do colmeia-voz sem -march=native: roda em qualquer x86-64 com AVX2.
           GGML_NATIVE=OFF cargo build --release --locked -p colmeia -p colmeia-abelha -p colmeia-voz
           cp target/release/colmeia target/release/colmeia-abelha target/release/colmeia-voz dist/
@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w" -o ../dist/colmeia-nucleo.exe ./cmd/colmeia-nucleo
+          CGO_ENABLED=0 go -C nucleo build -trimpath -ldflags "-s -w -X main.versao=${GITHUB_REF_NAME#v}" -o ../dist/colmeia-nucleo.exe ./cmd/colmeia-nucleo
           GGML_NATIVE=OFF cargo build --release --locked -p colmeia -p colmeia-abelha -p colmeia-voz
           cp target/release/colmeia.exe target/release/colmeia-abelha.exe target/release/colmeia-voz.exe dist/
           cp scripts/instalar.ps1 LICENSE-MIT LICENSE-APACHE dist/
@@ -71,14 +71,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: nucleo/go.mod
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          path: pacotes
           merge-multiple: true
       - name: Somas de verificação
+        working-directory: pacotes
         run: sha256sum colmeia-linux-x86_64.tar.gz colmeia-windows-x86_64.zip > SHA256SUMS
+      # O manifesto assinado é o que a Colmeia confere para se atualizar
+      # sozinha; a chave privada fica só no segredo COLMEIA_ASSINATURA.
+      - name: Manifesto assinado
+        env:
+          COLMEIA_ASSINATURA: ${{ secrets.COLMEIA_ASSINATURA }}
+          VERSAO: ${{ github.ref_name }}
+        run: |
+          go -C nucleo run ./cmd/colmeia-assinar manifesto -versao "$VERSAO" -changelog ../CHANGELOG.md -saida ../pacotes \
+            ../pacotes/colmeia-linux-x86_64.tar.gz ../pacotes/colmeia-windows-x86_64.zip
+          jq -r .notas pacotes/colmeia.json > NOTAS.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          body_path: NOTAS.md
           files: |
-            colmeia-linux-x86_64.tar.gz
-            colmeia-windows-x86_64.zip
-            SHA256SUMS
+            pacotes/colmeia-linux-x86_64.tar.gz
+            pacotes/colmeia-windows-x86_64.zip
+            pacotes/SHA256SUMS
+            pacotes/colmeia.json
+            pacotes/colmeia.json.sig

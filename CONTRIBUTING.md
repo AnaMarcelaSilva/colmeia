@@ -26,6 +26,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Mexeu numa tela do app? Rode as fotos e olhe as imagens das telas tocadas antes de dizer que ficou pronto:
+
+```bash
+scripts/fotos.sh            # grava app/tests/fotos/*.png
+```
+
+Cada foto é um teste em `app/src/fotos.rs` que desenha a tela com dados fictícios num harness do egui (`egui_kittest`), sem o núcleo. Uma tela nova ganha o teste dela no mesmo pull request; o que a pessoa clica recebe um nome estável (`widget_info`) para o teste achar pelo nome, como `h.get_by_label("tarefa 62").click()`.
+
 O CI roda os mesmos passos, mais `govulncheck`, `cargo audit` e o gitleaks no histórico inteiro. Os testes com MySQL e PostgreSQL de verdade (`-tags integracao`) estão em "Desenvolvimento e testes" no [README](README.md#desenvolvimento-e-testes).
 
 ## Dependências

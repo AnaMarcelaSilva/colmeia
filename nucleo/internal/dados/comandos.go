@@ -10,11 +10,14 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/segredos"
 )
 
 // Origens de uma configuração de execução: escrita por você, trazida do
-// IntelliJ ou achada nos arquivos do projeto (package.json, Makefile...).
-var OrigensComando = []string{"voce", "intellij", "projeto"}
+// IntelliJ, achada nos arquivos do projeto (package.json, Makefile...) ou
+// proposta por um agente (e aceita por você).
+var OrigensComando = []string{"voce", "intellij", "projeto", "agente"}
 
 // Limites de uma configuração de execução.
 const (
@@ -38,6 +41,24 @@ type Comando struct {
 	Ambiente  []Variavel `json:"ambiente"`
 	Origem    string     `json:"origem"`
 	CriadoEm  string     `json:"criado_em"`
+	// Proposta por um agente e ainda não aceita: não roda até você aceitar.
+	Proposta bool `json:"proposta"`
+	// Quem propôs ("Claude Code (dev)") e de que tarefa (0 sem tarefa).
+	PropostaPor    string `json:"proposta_por"`
+	PropostaTarefa int64  `json:"proposta_tarefa"`
+	// O nome do projeto, só na lista por workspace.
+	ProjetoNome string `json:"projeto_nome,omitempty"`
+}
+
+// AutorProposta é o agente que propõe uma configuração.
+type AutorProposta struct {
+	Agente     int64
+	Ferramenta string
+	Papel      string
+	// Como aparece na tela ("Claude Code (dev)").
+	Quem   string
+	Tarefa int64
+	Titulo string
 }
 
 // Variavel de ambiente de uma configuração.
@@ -120,12 +141,12 @@ func PastaRelativa(pasta string) (string, error) {
 	return limpa, nil
 }
 
-const colunasComando = `id, projeto_id, nome, comando, pasta, ambiente, origem, criado_em`
+const colunasComando = `id, projeto_id, nome, comando, pasta, ambiente, origem, criado_em, proposta, proposta_por, proposta_tarefa`
 
 func lerComando(l interface{ Scan(...any) error }) (Comando, error) {
 	var c Comando
 	var ambiente string
-	if err := l.Scan(&c.ID, &c.ProjetoID, &c.Nome, &c.Comando, &c.Pasta, &ambiente, &c.Origem, &c.CriadoEm); err != nil {
+	if err := l.Scan(&c.ID, &c.ProjetoID, &c.Nome, &c.Comando, &c.Pasta, &ambiente, &c.Origem, &c.CriadoEm, &c.Proposta, &c.PropostaPor, &c.PropostaTarefa); err != nil {
 		return c, err
 	}
 	if err := json.Unmarshal([]byte(ambiente), &c.Ambiente); err != nil || c.Ambiente == nil {
@@ -146,6 +167,30 @@ func (b *Banco) ListarComandos(ctx context.Context, projeto int64) ([]Comando, e
 		c, err := lerComando(linhas)
 		if err != nil {
 			return nil, err
+		}
+		lista = append(lista, c)
+	}
+	return lista, linhas.Err()
+}
+
+// ListarComandosDoWorkspace traz as configurações de todos os projetos do
+// workspace, com o nome do projeto, por projeto e nome.
+func (b *Banco) ListarComandosDoWorkspace(ctx context.Context, workspace int64) ([]Comando, error) {
+	linhas, err := b.db.QueryContext(ctx, `SELECT c.`+strings.ReplaceAll(colunasComando, ", ", ", c.")+`, p.nome FROM comandos c JOIN projetos p ON p.id = c.projeto_id
+		WHERE p.workspace_id = ? ORDER BY p.nome COLLATE NOCASE, c.nome COLLATE NOCASE, c.id`, workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer linhas.Close()
+	lista := []Comando{}
+	for linhas.Next() {
+		var c Comando
+		var ambiente string
+		if err := linhas.Scan(&c.ID, &c.ProjetoID, &c.Nome, &c.Comando, &c.Pasta, &ambiente, &c.Origem, &c.CriadoEm, &c.Proposta, &c.PropostaPor, &c.PropostaTarefa, &c.ProjetoNome); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(ambiente), &c.Ambiente); err != nil || c.Ambiente == nil {
+			c.Ambiente = []Variavel{}
 		}
 		lista = append(lista, c)
 	}
@@ -173,18 +218,42 @@ func nomeRepetido(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: comandos.projeto_id, comandos.nome")
 }
 
-// CriarComando grava uma configuração nova no projeto.
+// CriarComando grava uma configuração nova no projeto (escrita por você,
+// do IntelliJ ou dos arquivos do projeto): já vale, sem proposta.
 func (b *Banco) CriarComando(ctx context.Context, projeto int64, campos CamposComando, origem string) (Comando, error) {
+	if err := umDe("origem", origem, OrigensComando); err != nil {
+		return Comando{}, err
+	}
+	if origem == "agente" {
+		return Comando{}, ErrInvalido{"uma configuração de agente entra como proposta"}
+	}
+	return b.inserirComando(ctx, projeto, campos, origem, nil)
+}
+
+// ProporComando grava a configuração que um agente propôs: fica como
+// proposta (não roda) até AceitarComando, e a linha do tempo conta. Comando
+// e valores com cara de segredo são recusados: o valor é você quem põe.
+func (b *Banco) ProporComando(ctx context.Context, projeto int64, campos CamposComando, autor AutorProposta) (Comando, error) {
+	if segredos.Parece(campos.Comando) {
+		return Comando{}, ErrInvalido{"o comando parece conter um segredo; deixe o valor para o usuário preencher na Colmeia"}
+	}
+	for _, v := range campos.Ambiente {
+		if segredos.Parece(v.Valor) {
+			return Comando{}, ErrInvalido{"o valor de " + strings.TrimSpace(v.Nome) + " parece um segredo; deixe-o vazio para o usuário preencher na Colmeia"}
+		}
+	}
+	return b.inserirComando(ctx, projeto, campos, "agente", &autor)
+}
+
+func (b *Banco) inserirComando(ctx context.Context, projeto int64, campos CamposComando, origem string, autor *AutorProposta) (Comando, error) {
 	campos, err := campos.Validar()
 	if err != nil {
 		return Comando{}, err
 	}
-	if err := umDe("origem", origem, OrigensComando); err != nil {
-		return Comando{}, err
-	}
 	var c Comando
 	err = b.emTransacao(ctx, func(tx *transacao) error {
-		if _, _, err := donoDoProjeto(ctx, tx, projeto); err != nil {
+		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, projeto)
+		if err != nil {
 			return err
 		}
 		var n int
@@ -196,17 +265,57 @@ func (b *Banco) CriarComando(ctx context.Context, projeto int64, campos CamposCo
 		}
 		ambiente, _ := json.Marshal(campos.Ambiente)
 		agora := time.Now().UTC().Format(time.RFC3339Nano)
-		r, err := tx.ExecContext(ctx, `INSERT INTO comandos (projeto_id, nome, comando, pasta, ambiente, origem, criado_em) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			projeto, campos.Nome, campos.Comando, campos.Pasta, string(ambiente), origem, agora)
+		c = Comando{ProjetoID: projeto, Nome: campos.Nome, Comando: campos.Comando, Pasta: campos.Pasta, Ambiente: campos.Ambiente, Origem: origem, CriadoEm: agora}
+		if autor != nil {
+			c.Proposta, c.PropostaPor, c.PropostaTarefa = true, autor.Quem, autor.Tarefa
+		}
+		r, err := tx.ExecContext(ctx, `INSERT INTO comandos (projeto_id, nome, comando, pasta, ambiente, origem, criado_em, proposta, proposta_por, proposta_tarefa) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			projeto, campos.Nome, campos.Comando, campos.Pasta, string(ambiente), origem, agora, c.Proposta, c.PropostaPor, c.PropostaTarefa)
 		if nomeRepetido(err) {
 			return ErrInvalido{"já existe uma configuração com o nome " + campos.Nome}
 		}
 		if err != nil {
 			return err
 		}
-		id, _ := r.LastInsertId()
-		c = Comando{ID: id, ProjetoID: projeto, Nome: campos.Nome, Comando: campos.Comando, Pasta: campos.Pasta, Ambiente: campos.Ambiente, Origem: origem, CriadoEm: agora}
-		return nil
+		c.ID, _ = r.LastInsertId()
+		if autor == nil {
+			return nil
+		}
+		escopo := Escopo{Perfil: perfil, Projeto: projeto, Tarefa: autor.Tarefa, Agente: autor.Agente}
+		return registrar(ctx, tx, "comando.proposto", escopo, map[string]any{
+			"comando": c.ID, "nome": c.Nome, "projeto_nome": nomeProjeto, "titulo": autor.Titulo,
+			"agente": autor.Agente, "ferramenta": autor.Ferramenta, "papel": autor.Papel,
+		})
+	})
+	return c, err
+}
+
+// AceitarComando faz valer a proposta de um agente: a configuração passa a
+// rodar como qualquer outra, e a linha do tempo conta.
+func (b *Banco) AceitarComando(ctx context.Context, id int64) (Comando, error) {
+	var c Comando
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		var err error
+		c, err = lerComando(tx.QueryRowContext(ctx, `SELECT `+colunasComando+` FROM comandos WHERE id = ?`, id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNaoEncontrado
+		}
+		if err != nil {
+			return err
+		}
+		if !c.Proposta {
+			return ErrInvalido{"esta configuração não é uma proposta"}
+		}
+		perfil, nomeProjeto, err := donoDoProjeto(ctx, tx, c.ProjetoID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE comandos SET proposta = 0 WHERE id = ?`, id); err != nil {
+			return err
+		}
+		c.Proposta = false
+		escopo := Escopo{Perfil: perfil, Projeto: c.ProjetoID, Tarefa: c.PropostaTarefa}
+		return registrar(ctx, tx, "comando.aceito", escopo, map[string]any{"comando": c.ID, "nome": c.Nome, "projeto_nome": nomeProjeto, "proposta_por": c.PropostaPor})
 	})
 	return c, err
 }

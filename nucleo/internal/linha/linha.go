@@ -56,6 +56,13 @@ type Contexto struct {
 	// ForaDaDaily: as tarefas tiradas da daily de hoje. Elas saem da daily
 	// (deck e texto), mas não da sprint nem da linha do tempo.
 	ForaDaDaily map[int64]bool
+	// DesdeDaily: a hora da última daily apresentada. Depois dela, a daily
+	// só traz a tarefa com atividade mais nova ou que ainda não concluiu.
+	DesdeDaily time.Time
+	// ForaDaSprint: as tarefas tiradas da sprint fixa olhada. Elas saem do
+	// resumo, do texto e do deck dessa sprint; a daily e a linha do tempo
+	// continuam com elas.
+	ForaDaSprint map[int64]bool
 	// TitulosSprint: os títulos que as tarefas ganharam na sprint olhada
 	// (só no resumo e no deck da sprint); a daily usa o da tarefa.
 	TitulosSprint map[int64]string
@@ -90,13 +97,18 @@ func (c Contexto) antesComAssunto(posA, posB int, a, b int64, nomeA, nomeB strin
 }
 
 // semForaDaDaily tira os itens das tarefas fora da daily de hoje.
-func (c Contexto) semForaDaDaily(itens []Item) []Item {
-	if len(c.ForaDaDaily) == 0 {
+func (c Contexto) semForaDaDaily(itens []Item) []Item { return semFora(itens, c.ForaDaDaily) }
+
+// semForaDaSprint tira os itens das tarefas fora da sprint olhada.
+func (c Contexto) semForaDaSprint(itens []Item) []Item { return semFora(itens, c.ForaDaSprint) }
+
+func semFora(itens []Item, fora map[int64]bool) []Item {
+	if len(fora) == 0 {
 		return itens
 	}
 	restantes := make([]Item, 0, len(itens))
 	for _, item := range itens {
-		if !c.ForaDaDaily[item.TarefaID] {
+		if !fora[item.TarefaID] {
 			restantes = append(restantes, item)
 		}
 	}
@@ -199,8 +211,10 @@ type Item struct {
 	aguardando int64
 	erro       bool
 	descartado bool
-	// Itens que o agente acrescentou à lousa (somados numa linha só).
+	// Itens que o agente acrescentou à lousa (somados numa linha só), ou
+	// apagou dela (acaoLousa "apagou").
 	quantidade int
+	acaoLousa  string
 }
 
 // Tipos de item (a tela escolhe o ponto pela tabela de estados).
@@ -233,6 +247,8 @@ const (
 	TipoNavegadorFechado = "navegador_fechado"
 	// O agente acrescentou itens à lousa da tarefa.
 	TipoLousa = "lousa"
+	// Uma configuração do Play proposta por um agente, e aceita por você.
+	TipoPlay = "play"
 	// Bancos de dados: suas consultas (juntas por conexão e dia), suas
 	// alterações e as conexões criadas ou removidas.
 	TipoBanco          = "banco"
@@ -269,6 +285,7 @@ type conteudo struct {
 	Nome         string          `json:"nome"`
 	ProjetoID    int64           `json:"projeto_id"`
 	ProjetoNome  string          `json:"projeto_nome"`
+	DeNome       string          `json:"de_nome"`
 	Coluna       string          `json:"coluna"`
 	ColunaAntes  string          `json:"coluna_antes"`
 	Origem       string          `json:"origem"`
@@ -292,6 +309,8 @@ type conteudo struct {
 	NaLousa      bool   `json:"na_lousa"`
 	Quantidade   int    `json:"quantidade"`
 	Lousa        int64  `json:"lousa"`
+	Comando      int64  `json:"comando"`
+	PropostaPor  string `json:"proposta_por"`
 	// Bancos de dados.
 	ConexaoID      int64  `json:"conexao_id"`
 	Conexao        string `json:"conexao"`
@@ -436,6 +455,18 @@ func (m *montador) passar(e dados.Evento) {
 		item.Curto = "Tarefa criada."
 	case "tarefa.atualizada":
 		m.atualizada(e, quando, d, t)
+	case "tarefa.transferida":
+		if t.ID != 0 {
+			m.titulos[tarefa] = t.Titulo
+			m.colunas = append(m.colunas, mudancaDeColuna{quando, tarefa, projeto, t.Coluna})
+		}
+		item := m.novo(e, quando, TipoMoveu)
+		item.peloAgente = d.Origem == dados.OrigemAgente
+		item.Texto = "Levou " + m.cita(tarefa, projeto) + " de " + cmpOr(d.DeNome, "outro projeto") + " para " + cmpOr(d.ProjetoNome, m.nomeProjeto(projeto), "outro projeto") + "."
+		if item.peloAgente {
+			item.Texto = "O agente levou " + m.cita(tarefa, projeto) + " de " + cmpOr(d.DeNome, "outro projeto") + " para " + cmpOr(d.ProjetoNome, m.nomeProjeto(projeto), "outro projeto") + ", a pedido."
+		}
+		item.Curto = "Veio de " + cmpOr(d.DeNome, "outro projeto") + "."
 	case "tarefa.removida":
 		if d.Titulo != "" {
 			m.titulos[tarefa] = d.Titulo
@@ -567,21 +598,45 @@ func (m *montador) passar(e dados.Evento) {
 		if d.Titulo != "" {
 			m.titulos[tarefa] = d.Titulo
 		}
-		// Acréscimos seguidos do mesmo agente viram uma linha, com a soma.
+		// Acréscimos (ou remoções) seguidos do mesmo agente viram uma linha,
+		// com a soma.
+		acao := d.Acao
+		if acao == "" {
+			acao = "acrescentou"
+		}
 		agenteDoEvento := e.Escopo.Agente
-		if i, ok := m.lousas[agenteDoEvento]; ok && quando.Sub(m.itens[i].quando) <= juntarMovimentos && !m.itens[i].descartado {
+		if i, ok := m.lousas[agenteDoEvento]; ok && m.itens[i].acaoLousa == acao && quando.Sub(m.itens[i].quando) <= juntarMovimentos && !m.itens[i].descartado {
 			item := &m.itens[i]
 			item.quantidade += d.Quantidade
 			item.quando, item.Momento, item.Evento = quando, e.Momento, e.ID
-			item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), item.quantidade, m.cita(tarefa, projeto))
+			item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), acao, item.quantidade, m.cita(tarefa, projeto))
 			return
 		}
 		item := m.novo(e, quando, TipoLousa)
-		item.quantidade = d.Quantidade
-		item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), d.Quantidade, m.cita(tarefa, projeto))
+		item.quantidade, item.acaoLousa = d.Quantidade, acao
+		item.Texto, item.Curto = textoLousa(agente(d.Ferramenta, d.Papel), acao, d.Quantidade, m.cita(tarefa, projeto))
 		m.lousas[agenteDoEvento] = len(m.itens) - 1
 	case "banco.conexao", "banco.consulta", "banco.alteracao":
 		m.banco(e, quando, d)
+	case "comando.proposto", "comando.aceito":
+		if d.Titulo != "" {
+			m.titulos[tarefa] = d.Titulo
+		}
+		item := m.novo(e, quando, TipoPlay)
+		play := "o Play “" + d.Nome + "”"
+		if d.ProjetoNome != "" {
+			play += " em " + d.ProjetoNome
+		}
+		if e.Tipo == "comando.proposto" {
+			item.Curto = agente(d.Ferramenta, d.Papel) + " propôs " + play + "."
+			item.Texto = agente(d.Ferramenta, d.Papel) + " propôs " + play + " (" + m.citaSeHouver(tarefa, projeto) + ")."
+		} else {
+			item.Curto = "Você aceitou " + play + ", proposto por " + d.PropostaPor + "."
+			item.Texto = item.Curto
+		}
+		if tarefa == 0 {
+			item.Texto = item.Curto
+		}
 	case "navegador.aberto", "navegador.captura", "navegador.fechado", "navegador.recusado":
 		if d.Titulo != "" {
 			m.titulos[tarefa] = d.Titulo
@@ -723,8 +778,11 @@ func (m *montador) banco(e dados.Evento, quando time.Time, d conteudo) {
 }
 
 // textoLousa: "Claude Code (dev) acrescentou 6 itens à lousa de “X”."
-func textoLousa(quem string, n int, cita string) (string, string) {
+func textoLousa(quem, acao string, n int, cita string) (string, string) {
 	itens := plural(n, "item", "itens")
+	if acao == "apagou" {
+		return quem + " apagou " + itens + " da lousa de " + cita + ".", quem + " apagou " + itens + " da lousa."
+	}
 	return quem + " acrescentou " + itens + " à lousa de " + cita + ".", quem + " acrescentou " + itens + " à lousa."
 }
 

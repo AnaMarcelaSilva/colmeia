@@ -116,7 +116,13 @@ func recorteDoPedido(r *http.Request) (recorte, error) {
 }
 
 func (rc recorte) filtro(perfil int64) dados.FiltroEventos {
-	return dados.FiltroEventos{Perfil: perfil, Projeto: rc.Projeto, Workspace: rc.Workspace, Tarefa: rc.Tarefa}
+	// Os eventos de uma tarefa são dela: o projeto fica só para o contexto,
+	// porque uma tarefa transferida tem história no projeto de antes.
+	projeto := rc.Projeto
+	if rc.Tarefa != 0 {
+		projeto = 0
+	}
+	return dados.FiltroEventos{Perfil: perfil, Projeto: projeto, Workspace: rc.Workspace, Tarefa: rc.Tarefa}
 }
 
 func (rc recorte) desde(perfil int64, desde string) dados.FiltroEventos {
@@ -138,6 +144,11 @@ func (rc recorte) ate(perfil int64, ate string) dados.FiltroEventos {
 func (s *Servidor) contextoDaLinha(ctx context.Context, perfil dados.Perfil, rc recorte) (linha.Contexto, error) {
 	c := linha.Contexto{Agora: time.Now(), Fuso: time.Local, Projetos: map[int64]string{}, Tarefas: map[int64]linha.TarefaAtual{}, Ativos: map[int64]linha.Ativo{},
 		Workspaces: map[int64]string{}, Ordem: map[int64]int{}, MostrarTempo: perfil.TempoAgentes}
+	// A última daily apresentada, se foi dentro da janela da daily: a
+	// próxima daily começa dela.
+	if desde, err := s.Banco.UltimaDailyApresentada(ctx, perfil.ID); err == nil && !desde.IsZero() && time.Since(desde) < time.Duration(linha.JanelaDaily)*24*time.Hour {
+		c.DesdeDaily = desde
+	}
 	projetos, err := s.Banco.ListarProjetos(ctx, perfil.ID)
 	if err != nil {
 		return c, err
@@ -395,6 +406,11 @@ func (s *Servidor) montarDeck(r *http.Request, tipo string) (linha.Deck, error) 
 	if err != nil {
 		return linha.Deck{}, err
 	}
+	return s.montarDeckDe(r, perfil, tipo)
+}
+
+// montarDeckDe é montarDeck para o perfil dado (a rota pode ser de outra coisa).
+func (s *Servidor) montarDeckDe(r *http.Request, perfil int64, tipo string) (linha.Deck, error) {
 	p, err := s.Banco.Perfil(r.Context(), perfil)
 	if err != nil {
 		return linha.Deck{}, err
@@ -420,7 +436,7 @@ func (s *Servidor) montarDeck(r *http.Request, tipo string) (linha.Deck, error) 
 		}
 		deck = linha.Apresentacao(eventos, time.Time{}, time.Time{}, c, tipo)
 	} else {
-		de, ate, sprint, err := s.periodoDaSprint(r, &c)
+		de, ate, sprint, err := s.periodoDaSprintDe(r, perfil, &c)
 		if err != nil {
 			return linha.Deck{}, err
 		}
@@ -455,5 +471,36 @@ func (s *Servidor) montarDeck(r *http.Request, tipo string) (linha.Deck, error) 
 		return linha.Deck{}, err
 	}
 	deck.CompletarLousas(lousas)
+	montagens, err := s.Banco.MontagensDasTarefas(r.Context(), ids)
+	if err != nil {
+		return linha.Deck{}, err
+	}
+	// A tarefa que ainda não tem montagem ganha a simples agora.
+	for _, sl := range deck.Slides {
+		if _, ok := montagens[sl.TarefaID]; ok || sl.Removida {
+			continue
+		}
+		if m, err := s.montagemDaTarefa(r.Context(), sl.TarefaID); err == nil {
+			if g, err := guardada(m); err == nil {
+				montagens[sl.TarefaID] = g
+			}
+		}
+	}
+	deck.CompletarMontagens(montagens)
+	// A pauta desta reunião: a ordem e os vistos; na daily, a hora em que
+	// a de hoje foi apresentada.
+	pauta, err := s.Banco.Pauta(r.Context(), perfil, tipo, deck.ChaveNota)
+	if err != nil {
+		return linha.Deck{}, err
+	}
+	fechada := ""
+	if tipo == "daily" {
+		if em, err := s.Banco.DailyApresentada(r.Context(), perfil, deck.ChaveNota); err == nil && em != "" {
+			if t, err := time.Parse(time.RFC3339Nano, em); err == nil {
+				fechada = t.In(time.Local).Format("15:04")
+			}
+		}
+	}
+	deck.CompletarPauta(pauta, fechada)
 	return deck, nil
 }

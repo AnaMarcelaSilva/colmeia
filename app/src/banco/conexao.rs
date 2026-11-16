@@ -66,6 +66,8 @@ pub struct Dialogo {
     pub salvando: bool,
     pub erro: Option<String>,
     nova_pasta: Option<String>,
+    /// Veio de "Nova pasta…" no menu da árvore: o campo já abre com foco.
+    focar_pasta: bool,
     arquivo: SeletorArquivo,
     ca: SeletorArquivo,
     focar: bool,
@@ -99,6 +101,7 @@ impl Dialogo {
             salvando: false,
             erro: None,
             nova_pasta: None,
+            focar_pasta: false,
             arquivo: SeletorArquivo::default(),
             ca: SeletorArquivo::default(),
             focar: true,
@@ -125,8 +128,15 @@ impl Dialogo {
         d.editando = Some(c.clone());
         d.nome_editado = true;
         d.porta_editada = true;
-        d.mais_opcoes = !c.pasta.is_empty() || c.ssl == "verificar";
+        d.mais_opcoes = c.ssl == "verificar";
         d
+    }
+
+    /// O editar com o campo de pasta nova aberto, para "Nova pasta…" da árvore.
+    pub fn com_nova_pasta(mut self) -> Dialogo {
+        self.nova_pasta = Some(String::new());
+        self.focar_pasta = true;
+        self
     }
 
     /// Duplicar: os mesmos campos, nome novo, sem a senha.
@@ -305,73 +315,72 @@ impl Dialogo {
                     }
                 }
                 ui.add_space(12.0);
-                tema::secao_recolhivel(ui, "Mais opções", &mut self.mais_opcoes);
-                if self.mais_opcoes {
+                // A pasta fica à vista: é por ela que a conexão muda de lugar na lista.
+                let valor = if self.campos.pasta.is_empty() { "nenhuma" } else { self.campos.pasta.as_str() };
+                let resposta = tema::chip(ui, "Pasta", valor, false);
+                egui::Popup::menu(&resposta).show(|ui| {
+                    ui.set_min_width(220.0);
+                    if tema::opcao_menu(ui, "Nenhuma", self.campos.pasta.is_empty()) {
+                        self.campos.pasta.clear();
+                        self.nova_pasta = None;
+                        ui.close();
+                    }
+                    for pasta in pastas {
+                        if tema::opcao_menu(ui, pasta, self.campos.pasta == *pasta) {
+                            self.campos.pasta = pasta.clone();
+                            self.nova_pasta = None;
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if tema::opcao_menu(ui, "Nova pasta…", false) {
+                        self.nova_pasta = Some(String::new());
+                        ui.close();
+                    }
+                });
+                if let Some(nova) = &mut self.nova_pasta {
+                    ui.add_space(6.0);
+                    let r = tema::campo(ui, "Nova pasta", nova, "Trabalho");
+                    if std::mem::take(&mut self.focar_pasta) {
+                        r.request_focus();
+                    }
+                    if r.lost_focus() || r.changed() {
+                        self.campos.pasta = nova.trim().to_string();
+                    }
+                }
+                if self.campos.tipo != "sqlite" {
+                    ui.add_space(12.0);
+                    tema::secao_recolhivel(ui, "Mais opções", &mut self.mais_opcoes);
+                }
+                if self.mais_opcoes && self.campos.tipo != "sqlite" {
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
                         ui.vertical(|ui| {
-                            let valor = if self.campos.pasta.is_empty() { "nenhuma" } else { self.campos.pasta.as_str() };
-                            let resposta = tema::chip(ui, "Pasta", valor, false);
-                            egui::Popup::menu(&resposta).show(|ui| {
-                                ui.set_min_width(220.0);
-                                if tema::opcao_menu(ui, "Nenhuma", self.campos.pasta.is_empty()) {
-                                    self.campos.pasta.clear();
-                                    ui.close();
-                                }
-                                for pasta in pastas {
-                                    if tema::opcao_menu(ui, pasta, self.campos.pasta == *pasta) {
-                                        self.campos.pasta = pasta.clone();
-                                        ui.close();
-                                    }
-                                }
-                                ui.separator();
-                                if tema::opcao_menu(ui, "Nova pasta…", false) {
-                                    self.nova_pasta = Some(String::new());
-                                    ui.close();
-                                }
-                            });
-                            if let Some(nova) = &mut self.nova_pasta {
-                                ui.add_space(6.0);
-                                let r = tema::campo(ui, "Nova pasta", nova, "Trabalho");
-                                if r.lost_focus() || r.changed() {
-                                    self.campos.pasta = nova.trim().to_string();
-                                }
+                            ui.label(RichText::new("SSL/TLS").color(p.suave).size(12.5));
+                            let atual = MODOS_SSL.iter().position(|(m, _)| *m == self.campos.ssl).unwrap_or(1);
+                            let nomes: Vec<&str> = MODOS_SSL.iter().map(|(_, n)| *n).collect();
+                            if let Some(i) = tema::segmentado(ui, &nomes, atual) {
+                                self.campos.ssl = MODOS_SSL[i].0.into();
                             }
-                            if self.campos.tipo != "sqlite" {
-                                ui.add_space(10.0);
-                                ui.label(RichText::new("SSL/TLS").color(p.suave).size(12.5));
-                                let atual = MODOS_SSL.iter().position(|(m, _)| *m == self.campos.ssl).unwrap_or(1);
-                                let nomes: Vec<&str> = MODOS_SSL.iter().map(|(_, n)| *n).collect();
-                                if let Some(i) = tema::segmentado(ui, &nomes, atual) {
-                                    self.campos.ssl = MODOS_SSL[i].0.into();
-                                }
-                                if self.campos.ssl == "verificar" {
-                                    ui.add_space(8.0);
-                                    ui.label(RichText::new("Certificado da CA (vazio: as do sistema)").color(p.suave).size(12.5));
-                                    ui.horizontal(|ui| {
-                                        let largura = 444.0 - 100.0;
-                                        let (r, _) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::hover());
-                                        ui.painter().rect(
-                                            r,
-                                            egui::CornerRadius::same(tema::RAIO_CONTROLE),
-                                            tema::fundo_campo(p, true),
-                                            egui::Stroke::new(1.0, p.borda),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                        let texto = if self.campos.ssl_ca.is_empty() { "as do sistema" } else { self.campos.ssl_ca.as_str() };
-                                        tema::texto_sem_inicio(
-                                            ui.painter(),
-                                            r.min + vec2(10.0, 8.0),
-                                            texto,
-                                            FontId::proportional(13.5),
-                                            p.texto,
-                                            largura - 20.0,
-                                        );
-                                        if tema::botao_secundario(ui, "Escolher…").clicked() {
-                                            self.ca.abrir(ui.ctx(), "Escolha o certificado da CA (PEM)");
-                                        }
-                                    });
-                                }
+                            if self.campos.ssl == "verificar" {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("Certificado da CA (vazio: as do sistema)").color(p.suave).size(12.5));
+                                ui.horizontal(|ui| {
+                                    let largura = 444.0 - 100.0;
+                                    let (r, _) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::hover());
+                                    ui.painter().rect(
+                                        r,
+                                        egui::CornerRadius::same(tema::RAIO_CONTROLE),
+                                        tema::fundo_campo(p, true),
+                                        egui::Stroke::new(1.0, p.borda),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    let texto = if self.campos.ssl_ca.is_empty() { "as do sistema" } else { self.campos.ssl_ca.as_str() };
+                                    tema::texto_sem_inicio(ui.painter(), r.min + vec2(10.0, 8.0), texto, FontId::proportional(13.5), p.texto, largura - 20.0);
+                                    if tema::botao_secundario(ui, "Escolher…").clicked() {
+                                        self.ca.abrir(ui.ctx(), "Escolha o certificado da CA (PEM)");
+                                    }
+                                });
                             }
                         });
                     });
@@ -395,7 +404,25 @@ impl Dialogo {
                         );
                     });
                 }
-                tema::caixa_marcar(ui, "Agentes podem pedir consultas (você aprova cada uma)", &mut self.campos.agentes);
+                tema::caixa_marcar(ui, "Agentes podem consultar", &mut self.campos.agentes);
+                if self.campos.agentes {
+                    // O que vale além do pedido: rodar sem pedir e alterar dados.
+                    ui.horizontal(|ui| {
+                        ui.add_space(22.0);
+                        ui.vertical(|ui| {
+                            tema::caixa_marcar(ui, "Sem pedir aprovação (vale até você desmarcar aqui)", &mut self.campos.agentes_livre);
+                            if self.campos.escrita {
+                                tema::caixa_marcar(ui, "Também alterar dados (INSERT, UPDATE e DELETE com WHERE)", &mut self.campos.agentes_escrita);
+                            } else {
+                                self.campos.agentes_escrita = false;
+                                ui.label(RichText::new("Para alterarem dados, marque \"Permitir alterações\" acima.").color(p.suave).size(12.0));
+                            }
+                        });
+                    });
+                } else {
+                    self.campos.agentes_livre = false;
+                    self.campos.agentes_escrita = false;
+                }
                 // O resultado do Testar, numa linha sempre reservada.
                 ui.add_space(12.0);
                 let sqlite = self.campos.tipo == "sqlite";
@@ -446,7 +473,7 @@ fn nome_livre(base: &str, nomes: &[String]) -> String {
     (2..).map(|i| format!("{base} {i}")).find(|n| !existe(n)).unwrap_or_default()
 }
 
-fn campos_de(c: &api::ConexaoBanco) -> api::CamposConexao {
+pub(super) fn campos_de(c: &api::ConexaoBanco) -> api::CamposConexao {
     api::CamposConexao {
         pasta: c.pasta.clone(),
         nome: c.nome.clone(),
@@ -460,6 +487,8 @@ fn campos_de(c: &api::ConexaoBanco) -> api::CamposConexao {
         ssl_ca: c.ssl_ca.clone(),
         escrita: c.escrita,
         agentes: c.agentes,
+        agentes_livre: c.agentes_livre,
+        agentes_escrita: c.agentes_escrita,
     }
 }
 
@@ -656,12 +685,18 @@ impl ConfirmarEscrita {
         let modal = egui::Modal::new(Id::new("confirmar-escrita")).frame(tema::moldura_janela()).backdrop_color(backdrop()).show(ctx, |ui| {
             ui.set_width(552.0);
             let banco = if self.c.banco.is_empty() { String::new() } else { format!(" · banco {}", self.c.banco) };
-            tema::cabecalho(ui, &format!("Alterar dados em {}{banco}?", self.nome), "");
+            let g = Gravidade::de(&self.c.verbo, self.c.sem_where);
+            tema::cabecalho(ui, &format!("{} em {}{banco}?", g.pergunta(&self.c.verbo), self.nome), "");
             ui.add_space(12.0);
-            let pilula = Pilula { texto: &self.c.verbo, cor: p.erro, cheio: true, ponto: true, grande: false }.grande();
-            let largura = pilula.largura(ui.painter());
-            let (r, _) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::hover());
-            pilula.pintar(ui.painter(), r.min);
+            let cor = g.cor();
+            ui.horizontal(|ui| {
+                let pilula = Pilula { texto: &self.c.verbo, cor, cheio: true, ponto: true, grande: false }.grande();
+                let largura = pilula.largura(ui.painter());
+                let (r, _) = ui.allocate_exact_size(vec2(largura, 32.0), Sense::hover());
+                pilula.pintar(ui.painter(), r.min);
+                ui.add_space(4.0);
+                ui.label(RichText::new(g.explicacao(&self.c.verbo)).size(13.0).color(p.suave));
+            });
             if self.c.sem_where {
                 ui.add_space(10.0);
                 egui::Frame::new()
@@ -689,7 +724,8 @@ impl ConfirmarEscrita {
                     resposta = RespostaEscrita::Cancelar;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if tema::botao_alerta(ui, "Executar alteração").clicked() {
+                    let g = Gravidade::de(&self.c.verbo, self.c.sem_where);
+                    if tema::botao_contorno(ui, g.botao(&self.c.verbo), g.cor()).clicked() {
                         resposta = RespostaEscrita::Executar;
                     }
                 });
@@ -699,6 +735,68 @@ impl ConfirmarEscrita {
             return RespostaEscrita::Cancelar;
         }
         resposta
+    }
+}
+
+/// O peso da alteração, para a confirmação não assustar à toa: acrescentar
+/// linhas não pede o vermelho de quem apaga.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gravidade {
+    /// Só acrescenta (INSERT).
+    Acrescenta,
+    /// Muda o que já existe (UPDATE com WHERE, ALTER e o resto).
+    Altera,
+    /// Apaga ou reescreve a tabela inteira (DELETE, DROP, TRUNCATE, sem WHERE).
+    Apaga,
+}
+
+impl Gravidade {
+    pub fn de(verbo: &str, sem_where: bool) -> Gravidade {
+        match verbo {
+            _ if sem_where => Gravidade::Apaga,
+            "DELETE" | "DROP" | "TRUNCATE" => Gravidade::Apaga,
+            "INSERT" => Gravidade::Acrescenta,
+            _ => Gravidade::Altera,
+        }
+    }
+
+    fn cor(self) -> egui::Color32 {
+        let p = cores();
+        match self {
+            Gravidade::Acrescenta | Gravidade::Altera => p.alerta,
+            Gravidade::Apaga => p.erro,
+        }
+    }
+
+    fn pergunta(self, verbo: &str) -> &'static str {
+        match (self, verbo) {
+            (Gravidade::Acrescenta, _) => "Gravar dados",
+            (Gravidade::Apaga, "UPDATE") => "Alterar a tabela inteira",
+            (Gravidade::Apaga, _) => "Apagar dados",
+            _ => "Alterar dados",
+        }
+    }
+
+    fn explicacao(self, verbo: &str) -> &'static str {
+        match (self, verbo) {
+            (Gravidade::Acrescenta, _) => "Acrescenta linhas novas na tabela.",
+            (Gravidade::Apaga, "UPDATE") => "Muda todas as linhas da tabela.",
+            (Gravidade::Apaga, "DROP") => "Remove o objeto e o que ele guarda.",
+            (Gravidade::Apaga, "TRUNCATE") => "Esvazia a tabela inteira.",
+            (Gravidade::Apaga, _) => "Remove linhas da tabela.",
+            (_, "UPDATE") => "Muda linhas que já existem.",
+            (_, "ALTER") => "Muda a estrutura da tabela.",
+            _ => "Pode mudar dados ou a estrutura do banco.",
+        }
+    }
+
+    fn botao(self, verbo: &str) -> &'static str {
+        match (self, verbo) {
+            (Gravidade::Acrescenta, _) => "Gravar",
+            (Gravidade::Apaga, "UPDATE") => "Alterar tudo",
+            (Gravidade::Apaga, _) => "Apagar",
+            _ => "Executar alteração",
+        }
     }
 }
 
@@ -790,6 +888,18 @@ pub fn ladrilhos(ui: &mut egui::Ui) -> Option<&'static str> {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn inserir_nao_pede_o_vermelho_de_apagar() {
+        assert_eq!(Gravidade::de("INSERT", false), Gravidade::Acrescenta);
+        assert_eq!(Gravidade::de("UPDATE", false), Gravidade::Altera);
+        assert_eq!(Gravidade::de("UPDATE", true), Gravidade::Apaga);
+        assert_eq!(Gravidade::de("DELETE", false), Gravidade::Apaga);
+        assert_eq!(Gravidade::de("DROP", false), Gravidade::Apaga);
+        assert_eq!(Gravidade::de("?", false), Gravidade::Altera);
+        assert_eq!(Gravidade::Acrescenta.botao("INSERT"), "Gravar");
+        assert_eq!(Gravidade::Apaga.botao("UPDATE"), "Alterar tudo");
+    }
 
     #[test]
     fn nome_sugerido_e_porta_padrao() {

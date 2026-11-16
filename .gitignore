@@ -19,3 +19,13 @@
 /arquivo/**/target/
 /arquivo/**/gen/
 /arquivo/**/ephemeral/
+
+# Fotos das telas: só as atuais entram; o harness grava .old, .new e .diff ao comparar
+app/tests/fotos/*.old.png
+app/tests/fotos/*.new.png
+app/tests/fotos/*.diff.png
+
+# Saídas locais
+/nucleo/target/
+/app.log
+/.impeccable/

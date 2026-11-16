@@ -122,8 +122,247 @@ pub fn ponto_do_tipo(tipo: &str) -> EstadoVisual {
 
 /// O texto sem linhas em branco (a nota complementada pelo agente vem
 /// separada por uma): num espaço de poucas linhas, cada linha conta.
-pub fn sem_linhas_vazias(texto: &str) -> String {
-    texto.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
+/// Acrescenta ao `job` uma nota com o markdown da lousa (títulos, negrito,
+/// itálico, código, listas e tabelas simples), na `fonte` e na `cor`.
+/// `altura_linha` é a das linhas de texto; `espaco`, a altura da linha em
+/// branco entre um bloco e outro (0 cola um no outro, como no slide).
+pub fn anexar_nota(job: &mut egui::text::LayoutJob, texto: &str, fonte: f32, cor: Color32, altura_linha: Option<f32>, espaco: f32) {
+    use crate::lousa::markdown::{Bloco, Marcador, Trecho, ler};
+    let p = cores();
+    let normal = FontId::proportional(fonte);
+    let formato = |font_id: FontId, cor: Color32| egui::TextFormat { font_id, color: cor, line_height: altura_linha, ..Default::default() };
+    let trechos = |job: &mut egui::text::LayoutJob, lista: &[Trecho], negrito: bool| {
+        for t in lista {
+            let mut f = formato(if t.negrito || negrito { forte(fonte) } else { normal.clone() }, cor);
+            if t.codigo {
+                f.font_id = FontId::monospace(fonte - 3.0);
+                f.background = p.superficie;
+            }
+            f.italics = t.italico;
+            job.append(&t.texto, 0.0, f);
+        }
+    };
+    let blocos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
+    for (i, b) in blocos.iter().enumerate() {
+        if i > 0 {
+            job.append("\n", 0.0, formato(normal.clone(), cor));
+            if espaco > 0.0 {
+                job.append("\n", 0.0, egui::TextFormat { font_id: FontId::proportional(espaco), color: cor, line_height: Some(espaco), ..Default::default() });
+            }
+        }
+        match b {
+            Bloco::Titulo(_, t) => trechos(job, t, true),
+            Bloco::Paragrafo(ls) => {
+                for (j, l) in ls.iter().enumerate() {
+                    if j > 0 {
+                        job.append("\n", 0.0, formato(normal.clone(), cor));
+                    }
+                    trechos(job, l, false);
+                }
+            }
+            Bloco::Item { nivel, marcador, trechos: t } => {
+                let recuo = "    ".repeat(*nivel as usize);
+                let marca = match marcador {
+                    Marcador::Ponto => "•".to_string(),
+                    Marcador::Numero(n) => format!("{n}."),
+                    Marcador::Caixa(true) => "[x]".to_string(),
+                    Marcador::Caixa(false) => "[ ]".to_string(),
+                };
+                job.append(&format!("{recuo}{marca} "), 0.0, formato(normal.clone(), p.suave));
+                trechos(job, t, false);
+            }
+            Bloco::Codigo(c) => {
+                let mut f = formato(FontId::monospace(fonte - 4.0), cor);
+                f.background = p.superficie;
+                job.append(c.trim_end(), 0.0, f);
+            }
+            Bloco::Tabela { cabecalho, linhas: ls, .. } => {
+                for (j, l) in cabecalho.iter().chain(ls.iter()).enumerate() {
+                    if j > 0 {
+                        job.append("\n", 0.0, formato(normal.clone(), cor));
+                    }
+                    for (k, celula) in l.iter().enumerate() {
+                        if k > 0 {
+                            job.append("  ·  ", 0.0, formato(normal.clone(), p.suave));
+                        }
+                        trechos(job, celula, j == 0 && cabecalho.is_some());
+                    }
+                }
+            }
+            Bloco::Vazio => {}
+        }
+    }
+}
+
+/// A nota tem itens (alguma lista) ou mais de um bloco: a tela a mostra
+/// embaixo do título, bloco a bloco, em vez de na mesma linha.
+pub fn tem_itens(texto: &str) -> bool {
+    use crate::lousa::markdown::{Bloco, ler};
+    let blocos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
+    blocos.len() > 1 || blocos.iter().any(|b| matches!(b, Bloco::Item { .. }))
+}
+
+/// Como a nota em itens é medida e pintada.
+#[derive(Clone, Copy)]
+pub struct EstiloNota {
+    pub fonte: f32,
+    pub cor: Color32,
+    /// A cor do marcador ("•", "1.").
+    pub marcador: Color32,
+    pub largura: f32,
+    pub altura_linha: f32,
+    /// A coluna do marcador: o texto de um item começa depois dela
+    /// (um subitem recua mais uma).
+    pub recuo: f32,
+    /// O vão entre dois itens seguidos.
+    pub vao_item: f32,
+    /// O vão entre blocos (um parágrafo e uma lista, dois parágrafos).
+    pub vao_bloco: f32,
+}
+
+/// Um bloco da nota já medido.
+struct BlocoMedido {
+    marcador: Option<std::sync::Arc<egui::Galley>>,
+    texto: std::sync::Arc<egui::Galley>,
+    recuo: f32,
+    item: bool,
+}
+
+/// A nota medida bloco a bloco, com recuo pendente nos itens: as linhas que
+/// quebram alinham com o texto, não com o marcador. Mede uma vez e pinta
+/// onde for preciso (a linha da daily, o slide do bloco, o da tarefa).
+pub struct NotaMedida {
+    blocos: Vec<BlocoMedido>,
+    estilo: EstiloNota,
+    pub altura: f32,
+}
+
+impl NotaMedida {
+    pub fn nova(pintor: &egui::Painter, texto: &str, estilo: EstiloNota) -> Self {
+        use crate::lousa::markdown::{Bloco, Marcador, ler};
+        let fonte = FontId::proportional(estilo.fonte);
+        let mut blocos = Vec::new();
+        let mut altura = 0.0;
+        let lidos: Vec<Bloco> = ler(texto).into_iter().filter(|b| !matches!(b, Bloco::Vazio)).collect();
+        for b in &lidos {
+            let (nivel, marca) = match b {
+                Bloco::Item { nivel, marcador, .. } => {
+                    let marca = match marcador {
+                        Marcador::Ponto => "•".to_string(),
+                        Marcador::Numero(n) => format!("{n}."),
+                        Marcador::Caixa(true) => "[x]".to_string(),
+                        Marcador::Caixa(false) => "[ ]".to_string(),
+                    };
+                    (*nivel as f32, Some(marca))
+                }
+                _ => (0.0, None),
+            };
+            let recuo = if marca.is_some() { estilo.recuo * (nivel + 1.0) } else { 0.0 };
+            let mut job = egui::text::LayoutJob {
+                wrap: egui::text::TextWrapping { max_width: (estilo.largura - recuo).max(40.0), ..Default::default() },
+                ..Default::default()
+            };
+            anexar_bloco(&mut job, b, estilo.fonte, estilo.cor, Some(estilo.altura_linha));
+            let galeria = pintor.layout_job(job);
+            let marcador = marca.map(|m| pintor.layout_no_wrap(m, fonte.clone(), estilo.marcador));
+            let item = marcador.is_some();
+            if let Some(ultimo) = blocos.last() {
+                let BlocoMedido { item: anterior, .. } = ultimo;
+                altura += if *anterior && item { estilo.vao_item } else { estilo.vao_bloco };
+            }
+            altura += galeria.size().y;
+            blocos.push(BlocoMedido { marcador, texto: galeria, recuo, item });
+        }
+        NotaMedida { blocos, estilo, altura }
+    }
+
+    /// Pinta a partir do canto superior esquerdo.
+    pub fn pintar(&self, pintor: &egui::Painter, pos: Pos2) {
+        let mut y = pos.y;
+        let mut anterior = None;
+        for b in &self.blocos {
+            if let Some(a) = anterior {
+                y += if a && b.item { self.estilo.vao_item } else { self.estilo.vao_bloco };
+            }
+            if let Some(m) = &b.marcador {
+                let coluna = b.recuo - self.estilo.recuo;
+                pintor.galley(pos2(pos.x + coluna, y), m.clone(), self.estilo.marcador);
+            }
+            pintor.galley(pos2(pos.x + b.recuo, y), b.texto.clone(), self.estilo.cor);
+            y += b.texto.size().y;
+            anterior = Some(b.item);
+        }
+    }
+}
+
+/// Acrescenta um bloco do markdown ao `job` (sem o marcador de item: a nota
+/// em itens pinta o marcador na coluna dele).
+fn anexar_bloco(job: &mut egui::text::LayoutJob, b: &crate::lousa::markdown::Bloco, fonte: f32, cor: Color32, altura_linha: Option<f32>) {
+    use crate::lousa::markdown::{Bloco, Trecho};
+    let p = cores();
+    let normal = FontId::proportional(fonte);
+    let formato = |font_id: FontId, cor: Color32| egui::TextFormat { font_id, color: cor, line_height: altura_linha, ..Default::default() };
+    let trechos = |job: &mut egui::text::LayoutJob, lista: &[Trecho], negrito: bool| {
+        for t in lista {
+            let mut f = formato(if t.negrito || negrito { forte(fonte) } else { normal.clone() }, cor);
+            if t.codigo {
+                f.font_id = FontId::monospace(fonte - 3.0);
+                f.background = p.superficie;
+            }
+            f.italics = t.italico;
+            job.append(&t.texto, 0.0, f);
+        }
+    };
+    match b {
+        Bloco::Titulo(_, t) => trechos(job, t, true),
+        Bloco::Paragrafo(ls) => {
+            for (j, l) in ls.iter().enumerate() {
+                if j > 0 {
+                    job.append("\n", 0.0, formato(normal.clone(), cor));
+                }
+                trechos(job, l, false);
+            }
+        }
+        Bloco::Item { trechos: t, .. } => trechos(job, t, false),
+        Bloco::Codigo(c) => {
+            let mut f = formato(FontId::monospace(fonte - 4.0), cor);
+            f.background = p.superficie;
+            job.append(c.trim_end(), 0.0, f);
+        }
+        Bloco::Tabela { cabecalho, linhas: ls, .. } => {
+            for (j, l) in cabecalho.iter().chain(ls.iter()).enumerate() {
+                if j > 0 {
+                    job.append("\n", 0.0, formato(normal.clone(), cor));
+                }
+                for (k, celula) in l.iter().enumerate() {
+                    if k > 0 {
+                        job.append("  ·  ", 0.0, formato(normal.clone(), p.suave));
+                    }
+                    trechos(job, celula, j == 0 && cabecalho.is_some());
+                }
+            }
+        }
+        Bloco::Vazio => {}
+    }
+}
+
+/// Um selo de texto (a pílula "Ontem", "esperando você") numa fonte
+/// qualquer: a altura segue a fonte, para servir ao slide também.
+pub fn selo(pintor: &egui::Painter, pos: Pos2, texto: &str, fonte: FontId, cor: Color32) -> Rect {
+    let galeria = pintor.layout_no_wrap(texto.to_owned(), fonte, cor);
+    let altura = galeria.size().y + 6.0;
+    let rect = Rect::from_min_size(pos, vec2(galeria.size().x + 12.0, altura));
+    pintor.rect_filled(rect, CornerRadius::same((altura / 2.0).min(10.0) as u8), cor.gamma_multiply(0.14));
+    pintor.galley(rect.center() - galeria.size() / 2.0, galeria, cor);
+    rect
+}
+
+/// A seta de uma seção que recolhe (giro 1 aberta, 0 recolhida).
+pub fn seta(pintor: &egui::Painter, centro: Pos2, giro: f32, cor: Color32) {
+    let angulo = (giro - 1.0) * std::f32::consts::FRAC_PI_2;
+    let rot = egui::emath::Rot2::from_angle(angulo);
+    let pontos = [vec2(-4.0, -2.0), vec2(4.0, -2.0), vec2(0.0, 2.5)].map(|v| centro + rot * v).to_vec();
+    pintor.add(egui::Shape::convex_polygon(pontos, cor, Stroke::NONE));
 }
 
 /// Uma linha de texto cortada com "…" (o centro vertical em `pos.y`); diz se cortou.
@@ -486,11 +725,6 @@ mod testes {
         assert_eq!(img.pixels[0], Color32::from_rgb(200, 200, 200));
         let inteira = decodificar(&png, None).unwrap();
         assert_eq!(inteira.size, [400, 300]);
-    }
-
-    #[test]
-    fn nota_sem_linhas_em_branco() {
-        assert_eq!(sem_linhas_vazias("Tela quase pronta.\n\nTotal de testes: 42"), "Tela quase pronta.\nTotal de testes: 42");
     }
 
     #[test]

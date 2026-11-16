@@ -145,6 +145,20 @@ pub fn abrir_pasta(pasta: &str) -> Result<(), String> {
     abrir_com(abridor(), pasta)
 }
 
+/// Abre um endereço https no navegador padrão (a página de uma versão).
+pub fn abrir_link(endereco: &str) -> Result<(), String> {
+    if !endereco.starts_with("https://") {
+        return Err("o endereço precisa ser https".into());
+    }
+    let mut comando = comando_limpo(abridor());
+    comando.arg(endereco).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut comando, 0);
+    let mut filho = comando.spawn().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || filho.wait());
+    Ok(())
+}
+
 /// Programa que abre um arquivo com o aplicativo padrão do sistema.
 fn abridor() -> &'static str {
     if cfg!(windows) {

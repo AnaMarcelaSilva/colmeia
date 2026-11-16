@@ -21,9 +21,104 @@ pub enum Mensagem {
     Fora,
     /// O atalho global dos comandos falados foi apertado.
     Atalho,
-    /// Quantas janelas da Colmeia do perfil estão à vista (abertas e não
-    /// minimizadas): com alguma, a abelha se esconde.
+    /// Quantas janelas da Colmeia do perfil estão à vista (abertas, não
+    /// minimizadas e com o foco): com alguma, a abelha se esconde.
     Janelas(usize),
+    /// As últimas linhas do terminal de um agente (a conversa aberta).
+    Texto {
+        agente: i64,
+        resultado: Result<TextoAgente, String>,
+    },
+    /// O que foi escrito no agente chegou (ou não).
+    Entrada(Result<(), String>),
+    /// A tarefa nova foi criada (com o agente, se pedido).
+    Criada(Result<(i64, Option<i64>), String>),
+    /// O agente da conversa foi ligado (retomado ou criado), ou não.
+    Iniciado {
+        tarefa: i64,
+        resultado: Result<i64, String>,
+    },
+    /// Você voltou depois de uma pausa (sem mexer no computador) desse tamanho.
+    Voltou(Duration),
+}
+
+/// O texto recente do terminal de um agente, como o núcleo entrega.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct TextoAgente {
+    #[serde(default)]
+    pub linhas: Vec<String>,
+    #[serde(default)]
+    pub rodando: bool,
+    #[serde(default)]
+    pub estado: String,
+    #[serde(default)]
+    pub motivo: String,
+}
+
+/// O "erro" de uma resposta do núcleo, ou o status.
+fn erro_de(status: u16, corpo: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(corpo)
+        .ok()
+        .and_then(|v| v["erro"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("o núcleo respondeu {status}"))
+}
+
+/// As últimas linhas do terminal do agente, em texto puro.
+pub fn texto_do_agente(agente: i64, linhas: usize) -> Result<TextoAgente, String> {
+    let (status, corpo) = canal::pedir_com_corpo("GET", &format!("/v1/agentes/{agente}/texto?linhas={linhas}"), None)?;
+    if status != 200 {
+        return Err(erro_de(status, &corpo));
+    }
+    serde_json::from_str(&corpo).map_err(|e| e.to_string())
+}
+
+/// Escreve no terminal do agente: com `enter`, uma mensagem; sem, só as teclas.
+pub fn entrada_do_agente(agente: i64, texto: &str, enter: bool) -> Result<(), String> {
+    let corpo = serde_json::json!({ "texto": texto, "enter": enter }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/agentes/{agente}/entrada"), Some(&corpo))?;
+    if status != 200 {
+        return Err(erro_de(status, &resposta));
+    }
+    Ok(())
+}
+
+/// Cria uma tarefa no projeto, na pasta dele e na branch dada (a base do
+/// projeto; vazia sem git), e, se pedido, já sobe um Claude Code nela.
+pub fn criar_tarefa(projeto: i64, titulo: &str, branch: &str, com_agente: bool) -> Result<(i64, Option<i64>), String> {
+    let corpo = serde_json::json!({ "titulo": titulo, "branch": branch, "local": "pasta" }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/projetos/{projeto}/tarefas"), Some(&corpo))?;
+    if status != 200 {
+        return Err(erro_de(status, &resposta));
+    }
+    let tarefa = serde_json::from_str::<serde_json::Value>(&resposta).ok().and_then(|v| v["id"].as_i64()).ok_or("a tarefa veio sem número")?;
+    if !com_agente {
+        return Ok((tarefa, None));
+    }
+    match criar_agente(tarefa) {
+        Ok(agente) => Ok((tarefa, Some(agente))),
+        Err(e) => Err(format!("a tarefa foi criada, mas o agente não subiu: {e}")),
+    }
+}
+
+/// Sobe um Claude Code (dev) na tarefa e devolve o número dele. Sem
+/// tamanho: o núcleo abre o terminal no tamanho da última tela da Colmeia
+/// (a conversa daqui mostra só o texto), senão o desenho embaralha lá.
+pub fn criar_agente(tarefa: i64) -> Result<i64, String> {
+    let corpo = serde_json::json!({ "ferramenta": "claude", "papel": "dev" }).to_string();
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/tarefas/{tarefa}/agentes"), Some(&corpo))?;
+    if status != 200 {
+        return Err(erro_de(status, &resposta));
+    }
+    serde_json::from_str::<serde_json::Value>(&resposta).ok().and_then(|v| v["id"].as_i64()).ok_or_else(|| "o agente veio sem número".to_string())
+}
+
+/// Liga de novo um agente parado (o núcleo retoma a sessão dele, se houver).
+pub fn iniciar_agente(agente: i64) -> Result<i64, String> {
+    let (status, resposta) = canal::pedir_com_corpo("POST", &format!("/v1/agentes/{agente}/iniciar"), None)?;
+    if status != 200 {
+        return Err(erro_de(status, &resposta));
+    }
+    Ok(agente)
 }
 
 /// As janelas à vista, no olá e no aviso "tela.janelas".
@@ -39,13 +134,35 @@ fn janelas_visiveis(texto: &str) -> Option<usize> {
 
 const ESPERA_MAXIMA: Duration = Duration::from_secs(30);
 
+/// A Colmeia avisou que vai reiniciar numa versão nova: quando o núcleo
+/// voltar, a abelha se reabre com o programa novo.
+fn reiniciando(texto: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(texto).is_ok_and(|v| v["tipo"] == "atualizacao" && v["estado"] == "reiniciando")
+}
+
+/// Troca este processo pelo programa que está agora no caminho de quando a
+/// abelha abriu (a atualização pôs a versão nova lá), com os mesmos
+/// argumentos. A trava do perfil fecha junto e a abelha nova pega de novo.
+#[cfg(unix)]
+fn reabrir(programa: &std::path::Path) {
+    use std::os::unix::process::CommandExt;
+    let erro = std::process::Command::new(programa).args(std::env::args_os().skip(1)).exec();
+    eprintln!("abelha: não consegui abrir a versão nova: {erro}");
+}
+
+#[cfg(not(unix))]
+fn reabrir(_: &std::path::Path) {}
+
 pub fn iniciar(perfil: i64, ctx: egui::Context, envio: Sender<Mensagem>) {
+    // O caminho é lido já: depois da troca, o do processo aponta para o programa apagado.
+    let programa = std::env::current_exe().ok();
     thread::Builder::new()
         .name("eventos".into())
         .spawn(move || {
             let mut espera = Duration::from_secs(1);
+            let mut reabrir_ao_voltar = false;
             loop {
-                let ligou = ouvir(perfil, &ctx, &envio);
+                let ligou = ouvir(perfil, &ctx, &envio, &mut reabrir_ao_voltar, programa.as_deref());
                 if envio.send(Mensagem::Fora).is_err() {
                     return;
                 }
@@ -58,17 +175,25 @@ pub fn iniciar(perfil: i64, ctx: egui::Context, envio: Sender<Mensagem>) {
 }
 
 /// Lê os eventos até a conexão cair; diz se chegou a ligar.
-fn ouvir(perfil_id: i64, ctx: &egui::Context, envio: &Sender<Mensagem>) -> bool {
+fn ouvir(perfil_id: i64, ctx: &egui::Context, envio: &Sender<Mensagem>, reabrir_ao_voltar: &mut bool, programa: Option<&std::path::Path>) -> bool {
     // `quem=abelha`: recebe o mesmo que a janela, mas não conta como janela aberta.
     let Ok(mut ws) = canal::websocket(&format!("/v1/perfis/{perfil_id}/eventos?quem=abelha")) else {
         return false;
     };
+    // Ligou de novo depois do aviso: o núcleo novo está no ar.
+    if *reabrir_ao_voltar && let Some(programa) = programa {
+        reabrir(programa);
+        *reabrir_ao_voltar = false;
+    }
     loop {
         let texto = match ws.read() {
             Ok(Message::Text(t)) => t,
             Ok(Message::Close(_)) | Err(_) => return true,
             Ok(_) => continue,
         };
+        if reiniciando(&texto) {
+            *reabrir_ao_voltar = true;
+        }
         if let Some(n) = janelas_visiveis(&texto) {
             if envio.send(Mensagem::Janelas(n)).is_err() {
                 return true;
@@ -142,6 +267,7 @@ pub fn abrir_colmeia(perfil: i64, tarefa: i64, agente: Option<i64>, ditar: bool)
             .and_then(|(_, c)| serde_json::from_str::<serde_json::Value>(&c).ok())
             .and_then(|v| v["janelas"].as_u64());
         if janelas.is_some_and(|n| n > 0) {
+            crate::fixar::trazer_a_colmeia();
             return;
         }
         let Some(app) = canal::executavel("colmeia", "COLMEIA_APP") else {

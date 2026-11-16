@@ -15,10 +15,13 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/formato"
 )
 
 // MaxLinha aceita do cliente.
@@ -70,13 +73,15 @@ const (
 	erroParametros   = -32602
 	erroInterno      = -32603
 	instrucoesGerais = "Ferramentas da Colmeia para a tarefa em que você trabalha: ler a tarefa e a nota da daily ou da sprint, " +
-		"complementar a nota com o que foi pedido, anexar imagens, abrir e capturar o navegador da tarefa e ler e acrescentar itens à lousa (quadro livre) da tarefa. " +
+		"complementar a nota com o que foi pedido, anexar imagens, abrir e capturar o navegador da tarefa e ler, acrescentar e apagar itens da lousa (quadro livre) da tarefa. " +
 		"Quando um pedido da daily chegar no terminal, responda pela nota (complementar_nota com o número do pedido), " +
 		"anexe as capturas e só então chame concluir_pedido: é ele que avisa o usuário. Seja breve: a nota aparece num slide. " +
-		"Ao terminar o trabalho, antes de encerrar, grave com complementar_nota (daily) uma ou duas frases para a reunião: o que ficou pronto e para quem, sem termos técnicos. " +
+		formato.AoTerminar +
 		"Para olhar dados de um banco do usuário, use listar_bancos e consultar_banco: só SELECT, uma instrução por vez, e o usuário aprova cada consulta na tela (pode demorar). " +
 		"Se o usuário pedir para concluir a tarefa ou mandá-la para revisão, use mover_tarefa; nunca por conta própria. " +
-		"Quando aprender algo que valha para as próximas tarefas do projeto, proponha com anotar_conhecimento."
+		"Quando aprender algo que valha para as próximas tarefas do projeto, proponha com anotar_conhecimento. " +
+		"Quando o usuário pedir um jeito de subir ou rodar algo com um clique (a API, o app, os testes), proponha um Play com propor_play: " +
+		"ele aceita na Colmeia e roda pelo botão Rodar; veja antes com listar_plays o que já existe."
 )
 
 // Servir lê os pedidos até o fim da entrada.
@@ -311,11 +316,17 @@ func objeto(props map[string]any, obrigatorios ...string) map[string]any {
 	return o
 }
 
+// As colunas do quadro e como a Colmeia as chama.
+var (
+	colunasDoQuadro = []string{"backlog", "trabalhando", "aguardando", "revisao", "concluido"}
+	nomesDasColunas = map[string]string{"backlog": "Backlog", "trabalhando": "Agente trabalhando", "aguardando": "Aguardando você", "revisao": "Revisão", "concluido": "Concluído"}
+)
+
 // Ferramentas oferecidas aos agentes.
 var Ferramentas = []Ferramenta{
 	{
 		Nome: "ler_tarefa", Titulo: "Ler a tarefa",
-		Descricao: "Mostra a tarefa em que você trabalha na Colmeia: título, projeto, branch, pasta, coluna, a nota da daily de hoje, a última nota de sprint e os pedidos abertos.",
+		Descricao: "Mostra a tarefa em que você trabalha na Colmeia: título, projeto, branch, pasta, coluna, a descrição (a nota mais recente, de qualquer dia, com quem a escreveu), a nota da daily de hoje, a última nota de sprint e os pedidos abertos.",
 		Entrada:   objeto(map[string]any{}),
 		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
 			var a struct{}
@@ -362,7 +373,8 @@ var Ferramentas = []Ferramenta{
 	{
 		Nome: "complementar_nota", Titulo: "Complementar a nota",
 		Descricao: "Acrescenta texto ao fim da nota da tarefa (daily ou sprint), depois de uma linha em branco. Use para responder um pedido da daily: " +
-			"informe o número do pedido. Seja breve (até 5 linhas): a nota aparece num slide e tem limite de 4.000 caracteres.",
+			"informe o número do pedido. Seja breve (até 5 linhas): a nota aparece num slide e tem limite de 4.000 caracteres. " +
+			"Ao terminar o trabalho, grave a nota da daily assim. " + formato.NotaDaily + " Exemplo:\n" + formato.ExemploNotaDaily,
 		Entrada: objeto(map[string]any{
 			"texto":   map[string]any{"type": "string", "description": "O que acrescentar."},
 			"tipo":    propTipo,
@@ -384,28 +396,131 @@ var Ferramentas = []Ferramenta{
 		},
 	},
 	{
-		Nome: "mover_tarefa", Titulo: "Mover a tarefa para Revisão ou Concluído",
-		Descricao: "Leva a tarefa em que você trabalha para Revisão ou Concluído no quadro da Colmeia. Use SOMENTE quando o usuário pedir " +
-			"explicitamente (\"pode concluir\", \"manda para revisão\"); nunca por conta própria, nem ao terminar o trabalho. " +
-			"Só esta tarefa e só estas duas colunas.",
+		Nome: "mover_tarefa", Titulo: "Mover uma tarefa no quadro",
+		Descricao: "Leva a tarefa em que você trabalha (ou outra do mesmo projeto, pelo id de listar_tarefas) para uma coluna do quadro da Colmeia: " +
+			"backlog, trabalhando, aguardando, revisao ou concluido. Use SOMENTE quando o usuário pedir explicitamente (\"pode concluir\", " +
+			"\"manda para revisão\", \"essa já terminei, fecha\"); nunca por conta própria, nem ao terminar o trabalho.",
 		Entrada: objeto(map[string]any{
-			"coluna": map[string]any{"type": "string", "enum": []string{"revisao", "concluido"}, "description": "revisao ou concluido."},
+			"coluna": map[string]any{"type": "string", "enum": colunasDoQuadro, "description": "backlog, trabalhando, aguardando, revisao ou concluido."},
+			"tarefa": map[string]any{"type": "integer", "description": "O id de outra tarefa do projeto (de listar_tarefas). Sem ele, a sua."},
 		}, "coluna"),
 		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
 			var a struct {
 				Coluna string `json:"coluna"`
+				Tarefa int64  `json:"tarefa"`
 			}
 			if err := argumentos(args, &a); err != nil {
 				return nil, err
 			}
-			if a.Coluna != "revisao" && a.Coluna != "concluido" {
-				return nil, errors.New("a coluna é revisao ou concluido")
+			if !slices.Contains(colunasDoQuadro, a.Coluna) {
+				return nil, errors.New("a coluna é backlog, trabalhando, aguardando, revisao ou concluido")
 			}
-			if _, err := pedirJSON(ctx, n, "POST", "/v1/agente/coluna", a); err != nil {
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/coluna", a)
+			if err != nil {
 				return nil, err
 			}
-			onde := map[string]string{"revisao": "Revisão", "concluido": "Concluído"}[a.Coluna]
-			return []any{texto("A tarefa foi para " + onde + ".")}, nil
+			titulo, _ := r["titulo"].(string)
+			return []any{texto(fmt.Sprintf("A tarefa \"%s\" foi para %s.", titulo, nomesDasColunas[a.Coluna]))}, nil
+		},
+	},
+	{
+		Nome: "criar_tarefa", Titulo: "Criar uma tarefa",
+		Descricao: "Cria uma tarefa no projeto em que você trabalha, ou em outro projeto do perfil quando o usuário disser o quadro (\"cria no Estoque Central\"), no Backlog (ou na coluna pedida), com a explicação na descrição. " +
+			"Quando o usuário nomear um projeto, passe-o em projeto: nunca crie no seu e avise depois. Na dúvida sobre o nome, listar_projetos. " +
+			"Use SOMENTE quando o usuário pedir (\"cria uma tarefa para isso\", \"anota como tarefa\"); não crie tarefas para organizar o seu próprio trabalho.",
+		Entrada: objeto(map[string]any{
+			"titulo":    map[string]any{"type": "string", "description": "O título, curto, como o usuário diria (até 200 caracteres)."},
+			"descricao": map[string]any{"type": "string", "description": "A explicação da ideia ou do problema, em Markdown (opcional)."},
+			"coluna":    map[string]any{"type": "string", "enum": colunasDoQuadro, "description": "Onde entra (padrão: backlog)."},
+			"branch":    map[string]any{"type": "string", "description": "A branch da tarefa num projeto com git (opcional)."},
+			"projeto":   map[string]any{"type": "string", "description": "O projeto onde a tarefa entra, pelo nome (ou workspace/nome), quando não é o seu (opcional; veja listar_projetos)."},
+		}, "titulo"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Titulo    string `json:"titulo"`
+				Descricao string `json:"descricao"`
+				Coluna    string `json:"coluna"`
+				Branch    string `json:"branch"`
+				Projeto   string `json:"projeto,omitempty"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(a.Titulo) == "" {
+				return nil, errors.New("informe o título da tarefa")
+			}
+			if a.Coluna != "" && !slices.Contains(colunasDoQuadro, a.Coluna) {
+				return nil, errors.New("a coluna é backlog, trabalhando, aguardando, revisao ou concluido")
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/tarefas", a)
+			if err != nil {
+				return nil, err
+			}
+			id, _ := r["id"].(float64)
+			coluna, _ := r["coluna"].(string)
+			projeto, _ := r["projeto"].(string)
+			return []any{texto(fmt.Sprintf("Tarefa #%d \"%s\" criada em %s, no projeto %s.", int64(id), a.Titulo, nomesDasColunas[coluna], projeto))}, nil
+		},
+	},
+	{
+		Nome: "listar_projetos", Titulo: "Listar os projetos do perfil",
+		Descricao: "Lista os projetos (quadros) do perfil, com o workspace, a pasta e se têm git. Serve para achar o nome certo ao criar ou transferir uma tarefa em outro projeto.",
+		Entrada:   objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/projetos", nil)
+			if err != nil {
+				return nil, err
+			}
+			return comoTexto(r), nil
+		},
+	},
+	{
+		Nome: "transferir_tarefa", Titulo: "Transferir uma tarefa para outro projeto",
+		Descricao: "Leva uma tarefa do projeto em que você trabalha para outro projeto do perfil, a pedido do usuário. Notas, lousa, anexos e histórico vão junto; a branch só segue se existir no destino. " +
+			"Não vale para a sua própria tarefa (você roda nela) nem para tarefas com agentes: nesses casos o usuário transfere pela tela, no menu do cartão.",
+		Entrada: objeto(map[string]any{
+			"tarefa":  map[string]any{"type": "integer", "description": "O id da tarefa (de listar_tarefas)."},
+			"projeto": map[string]any{"type": "string", "description": "O projeto de destino, pelo nome (ou workspace/nome; veja listar_projetos)."},
+		}, "tarefa", "projeto"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Tarefa  int64  `json:"tarefa"`
+				Projeto string `json:"projeto"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(a.Projeto) == "" {
+				return nil, errors.New("informe o projeto de destino")
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/transferir", a)
+			if err != nil {
+				return nil, err
+			}
+			id, _ := r["tarefa"].(float64)
+			titulo, _ := r["titulo"].(string)
+			projeto, _ := r["projeto"].(string)
+			return []any{texto(fmt.Sprintf("Tarefa #%d \"%s\" transferida para o projeto %s.", int64(id), titulo, projeto))}, nil
+		},
+	},
+	{
+		Nome: "listar_tarefas", Titulo: "Listar as tarefas do projeto",
+		Descricao: "Lista as tarefas do projeto em que você trabalha: id, título, coluna e branch. Serve para achar o id ao mover outra tarefa e para dizer o que há no quadro.",
+		Entrada:   objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/tarefas", nil)
+			if err != nil {
+				return nil, err
+			}
+			return comoTexto(r), nil
 		},
 	},
 	{
@@ -523,7 +638,7 @@ var Ferramentas = []Ferramenta{
 		Descricao: "Acrescenta itens à lousa (quadro livre) da tarefa, que o usuário vê na hora e apresenta na daily. " +
 			"Prefira notas curtas (markdown simples: # título, **negrito**, listas, tabelas em pipe) e diagramas de fluxo como blocos de código (tipo codigo, com setas em texto), " +
 			"ligados por itens do tipo ligacao (de e para com o ref de itens desta chamada ou o id de itens existentes). " +
-			"Sem x e y, a Colmeia põe os itens numa grade à direita do que já existe. Até 50 itens por chamada. Você só acrescenta: não move nem apaga.",
+			"Sem x e y, a Colmeia põe os itens numa grade à direita do que já existe. Até 50 itens por chamada. Para tirar algo, apagar_da_lousa; mover, não dá.",
 		Entrada: objeto(map[string]any{
 			"itens": map[string]any{"type": "array", "items": esquemaItemDaLousa, "minItems": 1, "maxItems": 50, "description": "Os itens, na ordem (as ligações depois dos itens que ligam)."},
 		}, "itens"),
@@ -544,6 +659,57 @@ var Ferramentas = []Ferramenta{
 			ids, _ := r["ids"].([]any)
 			bruto, _ := json.Marshal(map[string]any{"ids": ids, "refs": r["refs"]})
 			return []any{texto(fmt.Sprintf("Acrescentei %d itens à lousa da tarefa: %s", len(ids), bruto))}, nil
+		},
+	},
+	{
+		Nome: "apagar_da_lousa", Titulo: "Apagar da lousa da tarefa",
+		Descricao: "Apaga itens da lousa (quadro livre) da tarefa pelo id (de ler_lousa ou da resposta de acrescentar_a_lousa), ou a lousa inteira com tudo. " +
+			"As ligações dos itens apagados saem junto e não há como desfazer. Apague o que você mesmo acrescentou e vai refazer, ou o que o usuário pedir; " +
+			"o que é dele (autor voce), só a pedido.",
+		Entrada: objeto(map[string]any{
+			"ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": 500, "description": "Os ids dos itens a apagar."},
+			"tudo": map[string]any{"type": "boolean", "description": "true apaga todos os itens da lousa (aí os ids não são precisos)."},
+		}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				IDs  []int64 `json:"ids"`
+				Tudo bool    `json:"tudo"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if len(a.IDs) == 0 && !a.Tudo {
+				return nil, errors.New("informe os ids dos itens, ou tudo: true")
+			}
+			r, err := pedirJSON(ctx, n, "DELETE", "/v1/agente/lousa/elementos", map[string]any{"ids": a.IDs, "tudo": a.Tudo})
+			if err != nil {
+				return nil, err
+			}
+			removidos, _ := r["removidos"].([]any)
+			switch len(removidos) {
+			case 0:
+				return []any{texto("A lousa da tarefa já estava vazia.")}, nil
+			case 1:
+				return []any{texto("Apaguei 1 item da lousa da tarefa.")}, nil
+			}
+			return []any{texto(fmt.Sprintf("Apaguei %d itens da lousa da tarefa (com as ligações deles).", len(removidos)))}, nil
+		},
+	},
+	{
+		Nome: "montar_quadro_da_reuniao", Titulo: "Montar o quadro da reunião",
+		Descricao: "Refaz agora a montagem desta tarefa para a reunião: o tópico e a frase do slide e os cartões da coluna dela na lousa da daily e da sprint, " +
+			"a partir da nota, dos anexos e do que aconteceu. O núcleo já monta sozinho a cada mudança; use quando o usuário pedir para atualizar o quadro da reunião " +
+			"ou logo depois de gravar a nota, se ele quer a reunião em dia. O desenho é do núcleo; o conteúdo sai da nota, então escreva a nota bem antes.",
+		Entrada: objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if _, err := pedirJSON(ctx, n, "POST", "/v1/agente/montagem", a); err != nil {
+				return nil, err
+			}
+			return []any{texto("Montagem pedida: o quadro da reunião desta tarefa é refeito em instantes.")}, nil
 		},
 	},
 	{
@@ -595,9 +761,96 @@ var Ferramentas = []Ferramenta{
 		},
 	},
 	{
+		Nome: "listar_plays", Titulo: "Listar o Play do workspace",
+		Descricao: "Lista as configurações de execução (o Play) de todos os projetos do workspace: id, projeto, nome, comando, pasta, os nomes das " +
+			"variáveis (sem os valores), se ainda é uma proposta à espera do usuário e se está rodando. Use antes de propor, para não repetir.",
+		Entrada: objeto(map[string]any{}),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct{}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			r, err := pedirJSON(ctx, n, "GET", "/v1/agente/comandos", nil)
+			if err != nil {
+				return nil, err
+			}
+			lista, _ := r["comandos"].([]any)
+			if len(lista) == 0 {
+				return []any{texto("O workspace ainda não tem nenhum Play. Proponha um com propor_play.")}, nil
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "Play do workspace %v (a tarefa é do projeto %v):\n", r["workspace"], r["projeto"])
+			for _, item := range lista {
+				c, _ := item.(map[string]any)
+				estado := ""
+				if c["proposta"] == true {
+					estado = " · proposta, à espera do usuário"
+				} else if c["rodando"] == true {
+					estado = " · rodando"
+				}
+				pasta := ""
+				if p, _ := c["pasta"].(string); p != "" {
+					pasta = " (pasta " + p + ")"
+				}
+				fmt.Fprintf(&b, "- [%v] %v › %v%s: %v%s\n", c["id"], c["projeto"], c["nome"], pasta, c["comando"], estado)
+				if vars, _ := c["variaveis"].([]any); len(vars) > 0 {
+					fmt.Fprintf(&b, "  variáveis: %v\n", vars)
+				}
+			}
+			return []any{texto(strings.TrimRight(b.String(), "\n"))}, nil
+		},
+	},
+	{
+		Nome: "propor_play", Titulo: "Propor uma configuração do Play",
+		Descricao: "Propõe uma configuração de execução (o Play) para um projeto do workspace: um nome, o comando do shell, a subpasta (relativa ao projeto; " +
+			"vazia é a raiz) e variáveis de ambiente. O usuário aceita na Colmeia e roda pelo botão Rodar, na pasta do projeto ou da tarefa; " +
+			"nada roda até ele aceitar. Não ponha segredos: deixe a variável com o valor vazio e diga ao usuário para preencher. " +
+			"Um Play por coisa a rodar (a API é um, o app é outro); o projeto é o da tarefa, salvo se você passar outro do mesmo workspace.",
+		Entrada: objeto(map[string]any{
+			"nome":    map[string]any{"type": "string", "maxLength": 120, "description": "O nome no botão, curto (api, app, testes)."},
+			"comando": map[string]any{"type": "string", "maxLength": 4000, "description": "O comando, como no terminal (pode ter mais de uma linha)."},
+			"pasta":   map[string]any{"type": "string", "maxLength": 1024, "description": "A subpasta do projeto em que roda; vazia é a raiz."},
+			"ambiente": map[string]any{"type": "array", "maxItems": 100, "description": "Variáveis de ambiente.", "items": objeto(map[string]any{
+				"nome":  map[string]any{"type": "string", "maxLength": 200},
+				"valor": map[string]any{"type": "string", "maxLength": 4000},
+			}, "nome", "valor")},
+			"projeto": map[string]any{"type": "string", "maxLength": 200, "description": "Outro projeto do workspace em que o Play roda (padrão: o da tarefa)."},
+		}, "nome", "comando"),
+		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
+			var a struct {
+				Nome     string `json:"nome"`
+				Comando  string `json:"comando"`
+				Pasta    string `json:"pasta"`
+				Ambiente []struct {
+					Nome  string `json:"nome"`
+					Valor string `json:"valor"`
+				} `json:"ambiente"`
+				Projeto string `json:"projeto"`
+			}
+			if err := argumentos(args, &a); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(a.Nome) == "" || strings.TrimSpace(a.Comando) == "" {
+				return nil, errors.New("argumentos inválidos: nome e comando são obrigatórios")
+			}
+			if a.Ambiente == nil {
+				a.Ambiente = []struct {
+					Nome  string `json:"nome"`
+					Valor string `json:"valor"`
+				}{}
+			}
+			r, err := pedirJSON(ctx, n, "POST", "/v1/agente/comandos", a)
+			if err != nil {
+				return nil, err
+			}
+			return []any{texto(fmt.Sprintf("Proposto o Play “%v” no projeto %v. Ele fica como proposta até o usuário aceitar em Configurações de execução, no botão Rodar da Colmeia; avise-o.", r["nome"], r["projeto"]))}, nil
+		},
+	},
+	{
 		Nome: "listar_bancos", Titulo: "Listar os bancos de dados",
-		Descricao: "Lista as conexões de banco de dados do usuário liberadas para agentes (id, nome, tipo e banco padrão). Use o id em consultar_banco.",
-		Entrada:   objeto(map[string]any{}),
+		Descricao: "Lista as conexões de banco de dados do usuário liberadas para agentes: id, nome, tipo, banco padrão, se rodam sem pedir aprovação " +
+			"(sem_pedir) e se aceitam alterações (escrita). Use o id em consultar_banco.",
+		Entrada: objeto(map[string]any{}),
 		chamar: func(ctx context.Context, n Cliente, args json.RawMessage) ([]any, error) {
 			var a struct{}
 			if err := argumentos(args, &a); err != nil {
@@ -615,12 +868,13 @@ var Ferramentas = []Ferramenta{
 	},
 	{
 		Nome: "consultar_banco", Titulo: "Consultar um banco de dados",
-		Descricao: "Executa uma consulta SOMENTE LEITURA (um SELECT, WITH, SHOW, EXPLAIN...) numa conexão de listar_bancos. O usuário vê a instrução na tela e aprova " +
-			"ou recusa cada uma; a resposta pode levar alguns minutos. Uma instrução por vez, até 200 linhas e 64 KB de resposta. Prefira consultas pequenas, " +
-			"com as colunas e o LIMIT necessários. Alterações (INSERT, UPDATE, DDL...) são recusadas.",
+		Descricao: "Executa uma instrução SQL numa conexão de listar_bancos. Por padrão só leitura (SELECT, WITH, SHOW, EXPLAIN...); numa conexão com " +
+			"escrita liberada aos agentes, também INSERT, UPDATE e DELETE (sempre com WHERE; DDL não). Salvo na conexão marcada sem_pedir, o usuário vê a " +
+			"instrução na tela e aprova ou recusa cada uma; a resposta pode levar alguns minutos. Uma instrução por vez, até 200 linhas e 64 KB de " +
+			"resposta. Prefira consultas pequenas, com as colunas e o LIMIT necessários.",
 		Entrada: objeto(map[string]any{
 			"conexao": map[string]any{"type": "integer", "description": "O id da conexão (de listar_bancos)."},
-			"sql":     map[string]any{"type": "string", "description": "A instrução, só de leitura."},
+			"sql":     map[string]any{"type": "string", "description": "A instrução (só de leitura, salvo conexão com escrita liberada)."},
 			"banco":   map[string]any{"type": "string", "description": "Banco do servidor (opcional; sem ele, o padrão da conexão)."},
 			"limite":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Máximo de linhas (padrão e máximo: 200)."},
 		}, "conexao", "sql"),

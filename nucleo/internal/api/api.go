@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/atualizacao"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/avisos"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/bancos"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/canal"
@@ -56,6 +57,11 @@ type Servidor struct {
 	AvisoHistorico string
 	// AoEncerrar desliga o núcleo (POST /v1/encerrar).
 	AoEncerrar func()
+	// tamanhoTela é o último tamanho (colunas<<16|linhas) que uma tela
+	// informou pelo WebSocket de um terminal: um agente aberto sem tamanho
+	// (pela abelha fixa, por exemplo) nasce nele, e não em 80x24 ou num
+	// tamanho próprio, que embaralharia o terminal na Colmeia.
+	tamanhoTela atomic.Uint32
 	// Fichas são os tokens dos agentes (só em memória). DirCanal é a pasta
 	// do canal (socket e token), onde ficam também o token e a configuração
 	// MCP de cada agente; vazia, os agentes não ganham o MCP. Executavel é o
@@ -94,8 +100,12 @@ type Servidor struct {
 	uso memoriaUso
 	// A frase da reunião pedida aos agentes (veja frase.go).
 	frases frases
+	// A montagem da reunião de cada tarefa e as lousas da daily e da sprint (veja montagens.go).
+	montagens montagens
 	// As propostas de "Gerar sprint com IA" esperando aceitar (veja proposta.go).
 	propostas propostas
+	// As rotinas rodando agora e o agendador delas (veja rotinas.go).
+	rotinas rotinasEmCurso
 
 	// Os modelos de voz (veja voz.go): o Whisper do ditado e dos comandos
 	// falados e a voz da abelha (Kokoro); vazios, ficam em DirDados/voz.
@@ -111,6 +121,10 @@ type Servidor struct {
 	listas       listas
 	// A pergunta livre com IA de cada perfil em andamento (veja pergunta.go).
 	perguntando perguntando
+
+	// A versão nova (veja atualizacao.go); vazio, procura nas releases.
+	Atualizacao       *atualizacao.Gerente
+	atualizarAoFechar atomic.Bool
 }
 
 func (s *Servidor) Rotas() http.Handler {
@@ -137,6 +151,7 @@ func (s *Servidor) Rotas() http.Handler {
 	s.respondendo = map[int64]bool{}
 	s.uso.iniciar()
 	s.frases.iniciar()
+	s.montagens.iniciar()
 	mux.HandleFunc("POST /v1/encerrar", s.encerrar)
 	if s.Banco != nil {
 		if s.Navegadores == nil {
@@ -147,7 +162,13 @@ func (s *Servidor) Rotas() http.Handler {
 		s.Banco.AoGravar(s.publicarEventos)
 		s.iniciarTrabalhador()
 		s.rotasDados(mux)
+		s.rotasTransferir(mux)
+		s.rotasMontagens(mux)
+		s.rotasPauta(mux)
+		s.rotasRotinas(mux)
+		s.iniciarRotinas()
 		s.iniciarVoz(mux)
+		s.iniciarAtualizacao(mux)
 	}
 	if s.Demo {
 		mux.HandleFunc("POST /v1/demo/carga", s.carga)
@@ -225,7 +246,7 @@ func (s *Servidor) transmitir(w http.ResponseWriter, r *http.Request, sessao *te
 	// nele antes de o histórico ser enviado.
 	colunas, _ := strconv.ParseUint(r.URL.Query().Get("cols"), 10, 16)
 	linhas, _ := strconv.ParseUint(r.URL.Query().Get("rows"), 10, 16)
-	sessao.Redimensionar(uint16(colunas), uint16(linhas))
+	s.redimensionarPelaTela(sessao, uint16(colunas), uint16(linhas))
 	cliente, historico := sessao.Conectar(intervalo)
 	defer sessao.Desconectar(cliente)
 
@@ -270,6 +291,23 @@ func (s *Servidor) transmitir(w http.ResponseWriter, r *http.Request, sessao *te
 	}
 }
 
+// redimensionarPelaTela aplica o tamanho que a tela informou e o guarda
+// para os próximos terminais abertos sem tamanho.
+func (s *Servidor) redimensionarPelaTela(sessao *terminal.Sessao, colunas, linhas uint16) {
+	t := terminal.Tamanho{Colunas: colunas, Linhas: linhas}
+	if !t.Valido() {
+		return
+	}
+	s.tamanhoTela.Store(uint32(colunas)<<16 | uint32(linhas))
+	sessao.Redimensionar(colunas, linhas)
+}
+
+// tamanhoDaTela é o último tamanho informado por uma tela, ou o padrão.
+func (s *Servidor) tamanhoDaTela() terminal.Tamanho {
+	v := s.tamanhoTela.Load()
+	return terminal.Tamanho{Colunas: uint16(v >> 16), Linhas: uint16(v & 0xffff)}.OuPadrao()
+}
+
 // receber trata o que vem da tela: binário é digitação; texto é controle.
 func (s *Servidor) receber(ctx context.Context, cancelar func(), conn *websocket.Conn, sessao *terminal.Sessao, cliente *terminal.Cliente) {
 	defer cancelar()
@@ -288,7 +326,7 @@ func (s *Servidor) receber(ctx context.Context, cancelar func(), conn *websocket
 		}
 		sessao.Confirmar(cliente, m.Ack)
 		if m.Cols > 0 && m.Rows > 0 {
-			sessao.Redimensionar(m.Cols, m.Rows)
+			s.redimensionarPelaTela(sessao, m.Cols, m.Rows)
 		}
 		if m.Intervalo > 0 {
 			cliente.DefinirIntervalo(time.Duration(m.Intervalo) * time.Millisecond)

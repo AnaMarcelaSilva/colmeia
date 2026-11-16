@@ -346,12 +346,20 @@ func (s *Servidor) editarConexao(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	antes, err := s.Banco.ConexaoBanco(r.Context(), id)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
 	c, err := s.Banco.AtualizarConexao(r.Context(), id, pedido.CamposConexao)
 	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	s.Bancos.FecharConexao(id)
+	// Mudar só o nome ou a pasta não mexe na ligação: a conexão aberta continua.
+	if !soNomeOuPasta(antes, c) {
+		s.Bancos.FecharConexao(id)
+	}
 	if pedido.Senha != nil && *pedido.Senha != "" && c.Tipo != "sqlite" {
 		if c.Senha, err = s.guardarSenha(context.WithoutCancel(r.Context()), c, *pedido.Senha, pedido.Guardar); err != nil {
 			responderErro(w, err)
@@ -359,6 +367,13 @@ func (s *Servidor) editarConexao(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	responderJSON(w, s.paraTela(c))
+}
+
+// soNomeOuPasta diz se a edição mudou só o que a tela mostra (nome e pasta).
+func soNomeOuPasta(a, b dados.ConexaoBanco) bool {
+	return a.Host == b.Host && a.Porta == b.Porta && a.Usuario == b.Usuario && a.Banco == b.Banco && a.Arquivo == b.Arquivo &&
+		a.SSL == b.SSL && a.SSLCA == b.SSLCA && a.Escrita == b.Escrita && a.Agentes == b.Agentes && a.AgentesLivre == b.AgentesLivre &&
+		a.AgentesEscrita == b.AgentesEscrita
 }
 
 func (s *Servidor) removerConexao(w http.ResponseWriter, r *http.Request) {

@@ -48,6 +48,7 @@ func (s *Servidor) rotasDados(mux *http.ServeMux) {
 	s.rotasNavegador(mux)
 	s.rotasArquivos(mux)
 	s.rotasCodigo(mux)
+	s.rotasGithub(mux)
 	s.rotasAgente(mux)
 	s.rotasLousas(mux)
 	s.rotasBancos(mux)
@@ -135,7 +136,7 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 		Tema          *string `json:"tema"`
 		AvisoCaptura  *bool   `json:"aviso_captura"`
 		TempoAgentes  *bool   `json:"tempo_agentes"`
-		Autocompletar *bool   `json:"autocompletar_sql"`
+		Montador      *bool   `json:"montador"`
 		MascoteModelo *string `json:"mascote_modelo"`
 		MascoteNome   *string `json:"mascote_nome"`
 		AbelhaFixa    *bool   `json:"abelha_fixa"`
@@ -164,8 +165,8 @@ func (s *Servidor) atualizarPerfil(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if pedido.Autocompletar != nil {
-		if err := s.Banco.DefinirAutocompletarSQL(r.Context(), id, *pedido.Autocompletar); err != nil {
+	if pedido.Montador != nil {
+		if err := s.Banco.DefinirMontador(r.Context(), id, *pedido.Montador); err != nil {
 			responderErro(w, err)
 			return
 		}
@@ -560,6 +561,8 @@ func (s *Servidor) atualizarTarefa(w http.ResponseWriter, r *http.Request) {
 		responderErro(w, err)
 		return
 	}
+	// Você levando a tarefa ao Concluído: os agentes dela saem depois da
+	// frase da reunião (veja aoGravarParaFrase).
 	tarefa, err := s.Banco.AtualizarTarefa(r.Context(), id, mudanca, dados.OrigemVoce)
 	if err != nil {
 		responderErro(w, err)

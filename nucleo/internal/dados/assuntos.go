@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxNomeAssunto e MaxAssuntos limitam os assuntos de uma sprint.
@@ -20,19 +22,37 @@ type Assunto struct {
 	Sprint  int64  `json:"sprint_id"`
 	Nome    string `json:"nome"`
 	Posicao int    `json:"posicao"`
+	// Texto é a fala do assunto na reunião: escrita por você (Origem
+	// "voce") ou gerada pela IA com as tarefas do assunto que ficaram na
+	// sprint (Origem "ia", TextoTarefas diz quantas). Vazio, sem fala.
+	Texto        string `json:"texto"`
+	Origem       string `json:"texto_origem,omitempty"`
+	TextoTarefas int    `json:"texto_tarefas,omitempty"`
+}
+
+// Origens do texto do assunto.
+const (
+	OrigemTextoVoce = "voce"
+	OrigemTextoIA   = "ia"
+)
+
+const colunasDoAssunto = `id, sprint_id, nome, posicao, texto, texto_origem, texto_tarefas`
+
+func (a *Assunto) campos() []any {
+	return []any{&a.ID, &a.Sprint, &a.Nome, &a.Posicao, &a.Texto, &a.Origem, &a.TextoTarefas}
 }
 
 // AssuntosDaSprint traz os assuntos na ordem e o assunto de cada tarefa.
 func (b *Banco) AssuntosDaSprint(ctx context.Context, sprint int64) ([]Assunto, map[int64]int64, error) {
 	assuntos := []Assunto{}
-	linhas, err := b.db.QueryContext(ctx, `SELECT id, sprint_id, nome, posicao FROM assuntos_sprint WHERE sprint_id = ? ORDER BY posicao, id`, sprint)
+	linhas, err := b.db.QueryContext(ctx, `SELECT `+colunasDoAssunto+` FROM assuntos_sprint WHERE sprint_id = ? ORDER BY posicao, id`, sprint)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer linhas.Close()
 	for linhas.Next() {
 		var a Assunto
-		if err := linhas.Scan(&a.ID, &a.Sprint, &a.Nome, &a.Posicao); err != nil {
+		if err := linhas.Scan(a.campos()...); err != nil {
 			return nil, nil, err
 		}
 		assuntos = append(assuntos, a)
@@ -58,7 +78,7 @@ func (b *Banco) AssuntosDaSprint(ctx context.Context, sprint int64) ([]Assunto, 
 
 func lerAssunto(linha interface{ Scan(...any) error }) (Assunto, error) {
 	var a Assunto
-	err := linha.Scan(&a.ID, &a.Sprint, &a.Nome, &a.Posicao)
+	err := linha.Scan(a.campos()...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNaoEncontrado
 	}
@@ -67,7 +87,7 @@ func lerAssunto(linha interface{ Scan(...any) error }) (Assunto, error) {
 
 // AssuntoPorID traz um assunto (para a API conferir o perfil da sprint).
 func (b *Banco) AssuntoPorID(ctx context.Context, id int64) (Assunto, error) {
-	return lerAssunto(b.db.QueryRowContext(ctx, `SELECT id, sprint_id, nome, posicao FROM assuntos_sprint WHERE id = ?`, id))
+	return lerAssunto(b.db.QueryRowContext(ctx, `SELECT `+colunasDoAssunto+` FROM assuntos_sprint WHERE id = ?`, id))
 }
 
 // CriarAssunto põe um assunto no fim da lista da sprint.
@@ -115,6 +135,41 @@ func (b *Banco) RenomearAssunto(ctx context.Context, id int64, nome string) (Ass
 	return b.AssuntoPorID(ctx, id)
 }
 
+// DefinirTextoDoAssunto grava a fala do assunto: `origem` diz quem escreveu
+// (OrigemTextoVoce ou OrigemTextoIA) e `tarefas`, gerada, com quantas
+// tarefas. Texto vazio apaga. Evento assunto.texto, no perfil da sprint.
+func (b *Banco) DefinirTextoDoAssunto(ctx context.Context, id int64, texto, origem string, tarefas int) (Assunto, error) {
+	texto = strings.TrimSpace(texto)
+	if utf8.RuneCountInString(texto) > MaxNota {
+		return Assunto{}, ErrInvalido{Motivo: fmt.Sprintf("o texto do assunto passa de %d caracteres", MaxNota)}
+	}
+	if texto == "" {
+		origem, tarefas = "", 0
+	} else if origem != OrigemTextoVoce && origem != OrigemTextoIA {
+		return Assunto{}, ErrInvalido{Motivo: "origem do texto inválida"}
+	}
+	var a Assunto
+	err := b.emTransacao(ctx, func(tx *transacao) error {
+		r, err := tx.ExecContext(ctx, `UPDATE assuntos_sprint SET texto = ?, texto_origem = ?, texto_tarefas = ? WHERE id = ?`, texto, origem, tarefas, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNaoEncontrado
+		}
+		if a, err = lerAssunto(tx.QueryRowContext(ctx, `SELECT `+colunasDoAssunto+` FROM assuntos_sprint WHERE id = ?`, id)); err != nil {
+			return err
+		}
+		s, err := lerSprint(tx.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE id = ?`, a.Sprint))
+		if err != nil {
+			return err
+		}
+		return registrar(ctx, tx, "assunto.texto", Escopo{Perfil: s.Perfil},
+			map[string]any{"sprint": a.Sprint, "assunto": a.ID, "nome": a.Nome, "origem": origem, "vazio": texto == ""})
+	})
+	return a, err
+}
+
 // RemoverAssunto apaga o assunto; as tarefas dele voltam ao projeto.
 func (b *Banco) RemoverAssunto(ctx context.Context, id int64) error {
 	r, err := b.db.ExecContext(ctx, `DELETE FROM assuntos_sprint WHERE id = ?`, id)
@@ -140,7 +195,7 @@ func (b *Banco) DefinirAssunto(ctx context.Context, sprint int64, tarefas []int6
 			return err
 		}
 		if assunto != 0 {
-			a, err := lerAssunto(tx.QueryRowContext(ctx, `SELECT id, sprint_id, nome, posicao FROM assuntos_sprint WHERE id = ?`, assunto))
+			a, err := lerAssunto(tx.QueryRowContext(ctx, `SELECT `+colunasDoAssunto+` FROM assuntos_sprint WHERE id = ?`, assunto))
 			if err != nil {
 				return err
 			}

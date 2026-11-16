@@ -394,8 +394,10 @@ type SecaoSprint struct {
 	Projeto   string `json:"projeto"`
 	ProjetoID int64  `json:"projeto_id,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
-	// Assunto: a seção é um assunto da sprint (Projeto é o nome dele).
+	// Assunto: a seção é um assunto da sprint (Projeto é o nome dele), e
+	// Texto é a fala dele, quando tem.
 	Assunto    int64        `json:"assunto_id,omitempty"`
+	Texto      string       `json:"texto,omitempty"`
 	Concluidas []ItemResumo `json:"concluidas"`
 	Andamento  []ItemResumo `json:"andamento"`
 	Criadas    []ItemResumo `json:"criadas"`
@@ -459,11 +461,13 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 		}
 		s := &SecaoSprint{Projeto: c.rotuloSecao(projeto, cmpOr(nome, m.nomeProjeto(projeto))), ProjetoID: projeto, Workspace: c.workspaceDaSecao(projeto)}
 		if pos >= 0 {
-			s = &SecaoSprint{Projeto: a.Nome, Assunto: a.ID}
+			s = &SecaoSprint{Projeto: a.Nome, Assunto: a.ID, Texto: a.Texto}
 		}
 		secoes[chave], posicao[s] = s, pos
 		return s
 	}
+	// As tarefas tiradas desta sprint não entram em nada.
+	itens = c.semForaDaSprint(itens)
 	// Coluna de cada tarefa no fim do período, refeita pelo histórico
 	// (inclusive pelas mudanças automáticas, que não viram item).
 	coluna := map[int64]string{}
@@ -471,6 +475,9 @@ func Sprint(eventos []dados.Evento, de, ate time.Time, c Contexto) ResumoSprint 
 	for _, mc := range m.colunas {
 		if diaDe(mc.quando, fuso) > fim {
 			break
+		}
+		if c.ForaDaSprint[mc.tarefa] {
+			continue
 		}
 		coluna[mc.tarefa], projetoDa[mc.tarefa] = mc.coluna, mc.projeto
 	}
@@ -574,6 +581,10 @@ func textosSprint(r ResumoSprint) (string, string) {
 	for _, s := range r.Secoes {
 		fmt.Fprintf(&t, "\n%s\n", s.Projeto)
 		fmt.Fprintf(&md, "\n## %s\n", s.Projeto)
+		if s.Texto != "" {
+			fmt.Fprintf(&t, "%s\n", s.Texto)
+			fmt.Fprintf(&md, "\n%s\n", s.Texto)
+		}
 		linha := func(rotulo string, itens []ItemResumo) {
 			if len(itens) == 0 {
 				return

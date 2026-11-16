@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/anexos"
@@ -21,6 +23,7 @@ import (
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/navegador"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/segredos"
 
+	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/claudecode"
 	"github.com/AnaMarcelaSilva/colmeia/nucleo/internal/protecao"
 )
 
@@ -40,10 +43,18 @@ func (s *Servidor) rotasAgente(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agente/navegador/captura", s.doAgente(s.agenteCapturar))
 	mux.HandleFunc("POST /v1/agente/pedidos/{id}/concluir", s.doAgente(s.agenteConcluirPedido))
 	mux.HandleFunc("POST /v1/agente/coluna", s.doAgente(s.agenteMoverTarefa))
+	mux.HandleFunc("GET /v1/agente/tarefas", s.doAgente(s.agenteListarTarefas))
+	mux.HandleFunc("POST /v1/agente/tarefas", s.doAgente(s.agenteCriarTarefa))
+	mux.HandleFunc("GET /v1/agente/projetos", s.doAgente(s.agenteListarProjetos))
+	mux.HandleFunc("POST /v1/agente/transferir", s.doAgente(s.agenteTransferirTarefa))
+	mux.HandleFunc("POST /v1/agente/montagem", s.doAgente(s.agenteMontar))
 	mux.HandleFunc("GET /v1/agente/lousa", s.doAgente(s.agenteLerLousa))
 	mux.HandleFunc("POST /v1/agente/lousa/elementos", s.doAgente(s.agenteAcrescentarALousa))
+	mux.HandleFunc("DELETE /v1/agente/lousa/elementos", s.doAgente(s.agenteApagarDaLousa))
 	mux.HandleFunc("GET /v1/agente/conhecimento", s.doAgente(s.agenteLerConhecimento))
 	mux.HandleFunc("POST /v1/agente/conhecimento", s.doAgente(s.agenteAnotarConhecimento))
+	mux.HandleFunc("GET /v1/agente/comandos", s.doAgente(s.agenteListarPlays))
+	mux.HandleFunc("POST /v1/agente/comandos", s.doAgente(s.agenteProporPlay))
 	mux.HandleFunc("POST /v1/agente/uso", s.agenteUso)
 }
 
@@ -79,10 +90,11 @@ func (s *Servidor) doAgente(f func(http.ResponseWriter, *http.Request, quemAgent
 	}
 }
 
-// agenteMoverTarefa: a pedido da usuária, o agente leva a própria tarefa
-// para Revisão ou Concluído. Vale como movimento dela (não é desfeito pela
-// regra automática) e entra na linha do tempo como "movida pelo agente a
-// pedido"; a frase da reunião é pedida como em qualquer ida a essas colunas.
+// agenteMoverTarefa: a pedido da usuária, o agente leva a própria tarefa (ou
+// outra do mesmo projeto) para uma coluna do quadro. Vale como movimento dela
+// (não é desfeito pela regra automática) e entra na linha do tempo como
+// "movida pelo agente a pedido"; a frase da reunião é pedida como em qualquer
+// ida a Revisão ou Concluído.
 func (s *Servidor) agenteMoverTarefa(w http.ResponseWriter, r *http.Request, q quemAgente) {
 	var pedido struct {
 		Coluna string `json:"coluna"`
@@ -92,20 +104,99 @@ func (s *Servidor) agenteMoverTarefa(w http.ResponseWriter, r *http.Request, q q
 		responderErro(w, err)
 		return
 	}
+	if !slices.Contains(dados.Colunas, pedido.Coluna) {
+		responderErro(w, dados.ErrInvalido{Motivo: "A coluna é backlog, trabalhando, aguardando, revisao ou concluido."})
+		return
+	}
+	alvo := q.tarefa
 	if pedido.Tarefa != 0 && pedido.Tarefa != q.tarefa.ID {
-		responderErro(w, dados.ErrInvalido{Motivo: "Só dá para mover a tarefa em que você trabalha."})
-		return
+		t, _, _, err := s.Banco.Tarefa(r.Context(), pedido.Tarefa)
+		if err != nil || t.ProjetoID != q.projeto.ID {
+			responderErro(w, dados.ErrInvalido{Motivo: "Só dá para mover tarefas do projeto em que você trabalha (veja listar_tarefas)."})
+			return
+		}
+		alvo = t
 	}
-	if pedido.Coluna != "revisao" && pedido.Coluna != "concluido" {
-		responderErro(w, dados.ErrInvalido{Motivo: "Só dá para mover para revisao ou concluido."})
-		return
-	}
-	t, err := s.Banco.AtualizarTarefa(r.Context(), q.tarefa.ID, dados.Mudanca{Coluna: &pedido.Coluna}, dados.OrigemAgente)
+	t, err := s.Banco.AtualizarTarefa(r.Context(), alvo.ID, dados.Mudanca{Coluna: &pedido.Coluna}, dados.OrigemAgente)
 	if err != nil {
 		responderErro(w, err)
 		return
 	}
-	responderJSON(w, map[string]any{"tarefa": t.ID, "coluna": t.Coluna})
+	responderJSON(w, map[string]any{"tarefa": t.ID, "titulo": t.Titulo, "coluna": t.Coluna})
+}
+
+// agenteListarTarefas: as tarefas do projeto do agente, sem o que ele não
+// precisa (pasta da cópia, ordem).
+func (s *Servidor) agenteListarTarefas(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	lista, err := s.Banco.ListarTarefas(r.Context(), q.projeto.ID)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	tarefas := []map[string]any{}
+	for _, t := range lista {
+		tarefas = append(tarefas, map[string]any{"id": t.ID, "titulo": t.Titulo, "coluna": t.Coluna, "branch": t.Branch, "sua": t.ID == q.tarefa.ID})
+	}
+	responderJSON(w, map[string]any{"projeto": q.projeto.Nome, "tarefas": tarefas})
+}
+
+// agenteCriarTarefa: a pedido da usuária, o agente cria uma tarefa no projeto
+// dele, no Backlog ou na coluna pedida, com a explicação na descrição.
+func (s *Servidor) agenteCriarTarefa(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	var pedido struct {
+		Titulo    string `json:"titulo"`
+		Descricao string `json:"descricao"`
+		Coluna    string `json:"coluna"`
+		Branch    string `json:"branch"`
+		Projeto   string `json:"projeto"`
+	}
+	if err := ler(r, &pedido); err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.Coluna != "" && !slices.Contains(dados.Colunas, pedido.Coluna) {
+		responderErro(w, dados.ErrInvalido{Motivo: "A coluna é backlog, trabalhando, aguardando, revisao ou concluido."})
+		return
+	}
+	if claudecode.Controle(pedido.Descricao, true) {
+		responderErro(w, dados.ErrInvalido{Motivo: "a descrição tem caracteres de controle"})
+		return
+	}
+	if len(pedido.Descricao) > 20000 {
+		responderErro(w, dados.ErrInvalido{Motivo: "a descrição pode ter no máximo 20000 caracteres"})
+		return
+	}
+	ctx := r.Context()
+	// Onde ela entra: o projeto do agente, ou outro do perfil, pelo nome, quando
+	// a usuária pediu a tarefa em outro quadro.
+	projeto := q.projeto
+	if pedido.Projeto != "" {
+		p, err := s.projetoPorNome(ctx, q.perfil, pedido.Projeto)
+		if err != nil {
+			responderErro(w, err)
+			return
+		}
+		projeto = p
+	}
+	t, err := s.Banco.CriarTarefa(ctx, projeto.ID, pedido.Titulo, pedido.Branch, "pasta")
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	if pedido.Coluna != "" && pedido.Coluna != t.Coluna {
+		if t, err = s.Banco.AtualizarTarefa(ctx, t.ID, dados.Mudanca{Coluna: &pedido.Coluna}, dados.OrigemAgente); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	if d := strings.TrimSpace(pedido.Descricao); d != "" {
+		// A descrição da tarefa é a nota mais recente dela: entra na daily de hoje.
+		if _, err := s.Banco.GravarNota(ctx, dados.GravacaoNota{Tarefa: t.ID, Tipo: "daily", Periodo: hoje(), Texto: d, Modo: dados.ModoSubstituir, Agente: q.ctx.ID}); err != nil {
+			responderErro(w, err)
+			return
+		}
+	}
+	responderJSON(w, map[string]any{"id": t.ID, "titulo": t.Titulo, "coluna": t.Coluna, "projeto": projeto.Nome, "workspace": projeto.Workspace})
 }
 
 func hoje() string { return time.Now().Format("2006-01-02") }
@@ -144,12 +235,22 @@ func (s *Servidor) agenteTarefa(w http.ResponseWriter, r *http.Request, q quemAg
 		responderErro(w, err)
 		return
 	}
+	// A descrição é a nota mais recente de qualquer dia (a que a aba
+	// Descrição mostra): sem ela, uma tarefa anotada ontem parecia vazia.
+	descricao, err := s.Banco.DescricaoDaTarefa(ctx, q.tarefa.ID)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
 	resposta := map[string]any{
 		"tarefa": map[string]any{"id": q.tarefa.ID, "titulo": q.tarefa.Titulo, "projeto": q.projeto.Nome, "branch": q.tarefa.Branch,
 			"pasta": q.pasta, "coluna": q.tarefa.Coluna},
 		"hoje":       hoje(),
 		"nota_daily": daily,
 		"navegador":  s.Navegadores.Aberto(q.perfil, q.tarefa.ID),
+	}
+	if descricao.Texto != "" {
+		resposta["descricao"] = descricao
 	}
 	if ultimas, err := s.Banco.UltimasNotas(ctx, []int64{q.tarefa.ID}, "sprint"); err == nil {
 		if n, ok := ultimas[q.tarefa.ID]; ok {
@@ -412,8 +513,8 @@ func (s *Servidor) agenteLerLousa(w http.ResponseWriter, r *http.Request, q quem
 	responderJSON(w, map[string]any{"lousa": l.ID, "tarefa": q.tarefa.Titulo, "elementos": lista})
 }
 
-// agenteAcrescentarALousa: o agente só acrescenta (não move nem apaga), por
-// isso não há conflito de versão com a tela.
+// agenteAcrescentarALousa: o agente acrescenta (não move), por isso não há
+// conflito de versão com a tela.
 func (s *Servidor) agenteAcrescentarALousa(w http.ResponseWriter, r *http.Request, q quemAgente) {
 	var pedido struct {
 		Elementos []dados.NovoDoAgente `json:"elementos"`
@@ -432,6 +533,25 @@ func (s *Servidor) agenteAcrescentarALousa(w http.ResponseWriter, r *http.Reques
 		ids[i] = e.ID
 	}
 	responderJSON(w, map[string]any{"lousa": resultado.Lousa.ID, "ids": ids, "refs": resultado.Refs})
+}
+
+// agenteApagarDaLousa: o agente apaga itens da lousa da tarefa pelo id, ou
+// a lousa inteira. As ligações dos itens apagados saem junto.
+func (s *Servidor) agenteApagarDaLousa(w http.ResponseWriter, r *http.Request, q quemAgente) {
+	var pedido struct {
+		IDs  []int64 `json:"ids"`
+		Tudo bool    `json:"tudo"`
+	}
+	if err := lerAte(r, &pedido, limiteLoteLousa); err != nil {
+		responderErro(w, err)
+		return
+	}
+	resultado, err := s.Banco.ApagarDoAgente(r.Context(), q.tarefa.ID, q.ctx.ID, pedido.IDs, pedido.Tudo)
+	if err != nil {
+		responderErro(w, err)
+		return
+	}
+	responderJSON(w, map[string]any{"lousa": resultado.Lousa.ID, "removidos": resultado.Removidos})
 }
 
 // MCP dos agentes do Claude Code

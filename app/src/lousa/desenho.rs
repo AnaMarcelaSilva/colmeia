@@ -73,15 +73,20 @@ pub struct Tinta {
 }
 
 pub fn tinta(e: &Elemento) -> Tinta {
-    let p = cores();
     match e.tipo {
         TipoElemento::Nota => {
             let c = tema::cor_nota(&e.cor);
             Tinta { texto: c.tinta, secundaria: c.secundaria, linha: c.linha, recuo: c.recuo, papel: c.fundo }
         }
         TipoElemento::Codigo => Tinta { texto: CODIGO.texto, secundaria: CODIGO.suave, linha: CODIGO.borda, recuo: CODIGO.fundo, papel: CODIGO.fundo },
-        _ => Tinta { texto: p.texto, secundaria: p.suave, linha: p.borda, recuo: p.superficie, papel: p.fundo },
+        _ => tinta_da_tela(),
     }
+}
+
+/// As cores do tema da tela, sem a cor de uma nota.
+pub fn tinta_da_tela() -> Tinta {
+    let p = cores();
+    Tinta { texto: p.texto, secundaria: p.suave, linha: p.borda, recuo: p.superficie, papel: p.fundo }
 }
 
 /// O tema atual, para a chave do cache (as cores ficam dentro do layout).
@@ -406,45 +411,7 @@ impl Desenho {
     /// Pinta o conteúdo recortado ao item; se não coube, degradê e "⋯".
     fn pintar_conteudo(&self, pintor: &Painter, caixa: Rect, conteudo: Rect, c: &Composicao, t: Tinta, reduzido: bool) {
         let recorte = pintor.with_clip_rect(caixa.intersect(pintor.clip_rect()));
-        let origem = conteudo.min.to_vec2();
-        for peca in &c.pecas {
-            match peca {
-                Peca::Texto { pos, galeria, .. } => {
-                    if conteudo.top() + pos.y > caixa.bottom() {
-                        break;
-                    }
-                    recorte.galley(Pos2::ZERO + origem + *pos, galeria.clone(), t.texto);
-                }
-                Peca::Barra { rect, cor } => {
-                    let r = rect.translate(origem);
-                    if r.top() > caixa.bottom() {
-                        break;
-                    }
-                    recorte.rect_filled(r, CornerRadius::same((r.height() / 2.0).min(255.0) as u8), *cor);
-                }
-                Peca::Fundo { rect, cor, raio } => {
-                    recorte.rect_filled(rect.translate(origem), CornerRadius::same(*raio as u8), *cor);
-                }
-                Peca::Linha { a, b, cor } => {
-                    recorte.line_segment([*a + origem, *b + origem], Stroke::new(1.0, *cor));
-                }
-                Peca::Caixa { rect, marcada, tinta, papel } => {
-                    let r = rect.translate(origem);
-                    let raio = CornerRadius::same((3.0 * r.width() / 12.0) as u8);
-                    if *marcada {
-                        recorte.rect_filled(r, raio, *tinta);
-                        let visto = vec![
-                            r.left_center() + vec2(r.width() * 0.22, 0.0),
-                            r.center() + vec2(-r.width() * 0.06, r.height() * 0.22),
-                            r.right_center() + vec2(-r.width() * 0.22, -r.height() * 0.22),
-                        ];
-                        recorte.add(Shape::line(visto, Stroke::new((r.width() / 7.0).max(1.0), *papel)));
-                    } else {
-                        recorte.rect_stroke(r, raio, Stroke::new((r.width() / 10.0).max(1.0), *tinta), StrokeKind::Inside);
-                    }
-                }
-            }
-        }
+        pintar_pecas(&recorte, conteudo.min.to_vec2(), &c.pecas, t.texto, caixa.bottom());
         // Não coube (a dona encolheu o cartão): degradê na base e "⋯".
         if conteudo.top() + c.altura > conteudo.bottom() + 1.0 && !reduzido {
             let altura = (24.0 * conteudo.height() / conteudo.height().max(1.0)).min(caixa.height() / 2.0);
@@ -714,6 +681,53 @@ fn fundos_do_codigo(g: &Galley, origem: Vec2, cor: Color32, zt: f32) -> Vec<Peca
         n += usize::from(linha.ends_with_newline);
     }
     pecas
+}
+
+/// Pinta as peças com o canto do conteúdo em `origem`; para no que começa
+/// abaixo de `fim` (as peças vêm de cima para baixo).
+pub fn pintar_pecas(pintor: &Painter, origem: Vec2, pecas: &[Peca], cor_texto: Color32, fim: f32) {
+    for peca in pecas {
+        match peca {
+            Peca::Texto { pos, galeria, .. } => {
+                if origem.y + pos.y > fim {
+                    break;
+                }
+                // Acima da área visível: não vale montar a malha do texto.
+                if origem.y + pos.y + galeria.size().y < pintor.clip_rect().top() {
+                    continue;
+                }
+                pintor.galley(Pos2::ZERO + origem + *pos, galeria.clone(), cor_texto);
+            }
+            Peca::Barra { rect, cor } => {
+                let r = rect.translate(origem);
+                if r.top() > fim {
+                    break;
+                }
+                pintor.rect_filled(r, CornerRadius::same((r.height() / 2.0).min(255.0) as u8), *cor);
+            }
+            Peca::Fundo { rect, cor, raio } => {
+                pintor.rect_filled(rect.translate(origem), CornerRadius::same(*raio as u8), *cor);
+            }
+            Peca::Linha { a, b, cor } => {
+                pintor.line_segment([*a + origem, *b + origem], Stroke::new(1.0, *cor));
+            }
+            Peca::Caixa { rect, marcada, tinta, papel } => {
+                let r = rect.translate(origem);
+                let raio = CornerRadius::same((3.0 * r.width() / 12.0) as u8);
+                if *marcada {
+                    pintor.rect_filled(r, raio, *tinta);
+                    let visto = vec![
+                        r.left_center() + vec2(r.width() * 0.22, 0.0),
+                        r.center() + vec2(-r.width() * 0.06, r.height() * 0.22),
+                        r.right_center() + vec2(-r.width() * 0.22, -r.height() * 0.22),
+                    ];
+                    pintor.add(Shape::line(visto, Stroke::new((r.width() / 7.0).max(1.0), *papel)));
+                } else {
+                    pintor.rect_stroke(r, raio, Stroke::new((r.width() / 10.0).max(1.0), *tinta), StrokeKind::Inside);
+                }
+            }
+        }
+    }
 }
 
 /// A galeria do texto e, antes dela, os fundos do código na linha.

@@ -18,6 +18,7 @@ mod daily;
 mod frase;
 mod gerar;
 mod historico;
+mod leitor;
 mod linha;
 mod lista;
 mod sprint;
@@ -29,8 +30,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui::{self, Color32, CornerRadius, FontId, Id, RichText, Sense, TextureHandle, TextureOptions, vec2};
 
 pub use comum::{
-    CacheImagens, MARGEM_ROLAGEM, Miniatura, data_da_tela, decodificar, em_segundo_plano, estado_do_slide, largura_numeros, numeros, pilula_do_slide,
-    sombra_rolagem, tamanho, texto_cortado, texto_em_linhas, texto_tempo,
+    CacheImagens, EstiloNota, MARGEM_ROLAGEM, Miniatura, NotaMedida, data_da_tela, decodificar, em_segundo_plano, estado_do_slide, largura_numeros, numeros,
+    pilula_do_slide, selo, sombra_rolagem, tamanho, texto_cortado, texto_em_linhas, texto_tempo,
 };
 
 use crate::api;
@@ -113,12 +114,13 @@ pub enum Acao {
     /// "Reabrir" no Histórico: a tarefa volta para o Backlog.
     Reabrir(i64),
     Avisar(TipoAviso, String),
-    /// Abrir a apresentação no slide da tarefa (o clique num cartão abre em janela).
-    Apresentar {
-        deck: Box<api::Deck>,
-        periodo: Option<api::PeriodoSprint>,
-        tarefa: Option<i64>,
-    },
+}
+
+/// O que o leitor em tela cheia pede à tela principal.
+pub enum PedidoCheio {
+    Sair,
+    /// Q: a lousa da reunião no lugar da página.
+    Lousa,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -155,6 +157,8 @@ enum Resposta {
         chave: Chave,
         resultado: Result<api::Deck, String>,
     },
+    /// A pauta mudou (ordem, visto, daily apresentada): a página busca de novo.
+    Pauta(Result<(), String>),
     Sprint {
         chave: Chave,
         periodo: api::PeriodoSprint,
@@ -174,6 +178,16 @@ enum Resposta {
     ForaDaDaily {
         fora: bool,
         resultado: Result<(), String>,
+    },
+    ForaDaSprint {
+        fora: bool,
+        resultado: Result<(), String>,
+    },
+    /// A fala do assunto gravada (escrita por você) ou gerada pela IA.
+    TextoAssunto(Result<api::Assunto, String>),
+    TextoGerado {
+        assunto: i64,
+        resultado: Result<api::Assunto, String>,
     },
     Sprints {
         perfil: i64,
@@ -197,10 +211,23 @@ enum Resposta {
         resultado: Result<api::Proposta, String>,
     },
     PropostaAceita(Result<(), String>),
+    /// A montagem de uma tarefa refeita a pedido (a página busca de novo).
+    Remontada {
+        com_agente: bool,
+        resultado: Result<api::Montagem, String>,
+    },
 }
 
 /// Uma linha em edição: na sprint, o título e a descrição só dela; na daily,
 /// só a frase (a nota de hoje).
+/// A fala de um assunto em edição, na própria seção.
+pub(super) struct EdicaoTexto {
+    pub assunto: i64,
+    pub texto: String,
+    pub salvando: bool,
+    pub focar: bool,
+}
+
 pub(super) struct EdicaoItem {
     pub tarefa: i64,
     pub daily: bool,
@@ -209,7 +236,8 @@ pub(super) struct EdicaoItem {
     pub erro: bool,
     pub titulo: String,
     pub descricao: String,
-    /// O título da tarefa: igual a ele, o título da sprint é apagado.
+    /// O título da tarefa: na sprint, igual a ele, o título da sprint é
+    /// apagado; na daily, o título editado é o da própria tarefa.
     pub titulo_tarefa: String,
     pub titulo_antes: String,
     pub descricao_antes: String,
@@ -239,6 +267,11 @@ pub struct Registro {
     chave: Option<Chave>,
     canal: (Sender<Resposta>, Receiver<Resposta>),
     miniaturas: CacheImagens,
+    /// As imagens inteiras da galeria do leitor (daily e sprint).
+    imagens: CacheImagens,
+    /// O leitor da daily e o da sprint: a tarefa aberta e a imagem da vez.
+    pub(super) leitor_daily: leitor::Leitor,
+    pub(super) leitor_sprint: leitor::Leitor,
     visor: Option<Visor>,
     /// A linha do tempo da tarefa aberta (a aba dela).
     da_tarefa: Option<tarefa::LinhaDaTarefa>,
@@ -270,9 +303,8 @@ pub struct Registro {
     deck_daily: Option<api::Deck>,
     erro_daily: Option<String>,
     texto_daily: String,
-    /// O texto da daily (ou da sprint) veio de uma resposta com o tempo dos
-    /// agentes: ao desligar a opção, ele é refeito mesmo editado.
-    texto_daily_com_tempo: bool,
+    /// O texto montado do deck (um bloco por projeto): "Refazer texto" volta a ele.
+    texto_daily_base: String,
     texto_daily_aberto: bool,
     focar_daily: bool,
 
@@ -307,9 +339,19 @@ pub struct Registro {
     pedindo_ferramentas: bool,
     /// O nome de assunto sendo escrito: (0, nome) cria um, (id, nome) renomeia.
     pub(super) nome_assunto: Option<(i64, String)>,
+    /// A fala de um assunto sendo escrita por você.
+    pub(super) texto_assunto: Option<EdicaoTexto>,
+    /// O assunto cuja fala o Claude Code está escrevendo.
+    pub(super) gerando_texto: Option<i64>,
 
     /// Ao voltar da apresentação, a página rola até a linha do último slide visto.
     pub rolar_ate: Option<i64>,
+    /// A lousa da reunião aberta no lugar da página (a da daily de hoje ou a
+    /// da sprint fixa escolhida).
+    pub lousa_da_reuniao: Option<api::DonoLousa>,
+    /// As tarefas que o montador com IA está refazendo agora (a tela
+    /// principal põe a cada quadro).
+    pub montando: HashSet<i64>,
 
     /// A opção "Mostrar tempo dos agentes" do perfil (a tela principal põe a
     /// cada quadro) e a última vista aqui, para notar a troca.
@@ -332,6 +374,9 @@ impl Default for Registro {
             chave: None,
             canal: mpsc::channel(),
             miniaturas: CacheImagens::new(Some(ALTURA_MINIATURA), MAX_MINIATURAS, "miniatura"),
+            imagens: CacheImagens::new(None, 12, "leitor"),
+            leitor_daily: Default::default(),
+            leitor_sprint: Default::default(),
             visor: None,
             da_tarefa: None,
             sujas: [false; 3],
@@ -353,7 +398,7 @@ impl Default for Registro {
             deck_daily: None,
             erro_daily: None,
             texto_daily: String::new(),
-            texto_daily_com_tempo: false,
+            texto_daily_base: String::new(),
             texto_daily_aberto: false,
             focar_daily: false,
             sprint: None,
@@ -379,7 +424,11 @@ impl Default for Registro {
             claude: None,
             pedindo_ferramentas: false,
             nome_assunto: None,
+            texto_assunto: None,
+            gerando_texto: None,
             rolar_ate: None,
+            lousa_da_reuniao: None,
+            montando: HashSet::new(),
             mostrar_tempo: false,
             tempo_visto: None,
             atualizando: false,
@@ -400,6 +449,40 @@ pub fn tem_tempo(texto: &str) -> bool {
 }
 
 impl Registro {
+    /// Um registro pronto para as fotos das telas: sem núcleo (nada é
+    /// pedido) e com os decks dados.
+    #[cfg(test)]
+    pub fn de_teste(perfil: i64, recorte: api::Recorte, deck_daily: Option<api::Deck>, deck_sprint: Option<api::Deck>) -> Self {
+        let mut r = Registro { chave: Some((perfil, recorte)), conectado: false, ..Registro::default() };
+        r.tempo_visto = Some(false);
+        r.deck_daily = deck_daily;
+        r.deck_sprint = deck_sprint;
+        r.sprint_escolhida = r.deck_sprint.as_ref().map(|d| d.sprint_id).filter(|id| *id != 0);
+        r
+    }
+
+    /// "Lousa da reunião" na barra: abre a lousa da daily de hoje ou da
+    /// sprint fixa escolhida no lugar da página, ou volta para a página.
+    pub fn alternar_lousa_da_reuniao(&mut self, aba: Aba, perfil: i64, hoje: &str) {
+        if self.lousa_da_reuniao.take().is_some() {
+            return;
+        }
+        self.lousa_da_reuniao = match aba {
+            Aba::Daily => Some(api::DonoLousa::daily(perfil, hoje)),
+            Aba::Sprint => self.sprint_escolhida.filter(|_| self.periodo == Periodo::Sprint).map(api::DonoLousa::sprint),
+            Aba::Historico => None,
+        };
+    }
+
+    /// Refaz a montagem da tarefa agora (a simples; com `com_agente`, o
+    /// montador roda em seguida). A página busca o deck quando o núcleo responder.
+    pub(super) fn remontar(&mut self, ctx: &egui::Context, tarefa: i64, com_agente: bool) {
+        if com_agente {
+            self.montando.insert(tarefa);
+        }
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::Remontada { com_agente, resultado: api::remontar(tarefa, com_agente) });
+    }
+
     /// Ctrl+Shift+D: a página da daily com o texto aberto e em foco.
     pub fn abrir_daily(&mut self) {
         self.texto_daily_aberto = true;
@@ -539,6 +622,241 @@ impl Registro {
         self.pedir_sprint(ctx);
     }
 
+    /// O que a pauta e o painel pediram. `daily` diz a reunião; `escrevendo`
+    /// são as tarefas cuja nota o agente escreve agora.
+    pub(super) fn tratar_pedidos_leitor(
+        &mut self,
+        ctx: &egui::Context,
+        pedidos: Vec<leitor::Pedido>,
+        deck: &api::Deck,
+        daily: bool,
+        escrevendo: &HashSet<i64>,
+        acoes: &mut Vec<Acao>,
+    ) {
+        let Some(perfil) = self.chave.map(|c| c.0) else { return };
+        let tipo = if daily { "daily" } else { "sprint" };
+        let chave_nota = deck.chave_nota.clone();
+        for pedido in pedidos {
+            match pedido {
+                leitor::Pedido::Escolher(id) => {
+                    let l = if daily { &mut self.leitor_daily } else { &mut self.leitor_sprint };
+                    l.escolhida = Some(id);
+                }
+                leitor::Pedido::Visto(tarefa, apresentada) => {
+                    let chave = chave_nota.clone();
+                    em_segundo_plano(&self.canal.0, ctx, move || Resposta::Pauta(api::marcar_apresentada(perfil, tipo, &chave, tarefa, apresentada)));
+                }
+                leitor::Pedido::Ordem(ordem) => {
+                    // A ordem inteira vai ao núcleo: a seção mexida no lugar dela,
+                    // as outras como estão.
+                    let mexidas: HashSet<i64> = ordem.iter().copied().collect();
+                    let mut inteira = Vec::with_capacity(deck.slides.len());
+                    let mut posta = false;
+                    for s in &deck.slides {
+                        if mexidas.contains(&s.tarefa_id) {
+                            if !posta {
+                                inteira.extend(ordem.iter().copied());
+                                posta = true;
+                            }
+                        } else {
+                            inteira.push(s.tarefa_id);
+                        }
+                    }
+                    let chave = chave_nota.clone();
+                    em_segundo_plano(&self.canal.0, ctx, move || Resposta::Pauta(api::ordenar_pauta(perfil, tipo, &chave, &inteira)));
+                }
+                leitor::Pedido::Assunto { tarefa, assunto } => {
+                    let sprint = deck.sprint_id;
+                    self.mexer_assuntos(ctx, move || api::assunto_das_tarefas(sprint, &[tarefa], assunto).map(|_| String::new()));
+                }
+                leitor::Pedido::Clique(clique, tarefa) => {
+                    let Some(s) = deck.slides.iter().find(|s| s.tarefa_id == tarefa) else { continue };
+                    match clique {
+                        frase::Clique::Editar => {
+                            let anterior = daily && !matches!(s.grupo.as_str(), "trabalhando" | "aguardando" | "erros");
+                            let frase = frase::frase_do_slide(s, escrevendo.contains(&tarefa), anterior);
+                            self.abrir_edicao(s, daily, &frase);
+                        }
+                        frase::Clique::AbrirTarefa => acoes.push(Acao::AbrirTarefa { tarefa, agente: None, lousa: false }),
+                        frase::Clique::TirarDaDaily => self.tirar_da_daily(ctx, tarefa, chave_nota.clone(), true),
+                        frase::Clique::TirarDaSprint => self.tirar_da_sprint(ctx, deck.sprint_id, tarefa, true),
+                        frase::Clique::Remontar(com_agente) => self.remontar(ctx, tarefa, com_agente),
+                    }
+                }
+                leitor::Pedido::Imagem { tarefa, anexo, legenda } => self.abrir_visor(ctx, anexo, &legenda, "", tarefa),
+                leitor::Pedido::RenomearAssunto(id, nome) => self.nome_assunto = Some((id, nome)),
+                leitor::Pedido::ApagarAssunto(id) => {
+                    self.mexer_assuntos(ctx, move || api::remover_assunto(id).map(|_| "Assunto apagado; as tarefas ficaram sem assunto".to_string()));
+                }
+                leitor::Pedido::EscreverTexto(id) => {
+                    self.composicao = Default::default();
+                    self.texto_assunto = Some(EdicaoTexto { assunto: id, texto: String::new(), salvando: false, focar: true });
+                }
+                leitor::Pedido::GerarTexto(id) => {
+                    let recorte = self.chave.map(|c| c.1).unwrap_or(api::Recorte::Perfil);
+                    self.gerar_texto_assunto(ctx, id, recorte);
+                }
+            }
+        }
+    }
+
+    /// O leitor em tela cheia (a apresentação): a pauta compacta à esquerda,
+    /// a tarefa grande à direita e a barra das teclas embaixo. As teclas:
+    /// ↑↓ tarefa, ←→ imagem, espaço apresentada, Enter abre a tarefa, Q a
+    /// lousa da reunião, Esc sai.
+    pub fn mostrar_cheio(&mut self, ui: &mut egui::Ui, aba: Aba, perfil: i64, recorte: api::Recorte) -> (Vec<Acao>, Option<PedidoCheio>) {
+        let p = cores();
+        let ctx = ui.ctx().clone();
+        let mut acoes = Vec::new();
+        self.receber(&ctx, &mut acoes);
+        let daily = aba == Aba::Daily;
+        let Some(deck) = self.deck(aba).cloned() else { return (acoes, Some(PedidoCheio::Sair)) };
+        let fixa = !daily && deck.sprint_id != 0;
+        let secoes = sprint::secoes(&deck);
+        let mut leitor = std::mem::take(if daily { &mut self.leitor_daily } else { &mut self.leitor_sprint });
+        if leitor.escolhida.is_none_or(|id| !deck.slides.iter().any(|s| s.tarefa_id == id)) {
+            leitor.escolhida = deck.slides.iter().find(|s| !s.apresentada && !s.removida).or(deck.slides.first()).map(|s| s.tarefa_id);
+        }
+        let area = ui.max_rect();
+        const BARRA: f32 = 44.0;
+        let esquerda = egui::Rect::from_min_max(
+            egui::pos2(area.left() + 24.0, area.top() + 20.0),
+            egui::pos2(area.left() + 24.0 + leitor::PAUTA_CHEIA, area.bottom() - BARRA - 12.0),
+        );
+        let direita =
+            egui::Rect::from_min_max(egui::pos2(esquerda.right() + 20.0, area.top() + 20.0), egui::pos2(area.right() - 24.0, area.bottom() - BARRA - 12.0));
+        let barra = egui::Rect::from_min_max(egui::pos2(area.left(), area.bottom() - BARRA), area.max);
+        let op =
+            leitor::OpcoesPauta { compacta: true, arrastavel: self.conectado, assuntos: fixa, daily, sprint_fixa: fixa, conectado: self.conectado, recorte };
+        let mut pedidos = Vec::new();
+        let mut fechar = false;
+        let mut lista = ui.new_child(egui::UiBuilder::new().max_rect(esquerda).layout(egui::Layout::top_down(egui::Align::Min)));
+        lista.label(RichText::new("PAUTA").size(11.5).strong().color(p.suave));
+        lista.add_space(8.0);
+        let altura_botao = if daily { 44.0 } else { 0.0 };
+        let rolagem = egui::Rect::from_min_max(lista.cursor().left_top(), egui::pos2(esquerda.right(), esquerda.bottom() - altura_botao));
+        let mut dentro = lista.new_child(egui::UiBuilder::new().max_rect(rolagem).layout(egui::Layout::top_down(egui::Align::Min)));
+        egui::ScrollArea::vertical().id_salt(("pauta-cheia", daily)).auto_shrink(false).show(&mut dentro, |ui| {
+            ui.set_max_width(leitor::PAUTA_CHEIA - comum::MARGEM_ROLAGEM);
+            pedidos = self.pauta(ui, &deck, &secoes, &mut leitor, &op);
+            lista::rolar_no_arrasto(ui);
+        });
+        lista::rotulo_do_arrasto(&ctx);
+        if daily {
+            let caixa = egui::Rect::from_min_max(egui::pos2(esquerda.left(), esquerda.bottom() - 36.0), esquerda.max);
+            let mut pe = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            if deck.fechada_em.is_empty() {
+                fechar = tema::botao_secundario_com(&mut pe, "Daily apresentada", self.conectado)
+                    .on_hover_text("Fecha a daily de hoje: a próxima começa daqui")
+                    .clicked();
+            } else {
+                pe.label(RichText::new(format!("Daily apresentada às {}", deck.fechada_em)).color(p.ok).size(13.0));
+            }
+        }
+        let mut detalhe = ui.new_child(egui::UiBuilder::new().max_rect(direita).layout(egui::Layout::top_down(egui::Align::Min)));
+        if let Some(id) = leitor.escolhida
+            && let Some((indice, s)) = deck.slides.iter().enumerate().find(|(_, s)| s.tarefa_id == id)
+        {
+            let projeto = secoes.iter().find(|sec| sec.slides.iter().any(|x| x.tarefa_id == id)).map(|sec| sec.nome.clone()).unwrap_or_default();
+            let mais = self.painel(&mut detalhe, s, &projeto, indice + 1, deck.slides.len(), &mut leitor, 1.2, false, &op);
+            pedidos.extend(mais);
+        }
+        // A barra de baixo: o título, "n de m" e as teclas.
+        let pintor = ui.painter();
+        pintor.rect_filled(barra, 0.0, p.superficie.gamma_multiply(0.85));
+        pintor.line_segment([barra.left_top(), barra.right_top()], egui::Stroke::new(1.0, p.borda));
+        let mut x = barra.left() + 20.0;
+        let y = barra.center().y;
+        let g = pintor.layout_no_wrap(deck.titulo.clone(), tema::forte(13.0), p.texto);
+        pintor.galley(egui::pos2(x, y - g.size().y / 2.0), g.clone(), p.texto);
+        x += g.size().x + 16.0;
+        let total = deck.slides.iter().filter(|s| !s.removida).count();
+        let g = pintor.layout_no_wrap(format!("{} de {total} apresentadas", deck.apresentadas), FontId::proportional(12.5), p.suave);
+        pintor.galley(egui::pos2(x, y - g.size().y / 2.0), g, p.suave);
+        let teclas = [("↑↓", "tarefa"), ("←→", "imagem"), ("espaço", "apresentada"), ("Enter", "abrir"), ("Q", "lousa"), ("Esc", "sair")];
+        let mut xr = barra.right() - 20.0;
+        for (tecla, nome) in teclas.iter().rev() {
+            let g = pintor.layout_no_wrap(nome.to_string(), FontId::proportional(12.5), p.suave);
+            xr -= g.size().x;
+            pintor.galley(egui::pos2(xr, y - g.size().y / 2.0), g, p.suave);
+            xr -= 6.0;
+            let k = pintor.layout_no_wrap(tecla.to_string(), FontId::monospace(11.0), p.suave);
+            let caixa = egui::Rect::from_min_size(egui::pos2(xr - k.size().x - 10.0, y - 10.0), vec2(k.size().x + 10.0, 20.0));
+            pintor.rect(caixa, CornerRadius::same(5), Color32::TRANSPARENT, egui::Stroke::new(1.0, p.borda), egui::StrokeKind::Inside);
+            pintor.galley(egui::pos2(caixa.left() + 5.0, y - k.size().y / 2.0), k, p.suave);
+            xr = caixa.left() - 16.0;
+        }
+        let escolhida = leitor.escolhida;
+        if daily {
+            self.leitor_daily = leitor;
+        } else {
+            self.leitor_sprint = leitor;
+        }
+        // As teclas (no estado já devolvido ao registro).
+        if let Some(pd) = self.teclado_do_leitor(&ctx, &deck, daily, true) {
+            pedidos.push(pd);
+        }
+        let mut pedido = None;
+        if !ctx.egui_wants_keyboard_input() {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                pedido = Some(PedidoCheio::Sair);
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Q)) {
+                pedido = Some(PedidoCheio::Lousa);
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+                && let Some(id) = escolhida
+            {
+                pedidos.push(leitor::Pedido::Clique(frase::Clique::AbrirTarefa, id));
+            }
+        }
+        if fechar {
+            self.fechar_daily(&ctx, deck.chave_nota.clone());
+        }
+        self.tratar_pedidos_leitor(&ctx, pedidos, &deck, daily, &HashSet::new(), &mut acoes);
+        self.mostrar_visor(&ctx, &mut acoes);
+        let _ = perfil;
+        (acoes, pedido)
+    }
+
+    /// "Daily apresentada": fecha a daily do dia; a próxima começa dali.
+    pub(super) fn fechar_daily(&mut self, ctx: &egui::Context, dia: String) {
+        let Some(perfil) = self.chave.map(|c| c.0) else { return };
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::Pauta(api::fechar_daily(perfil, &dia)));
+    }
+
+    /// As setas do teclado no leitor, quando nenhum campo tem o foco: cima e
+    /// baixo trocam a tarefa; esquerda e direita, a imagem. Devolve se mexeu.
+    pub(super) fn teclado_do_leitor(&mut self, ctx: &egui::Context, deck: &api::Deck, daily: bool, com_espaco: bool) -> Option<leitor::Pedido> {
+        if ctx.memory(|m| m.focused().is_some()) || ctx.egui_wants_keyboard_input() {
+            return None;
+        }
+        let l = if daily { &mut self.leitor_daily } else { &mut self.leitor_sprint };
+        let ids: Vec<i64> = deck.slides.iter().map(|s| s.tarefa_id).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let atual = l.escolhida.and_then(|id| ids.iter().position(|x| *x == id)).unwrap_or(0);
+        let tecla = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+        if tecla(egui::Key::ArrowDown) {
+            l.escolhida = Some(ids[(atual + 1).min(ids.len() - 1)]);
+        } else if tecla(egui::Key::ArrowUp) {
+            l.escolhida = Some(ids[atual.saturating_sub(1)]);
+        } else if tecla(egui::Key::ArrowRight) || tecla(egui::Key::ArrowLeft) {
+            let direita = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) || !ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+            let id = ids[atual];
+            let n = deck.slides.iter().find(|s| s.tarefa_id == id).map_or(0, |s| leitor::imagens_do_slide(s).len());
+            if n > 1 {
+                let i = l.imagem.get(&id).copied().unwrap_or(0);
+                let novo = if direita { (i + 1).min(n - 1) } else { i.saturating_sub(1) };
+                l.imagem.insert(id, novo);
+            }
+        } else if com_espaco && tecla(egui::Key::Space) {
+            let id = ids[atual];
+            let apresentada = deck.slides.iter().find(|s| s.tarefa_id == id).is_some_and(|s| s.apresentada);
+            return Some(leitor::Pedido::Visto(id, !apresentada));
+        }
+        None
+    }
+
     /// Grava as datas editadas da sprint escolhida.
     pub(super) fn salvar_datas(&mut self, ctx: &egui::Context) {
         let (Some(id), Some((de, ate))) = (self.sprint_escolhida, self.datas_sprint.clone()) else { return };
@@ -548,6 +866,29 @@ impl Registro {
         };
         self.erro_datas = None;
         em_segundo_plano(&self.canal.0, ctx, move || Resposta::DatasSprint(api::editar_sprint(id, &inicio, &fim)));
+    }
+
+    /// Tira a tarefa da sprint fixa (`fora`) ou traz de volta; a sprint é
+    /// pedida de novo.
+    pub(super) fn tirar_da_sprint(&mut self, ctx: &egui::Context, sprint: i64, tarefa: i64, fora: bool) {
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::ForaDaSprint { fora, resultado: api::tirar_da_sprint(sprint, tarefa, fora) });
+    }
+
+    /// Grava a fala do assunto que está em edição (vazia apaga).
+    pub(super) fn salvar_texto_assunto(&mut self, ctx: &egui::Context) {
+        let Some(e) = self.texto_assunto.as_mut().filter(|e| !e.salvando) else { return };
+        e.salvando = true;
+        let (assunto, texto) = (e.assunto, e.texto.trim().to_string());
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::TextoAssunto(api::texto_do_assunto(assunto, &texto)));
+    }
+
+    /// Pede ao Claude Code a fala do assunto (uma por vez).
+    pub(super) fn gerar_texto_assunto(&mut self, ctx: &egui::Context, assunto: i64, recorte: api::Recorte) {
+        if self.gerando_texto.is_some() {
+            return;
+        }
+        self.gerando_texto = Some(assunto);
+        em_segundo_plano(&self.canal.0, ctx, move || Resposta::TextoGerado { assunto, resultado: api::gerar_texto_do_assunto(assunto, recorte) });
     }
 
     /// Muda os assuntos fora da thread da tela; a sprint é pedida de novo.
@@ -594,7 +935,7 @@ impl Registro {
             return;
         }
         let titulo = e.titulo.trim().to_string();
-        let mudou_titulo = !e.daily && titulo != e.titulo_antes.trim();
+        let mudou_titulo = titulo != e.titulo_antes.trim();
         let mudou_descricao = e.descricao.trim() != e.descricao_antes.trim();
         if !mudou_titulo && !mudou_descricao {
             self.edicao = None;
@@ -606,11 +947,14 @@ impl Registro {
         }
         e.salvando = true;
         e.aviso = None;
-        let titulo = if titulo == e.titulo_tarefa.trim() { String::new() } else { titulo };
-        let (tarefa, descricao, versao) = (e.tarefa, e.descricao.trim().to_string(), e.versao.clone());
+        let titulo = if !e.daily && titulo == e.titulo_tarefa.trim() { String::new() } else { titulo };
+        let (tarefa, daily, descricao, versao) = (e.tarefa, e.daily, e.descricao.trim().to_string(), e.versao.clone());
         em_segundo_plano(&self.canal.0, ctx, move || {
             let resultado = (|| {
-                if mudou_titulo {
+                // Na daily, o título é o da própria tarefa; na sprint, só dela.
+                if mudou_titulo && daily {
+                    api::renomear_tarefa(tarefa, &titulo)?;
+                } else if mudou_titulo {
                     api::titulo_sprint(sprint, tarefa, &titulo)?;
                 }
                 if mudou_descricao {
@@ -711,6 +1055,7 @@ impl Registro {
 
     fn receber(&mut self, ctx: &egui::Context, acoes: &mut Vec<Acao>) {
         self.miniaturas.receber(ctx);
+        self.imagens.receber(ctx);
         while let Ok(r) = self.canal.1.try_recv() {
             match r {
                 Resposta::Pagina { chave, primeira, resultado } if Some(chave) == self.chave => {
@@ -747,17 +1092,8 @@ impl Registro {
                 Resposta::Daily { chave, resultado } if Some(chave) == self.chave => match resultado {
                     Ok(d) if !self.aceita(d.tempo_agentes) => {}
                     Ok(d) => {
-                        // Só troca o texto se você não estava editando (ou se o
-                        // editado tem o tempo dos agentes, que foi desligado).
-                        let editado = self.daily.as_ref().is_some_and(|antigo| antigo.texto != self.texto_daily);
-                        let refazer = self.refazer_sem_tempo && !d.tempo_agentes && (self.texto_daily_com_tempo || tem_tempo(&self.texto_daily));
-                        if !editado || refazer {
-                            if editado {
-                                acoes.push(Acao::Avisar(TipoAviso::Neutro, "Texto refeito sem o tempo dos agentes".into()));
-                            }
-                            self.texto_daily = d.texto.clone();
-                            self.texto_daily_com_tempo = d.tempo_agentes && tem_tempo(&d.texto);
-                        }
+                        // O texto da página vem do deck (as notas, em blocos);
+                        // o do núcleo fica para a abelha e a voz.
                         self.daily = Some(d);
                     }
                     Err(e) => self.erro_daily = Some(if api::erro_inesperado(&e) { "Não consegui montar a daily.".into() } else { e }),
@@ -765,6 +1101,12 @@ impl Registro {
                 Resposta::DeckDaily { chave, resultado } if Some(chave) == self.chave => match resultado {
                     Ok(d) if !self.aceita(d.tempo_agentes) => {}
                     Ok(d) => {
+                        // Só troca o texto se você não estava editando.
+                        let novo = daily::texto_em_blocos(&d);
+                        if self.texto_daily == self.texto_daily_base {
+                            self.texto_daily = novo.clone();
+                        }
+                        self.texto_daily_base = novo;
                         self.deck_daily = Some(d);
                         self.erro_daily = None;
                     }
@@ -808,6 +1150,10 @@ impl Registro {
                         Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui salvar: {e}"))),
                     }
                 }
+                Resposta::Pauta(resultado) => match resultado {
+                    Ok(()) => self.pedir_daily(ctx),
+                    Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar a pauta: {e}"))),
+                },
                 Resposta::ForaDaDaily { fora, resultado } => match resultado {
                     Ok(()) => {
                         let texto = if fora { "Tirada desta daily; a sprint continua com ela" } else { "De volta à daily" };
@@ -816,6 +1162,35 @@ impl Registro {
                     }
                     Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar a daily: {e}"))),
                 },
+                Resposta::ForaDaSprint { fora, resultado } => match resultado {
+                    Ok(()) => {
+                        let texto = if fora { "Tirada desta sprint; a daily e o quadro continuam com ela" } else { "De volta à sprint" };
+                        acoes.push(Acao::Avisar(TipoAviso::Neutro, texto.into()));
+                        self.pedir_so_sprint(ctx);
+                    }
+                    Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar a sprint: {e}"))),
+                },
+                Resposta::TextoAssunto(resultado) => match resultado {
+                    Ok(_) => {
+                        self.texto_assunto = None;
+                        self.pedir_so_sprint(ctx);
+                    }
+                    Err(e) => {
+                        if let Some(t) = self.texto_assunto.as_mut() {
+                            t.salvando = false;
+                        }
+                        acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui guardar o texto: {e}")));
+                    }
+                },
+                Resposta::TextoGerado { assunto, resultado } => {
+                    if self.gerando_texto == Some(assunto) {
+                        self.gerando_texto = None;
+                    }
+                    match resultado {
+                        Ok(_) => self.pedir_so_sprint(ctx),
+                        Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui gerar o texto: {e}"))),
+                    }
+                }
                 Resposta::Removido(resultado) => match resultado {
                     Ok(()) => {
                         if let Some(v) = self.visor.take() {
@@ -896,6 +1271,14 @@ impl Registro {
                     Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui mudar os assuntos: {e}"))),
                 },
                 Resposta::PaginaTarefa { tarefa, primeira, resultado } => self.receber_da_tarefa(tarefa, primeira, resultado),
+                Resposta::Remontada { com_agente, resultado } => match resultado {
+                    Ok(_) => {
+                        let texto = if com_agente { "Montagem refeita; o montador com IA termina em instantes" } else { "Montagem refeita" };
+                        acoes.push(Acao::Avisar(TipoAviso::Neutro, texto.into()));
+                        self.pedir_daily(ctx);
+                    }
+                    Err(e) => acoes.push(Acao::Avisar(TipoAviso::Erro, format!("Não consegui remontar: {e}"))),
+                },
                 r @ (Resposta::Ferramentas(_) | Resposta::Proposta { .. } | Resposta::PropostaAceita(_)) => self.receber_gerar(ctx, r, acoes),
                 // Resposta de um escopo (ou período) que já não está na tela.
                 _ => {}
@@ -978,10 +1361,9 @@ impl Registro {
         }
         self.receber(&ctx, &mut acoes);
 
-        // A daily e a sprint numa coluna de leitura (linhas longas cansam);
-        // o histórico (lista e tarefa lado a lado) usa a largura toda, como o quadro.
+        // As três páginas (lista e tarefa lado a lado) usam a largura toda, como o quadro.
         let area = ui.available_rect_before_wrap();
-        let largura = if aba == Aba::Historico { area.width() } else { area.width().min(COLUNA_LEITURA) };
+        let largura = area.width().max(COLUNA_LEITURA.min(area.width()));
         let esquerda = area.center().x - largura / 2.0;
         let caixa = egui::Rect::from_min_size(egui::pos2(esquerda, area.top()), vec2(largura, area.height()));
         let mut filho = ui.new_child(egui::UiBuilder::new().max_rect(caixa).layout(egui::Layout::top_down(egui::Align::Min)));

@@ -35,6 +35,24 @@ type ErrInvalido struct{ Motivo string }
 
 func (e ErrInvalido) Error() string { return e.Motivo }
 
+// As colunas da tabela comandos (o Play), também usadas para refazê-la na
+// migração 14. Uma proposta de agente (origem 'agente', proposta 1) só roda
+// depois de aceita na tela; proposta_por e proposta_tarefa dizem de onde veio.
+const colunasTabelaComandos = `
+	id INTEGER PRIMARY KEY,
+	projeto_id INTEGER NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
+	nome TEXT NOT NULL,
+	comando TEXT NOT NULL,
+	pasta TEXT NOT NULL DEFAULT '',
+	ambiente TEXT NOT NULL DEFAULT '[]',
+	origem TEXT NOT NULL CHECK (origem IN ('voce', 'intellij', 'projeto', 'agente')),
+	criado_em TEXT NOT NULL,
+	proposta INTEGER NOT NULL DEFAULT 0,
+	proposta_por TEXT NOT NULL DEFAULT '',
+	proposta_tarefa INTEGER NOT NULL DEFAULT 0,
+	UNIQUE (projeto_id, nome)
+`
+
 const esquema = `
 CREATE TABLE IF NOT EXISTS perfis (` + colunasPerfis + `);
 CREATE TABLE IF NOT EXISTS contas_ia (
@@ -106,9 +124,12 @@ CREATE TABLE IF NOT EXISTS notas (
 );
 -- Tarefas tiradas da daily de um dia (já apresentadas): a sprint e a linha
 -- do tempo continuam com elas.
+-- Sem chave para tarefas: uma tarefa removida ainda aparece na daily pelo
+-- histórico, e também pode sair dela (o perfil fica aqui por isso).
 CREATE TABLE IF NOT EXISTS fora_da_daily (
-	tarefa_id INTEGER NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+	tarefa_id INTEGER NOT NULL,
 	dia TEXT NOT NULL,
+	perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
 	PRIMARY KEY (tarefa_id, dia)
 );
 -- Sprints: períodos fixos do perfil, para o que se escreve para a reunião
@@ -142,19 +163,17 @@ CREATE TABLE IF NOT EXISTS tarefas_assunto (
 	assunto_id INTEGER NOT NULL REFERENCES assuntos_sprint(id) ON DELETE CASCADE,
 	PRIMARY KEY (sprint_id, tarefa_id)
 );
+-- Tarefas tiradas de uma sprint (não vão à reunião): a daily, o quadro e a
+-- linha do tempo continuam com elas. Sem chave para tarefas: uma removida
+-- também sai (ela segue na sprint pelo histórico).
+CREATE TABLE IF NOT EXISTS fora_da_sprint (
+	sprint_id INTEGER NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+	tarefa_id INTEGER NOT NULL,
+	PRIMARY KEY (sprint_id, tarefa_id)
+);
 -- Configurações de execução de um projeto (o "Play"): um comando do shell,
 -- rodado numa subpasta do projeto (ou da tarefa) com variáveis de ambiente.
-CREATE TABLE IF NOT EXISTS comandos (
-	id INTEGER PRIMARY KEY,
-	projeto_id INTEGER NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
-	nome TEXT NOT NULL,
-	comando TEXT NOT NULL,
-	pasta TEXT NOT NULL DEFAULT '',
-	ambiente TEXT NOT NULL DEFAULT '[]',
-	origem TEXT NOT NULL CHECK (origem IN ('voce', 'intellij', 'projeto')),
-	criado_em TEXT NOT NULL,
-	UNIQUE (projeto_id, nome)
-);
+CREATE TABLE IF NOT EXISTS comandos (` + colunasTabelaComandos + `);
 -- Base de conhecimento: notas que todo agente do workspace (projeto_id nulo)
 -- ou do projeto (workspace_id nulo) recebe ao começar. A de um agente nasce
 -- sugerida; substitui aponta a nota que a sugestão quer mudar.
@@ -176,6 +195,34 @@ CREATE INDEX IF NOT EXISTS conhecimento_por_workspace ON conhecimento (workspace
 CREATE INDEX IF NOT EXISTS conhecimento_por_projeto ON conhecimento (projeto_id);
 -- Os arquivos de uma nota (um PDF, um modelo): ficam na pasta de dados e o
 -- agente recebe o caminho, para ler quando precisar.
+CREATE TABLE IF NOT EXISTS rotinas (
+	id INTEGER PRIMARY KEY,
+	workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	nome TEXT NOT NULL,
+	pedido TEXT NOT NULL,
+	do_quadro INTEGER NOT NULL DEFAULT 1,
+	do_codigo INTEGER NOT NULL DEFAULT 0,
+	dias INTEGER NOT NULL DEFAULT 7,
+	agenda_dias TEXT NOT NULL DEFAULT '',
+	agenda_hora TEXT NOT NULL DEFAULT '',
+	ativa INTEGER NOT NULL DEFAULT 1,
+	criado_em TEXT NOT NULL,
+	atualizado_em TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rodadas (
+	id INTEGER PRIMARY KEY,
+	rotina_id INTEGER NOT NULL REFERENCES rotinas(id) ON DELETE CASCADE,
+	momento TEXT NOT NULL,
+	origem TEXT NOT NULL CHECK (origem IN ('voce', 'agenda')),
+	estado TEXT NOT NULL CHECK (estado IN ('rodando', 'ok', 'erro')),
+	de TEXT NOT NULL DEFAULT '',
+	ate TEXT NOT NULL DEFAULT '',
+	texto TEXT NOT NULL DEFAULT '',
+	resumo TEXT NOT NULL DEFAULT '',
+	erro TEXT NOT NULL DEFAULT '',
+	terminou_em TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS rodadas_por_rotina ON rodadas (rotina_id, id);
 CREATE TABLE IF NOT EXISTS conhecimento_arquivos (
 	id INTEGER PRIMARY KEY,
 	conhecimento_id INTEGER NOT NULL REFERENCES conhecimento(id) ON DELETE CASCADE,
@@ -288,7 +335,7 @@ func Abrir(dir string) (*Banco, error) {
 	// Uma conexão só: o SQLite serializa as escritas de qualquer forma, e assim
 	// o encadeamento dos eventos nunca disputa com outra transação.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(esquema + esquemaPedidos + esquemaLousas + esquemaBancos); err != nil {
+	if _, err := db.Exec(esquema + esquemaPedidos + esquemaLousas + esquemaBancos + esquemaMontagens + esquemaPauta); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("aplicando o esquema: %w", err)
 	}
@@ -304,6 +351,15 @@ func Abrir(dir string) (*Banco, error) {
 
 func (b *Banco) Fechar() error { return b.db.Close() }
 
+// CopiarPara grava uma cópia consistente do banco em destino (que não pode
+// existir), sem parar quem está usando.
+func (b *Banco) CopiarPara(ctx context.Context, destino string) error {
+	if _, err := b.db.ExecContext(ctx, `VACUUM INTO ?`, destino); err != nil {
+		return err
+	}
+	return os.Chmod(destino, 0o600)
+}
+
 // migrar acrescenta as colunas que surgiram depois da primeira versão, sem
 // perder o que já está gravado.
 func migrar(db *sql.DB) error {
@@ -316,11 +372,23 @@ func migrar(db *sql.DB) error {
 		// 1 quando a última mudança de coluna foi do núcleo (agente esperando
 		// ou voltando a trabalhar); uma mudança sua zera e nunca é desfeita.
 		{"tarefas", "coluna_auto", "INTEGER NOT NULL DEFAULT 0"},
+		// Quando a tarefa entrou no Concluído (vazio fora dele): o quadro mostra
+		// só o concluído de hoje, e o dia é o da tarefa, não o do agente.
+		{"tarefas", "concluida_em", "TEXT NOT NULL DEFAULT ''"},
 		// Mostrar o aviso de segredos antes de capturar um terminal.
 		{"perfis", "aviso_captura", "INTEGER NOT NULL DEFAULT 1"},
 		// Mostrar o tempo dos agentes no registro (desligado por padrão).
 		{"perfis", "tempo_agentes", "INTEGER NOT NULL DEFAULT 0"},
-		// Autocompletar no console de bancos (desligado por padrão).
+		// O montador da reunião com IA (ligado por padrão; a montagem simples
+		// não depende dele).
+		{"perfis", "montador", "INTEGER NOT NULL DEFAULT 1"},
+		// A fala do assunto na sprint: o texto, quem escreveu ("voce" ou "ia")
+		// e, gerado, com quantas tarefas.
+		{"assuntos_sprint", "texto", "TEXT NOT NULL DEFAULT ''"},
+		{"assuntos_sprint", "texto_origem", "TEXT NOT NULL DEFAULT ''"},
+		{"assuntos_sprint", "texto_tarefas", "INTEGER NOT NULL DEFAULT 0"},
+		// Sobra de quando o autocompletar do console era uma opção: hoje ele
+		// vem sempre, e a coluna fica sem uso (tirar exigiria refazer a tabela).
 		{"perfis", "autocompletar_sql", "INTEGER NOT NULL DEFAULT 0"},
 		// O acabamento e o nome da abelha (a lista fica em ModelosMascote).
 		{"perfis", "mascote_modelo", "TEXT NOT NULL DEFAULT 'identidade'"},
@@ -355,7 +423,11 @@ func migrar(db *sql.DB) error {
 		{"eventos", "agente_id", "INTEGER"},
 		// Imagem ou vídeo de uma lousa (versão 4): fora da linha do tempo e dos slides.
 		{"anexos", "na_lousa", "INTEGER NOT NULL DEFAULT 0"},
+		// Consultas dos agentes sem pedir e com escrita, por conexão.
+		{"conexoes_banco", "agentes_livre", "INTEGER NOT NULL DEFAULT 0"},
+		{"conexoes_banco", "agentes_escrita", "INTEGER NOT NULL DEFAULT 0"},
 	}
+	preencherConcluidaEm := false
 	for _, c := range colunas {
 		existe := false
 		linhas, err := db.Query(`SELECT name FROM pragma_table_info(?)`, c.tabela)
@@ -376,6 +448,17 @@ func migrar(db *sql.DB) error {
 			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.tabela, c.coluna, c.definicao)); err != nil {
 				return err
 			}
+			preencherConcluidaEm = preencherConcluidaEm || c.coluna == "concluida_em"
+		}
+	}
+	if preencherConcluidaEm {
+		// As já concluídas ganham a data da última entrada no Concluído (pelos
+		// eventos) ou, sem evento, a da última atualização.
+		if _, err := db.Exec(`UPDATE tarefas SET concluida_em = COALESCE(
+			(SELECT momento FROM eventos WHERE tarefa_id = tarefas.id AND tipo = 'tarefa.atualizada'
+				AND json_extract(dados, '$.mudanca.coluna') = 'concluido' ORDER BY id DESC LIMIT 1),
+			atualizado_em) WHERE coluna = 'concluido' AND concluida_em = ''`); err != nil {
+			return fmt.Errorf("preenchendo a data de conclusão das tarefas: %w", err)
 		}
 	}
 	for _, indice := range []string{
@@ -444,7 +527,228 @@ func migrar(db *sql.DB) error {
 			return err
 		}
 	}
+	// Versão 11: fora_da_daily guarda o perfil e deixa de apontar para a
+	// tarefa, para uma tarefa removida também poder sair da daily.
+	if versao < 11 {
+		if err := migrarForaDaDaily(db); err != nil {
+			return fmt.Errorf("preparando a daily para tarefas removidas: %w", err)
+		}
+	}
+	// Versão 12: as rotinas do workspace e as rodadas delas (tabelas do esquema).
+	// Versão 13: as tarefas fora da sprint (tabela do esquema) e o texto do
+	// assunto (colunas de migrar).
+	if versao < 13 {
+		if _, err := db.Exec(`PRAGMA user_version = 13`); err != nil {
+			return err
+		}
+	}
+	// Versão 14: o Play aceita propostas dos agentes (origem 'agente' no
+	// CHECK e as colunas da proposta).
+	if versao < 14 {
+		if err := migrarComandos(db); err != nil {
+			return fmt.Errorf("preparando o Play para propostas dos agentes: %w", err)
+		}
+	}
+	// Versão 15: a lousa da reunião (donos dia e sprint, autor montador e a
+	// tarefa de cada peça montada) e as montagens (tabela do esquema).
+	if versao < 15 {
+		if err := migrarLousasDaReuniao(db); err != nil {
+			return fmt.Errorf("preparando a lousa da reunião: %w", err)
+		}
+	}
+	// O índice das peças montadas só depois da versão 15: num banco antigo a
+	// coluna só existe depois da troca das tabelas.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS lousa_pecas_montadas ON lousa_elementos (lousa_id, montagem_de)`); err != nil {
+		return err
+	}
+	// Versão 16: a pauta da reunião e a daily apresentada (tabelas do esquema).
+	if versao < 16 {
+		if _, err := db.Exec(`PRAGMA user_version = 16`); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// migrarLousasDaReuniao leva as tabelas lousas e lousa_elementos à versão 15.
+// Como em migrarPerfis, as duas são refeitas numa transação com as chaves
+// estrangeiras desligadas só durante a troca; o que já estava gravado
+// continua, com os mesmos ids.
+func migrarLousasDaReuniao(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var definicao string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'lousa_elementos'`).Scan(&definicao); err != nil {
+		return err
+	}
+	if strings.Contains(definicao, "'montador'") {
+		// Banco novo: as tabelas já nasceram assim.
+		_, err := conn.ExecContext(ctx, `PRAGMA user_version = 15`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, comando := range []string{
+		`CREATE TABLE lousas_nova (` + colunasTabelaLousas + `)`,
+		`INSERT INTO lousas_nova (id, perfil_id, workspace_id, tarefa_id, criada_em) SELECT id, perfil_id, workspace_id, tarefa_id, criada_em FROM lousas`,
+		`CREATE TABLE lousa_elementos_nova (` + colunasTabelaElementos + `)`,
+		`INSERT INTO lousa_elementos_nova (id, lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto, anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, versao, atualizado_em)
+			SELECT id, lousa_id, tipo, x, y, largura, altura, z, cor, titulo, texto, anexo_id, tarefa_ref, de_id, para_id, autor, agente_id, versao, atualizado_em FROM lousa_elementos`,
+		`DROP TABLE lousa_elementos`,
+		`DROP TABLE lousas`,
+		`ALTER TABLE lousas_nova RENAME TO lousas`,
+		`ALTER TABLE lousa_elementos_nova RENAME TO lousa_elementos`,
+		`CREATE INDEX IF NOT EXISTS lousa_elementos_por_lousa ON lousa_elementos (lousa_id, z)`,
+		`CREATE INDEX IF NOT EXISTS lousa_ligacoes_de ON lousa_elementos (de_id)`,
+		`CREATE INDEX IF NOT EXISTS lousa_ligacoes_para ON lousa_elementos (para_id)`,
+		`CREATE INDEX IF NOT EXISTS lousa_cartoes_de_tarefa ON lousa_elementos (tarefa_ref)`,
+		`CREATE INDEX IF NOT EXISTS lousa_pecas_montadas ON lousa_elementos (lousa_id, montagem_de)`,
+	} {
+		if _, err := tx.ExecContext(ctx, comando); err != nil {
+			return err
+		}
+	}
+	linhas, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	problema := linhas.Next()
+	linhas.Close()
+	if problema {
+		return errors.New("a troca das tabelas da lousa quebraria referências")
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 15`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// migrarComandos leva a tabela comandos à versão 14: a origem 'agente' entra
+// no CHECK e a proposta ganha as colunas dela. Como em migrarPerfis, a tabela
+// é refeita numa transação com as chaves estrangeiras desligadas só durante
+// a troca; o que já estava gravado continua, com proposta 0.
+func migrarComandos(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var definicao string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'comandos'`).Scan(&definicao); err != nil {
+		return err
+	}
+	if strings.Contains(definicao, "'agente'") {
+		// Banco novo: a tabela já nasceu assim.
+		_, err := conn.ExecContext(ctx, `PRAGMA user_version = 14`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, comando := range []string{
+		`CREATE TABLE comandos_nova (` + colunasTabelaComandos + `)`,
+		`INSERT INTO comandos_nova (id, projeto_id, nome, comando, pasta, ambiente, origem, criado_em)
+			SELECT id, projeto_id, nome, comando, pasta, ambiente, origem, criado_em FROM comandos`,
+		`DROP TABLE comandos`,
+		`ALTER TABLE comandos_nova RENAME TO comandos`,
+	} {
+		if _, err := tx.ExecContext(ctx, comando); err != nil {
+			return err
+		}
+	}
+	linhas, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	problema := linhas.Next()
+	linhas.Close()
+	if problema {
+		return errors.New("a troca da tabela do Play quebraria referências")
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 14`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// migrarForaDaDaily leva a tabela fora_da_daily à versão 11: ganha perfil_id
+// e perde a chave para tarefas. Como em migrarPerfis, a tabela é refeita
+// numa transação com as chaves estrangeiras desligadas só durante a troca.
+// As linhas de hoje continuam; o perfil vem da tarefa.
+func migrarForaDaDaily(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var definicao string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fora_da_daily'`).Scan(&definicao); err != nil {
+		return err
+	}
+	if strings.Contains(definicao, "perfil_id") {
+		// Banco novo: a tabela já nasceu na versão 11.
+		_, err := conn.ExecContext(ctx, `PRAGMA user_version = 11`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, comando := range []string{
+		`CREATE TABLE fora_da_daily_nova (
+			tarefa_id INTEGER NOT NULL,
+			dia TEXT NOT NULL,
+			perfil_id INTEGER NOT NULL REFERENCES perfis(id) ON DELETE CASCADE,
+			PRIMARY KEY (tarefa_id, dia))`,
+		`INSERT INTO fora_da_daily_nova (tarefa_id, dia, perfil_id)
+			SELECT f.tarefa_id, f.dia, w.perfil_id FROM fora_da_daily f
+			JOIN tarefas t ON t.id = f.tarefa_id
+			JOIN projetos p ON p.id = t.projeto_id
+			JOIN workspaces w ON w.id = p.workspace_id`,
+		`DROP TABLE fora_da_daily`,
+		`ALTER TABLE fora_da_daily_nova RENAME TO fora_da_daily`,
+	} {
+		if _, err := tx.ExecContext(ctx, comando); err != nil {
+			return err
+		}
+	}
+	linhas, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	problema := linhas.Next()
+	linhas.Close()
+	if problema {
+		return errors.New("a troca da tabela fora_da_daily quebraria referências")
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 11`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrarPerfis leva a tabela perfis à versão 9: o CHECK do tema aceita
@@ -481,6 +785,7 @@ func migrarPerfis(db *sql.DB) error {
 		`CREATE TABLE perfis_nova (` + colunasPerfis + `,
 			aviso_captura INTEGER NOT NULL DEFAULT 1,
 			tempo_agentes INTEGER NOT NULL DEFAULT 0,
+			montador INTEGER NOT NULL DEFAULT 1,
 			autocompletar_sql INTEGER NOT NULL DEFAULT 0,
 			mascote_modelo TEXT NOT NULL DEFAULT 'identidade',
 			mascote_nome TEXT NOT NULL DEFAULT 'Colmeia',

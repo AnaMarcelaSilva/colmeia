@@ -646,7 +646,7 @@ fn titulo_da_secao(ui: &mut egui::Ui, titulo: &str, explicacao: &str, alerta: bo
 /// O texto da nota com o pouco de markdown que as notas usam: **negrito** e
 /// `código`. Fechada (`linhas`), as linhas em branco somem e o resto corta
 /// com reticências.
-fn texto_da_nota(texto: &str, largura: f32, linhas: Option<usize>) -> egui::text::LayoutJob {
+pub fn texto_da_nota(texto: &str, largura: f32, linhas: Option<usize>) -> egui::text::LayoutJob {
     let p = cores();
     let normal = egui::TextFormat::simple(egui::FontId::proportional(13.5), p.texto);
     let negrito = egui::TextFormat::simple(tema::forte(13.5), p.texto);

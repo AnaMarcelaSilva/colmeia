@@ -1,7 +1,10 @@
 //! O "Play" dos projetos: as configurações de execução (um comando do shell
 //! numa subpasta, com variáveis de ambiente), como as do IntelliJ. O botão
 //! fica no quadro de um projeto e no topo da tarefa (lá, roda na pasta da
-//! tarefa); a saída aparece num painel embaixo, com Parar e Rodar de novo.
+//! tarefa); o menu dele traz também as dos outros projetos do workspace, para
+//! subir a API e o app de um lugar só. A saída aparece num painel embaixo,
+//! com Parar e Rodar de novo. Um agente só propõe uma configuração: ela fica
+//! em "Propostas do agente" até você aceitar, e não roda antes disso.
 //! Quem guarda e roda é o núcleo: fechar a tela não para o que está rodando.
 
 use std::collections::HashMap;
@@ -103,10 +106,20 @@ impl Play {
         self.comandos.values_mut().flatten().find(|c| c.id == id)
     }
 
+    /// As que já valem (sem as propostas de agente à espera).
+    fn validas(&mut self, projeto: i64) -> Vec<Comando> {
+        self.lista(projeto).iter().filter(|c| !c.proposta).cloned().collect()
+    }
+
+    /// As propostas de agente à espera de você.
+    fn propostas(&mut self, projeto: i64) -> Vec<Comando> {
+        self.lista(projeto).iter().filter(|c| c.proposta).cloned().collect()
+    }
+
     /// A escolhida do projeto: a última rodada ou escolhida, senão a primeira.
     fn escolhida(&mut self, projeto: i64) -> Option<Comando> {
         let escolhido = self.escolhido.get(&projeto).copied();
-        let lista = self.lista(projeto);
+        let lista = self.validas(projeto);
         escolhido.and_then(|id| lista.iter().find(|c| c.id == id)).or_else(|| lista.first()).cloned()
     }
 
@@ -151,6 +164,14 @@ impl Play {
                 if self.painel == Some(*comando_id) {
                     self.painel = None;
                 }
+            }
+            Evento::ComandoProposto { projeto_id, projeto_nome, nome, quem, .. } => {
+                self.comandos.remove(projeto_id);
+                let onde = if projeto_nome.is_empty() { String::new() } else { format!(" em {projeto_nome}") };
+                return Some((TipoAviso::Neutro, format!("{quem} propôs o Play “{nome}”{onde}. Aceite em Configurações de execução, no botão Rodar.")));
+            }
+            Evento::ComandoAceito { projeto_id, .. } => {
+                self.comandos.remove(projeto_id);
             }
             _ => {}
         }
@@ -229,11 +250,6 @@ impl Play {
         self.lista(projeto).iter().any(|c| c.rodando)
     }
 
-    /// O painel mostra uma execução deste projeto.
-    pub fn painel_do_projeto(&self, projeto: i64) -> bool {
-        self.painel.is_some() && self.projeto_do_painel == projeto
-    }
-
     fn rotulo(&mut self, projeto: i64) -> String {
         match self.escolhida(projeto) {
             Some(c) if c.rodando => format!("Rodando · {}", cortar(&c.campos.nome)),
@@ -243,9 +259,20 @@ impl Play {
     }
 
     /// O botão dividido: à esquerda roda a escolhida (ou, rodando, mostra a
-    /// saída); o menu escolhe outra, para, roda de novo e configura.
+    /// saída); o menu escolhe outra, para, roda de novo e configura. `outros`
+    /// são os demais projetos do workspace: as configurações deles entram no
+    /// fim do menu e rodam na pasta do projeto delas.
     #[allow(clippy::too_many_arguments)]
-    pub fn botao(&mut self, ui: &mut egui::Ui, bytes: &Arc<AtomicU64>, projeto: i64, nome: &str, tarefa: i64, pode: bool) -> Option<Aviso> {
+    pub fn botao(
+        &mut self,
+        ui: &mut egui::Ui,
+        bytes: &Arc<AtomicU64>,
+        projeto: i64,
+        nome: &str,
+        tarefa: i64,
+        pode: bool,
+        outros: &[(i64, String)],
+    ) -> Option<Aviso> {
         let p = cores();
         let ctx = ui.ctx().clone();
         let rotulo = self.rotulo(projeto);
@@ -266,7 +293,10 @@ impl Play {
                 None => self.abrir_configuracoes(projeto, nome),
             }
         }
-        let lista = self.lista(projeto).to_vec();
+        let lista = self.validas(projeto);
+        let propostas = self.propostas(projeto).len();
+        let dos_outros: Vec<(String, Vec<Comando>)> =
+            outros.iter().map(|(id, nome)| (nome.clone(), self.validas(*id))).filter(|(_, l)| !l.is_empty()).collect();
         let mut acao: Option<(&str, i64)> = None;
         egui::Popup::menu(&menu).show(|ui| {
             ui.set_min_width(280.0);
@@ -276,6 +306,27 @@ impl Play {
                 if tema::opcao_menu_com(ui, &texto, estado(c).as_deref(), pode) {
                     acao = Some(("rodar", c.id));
                     ui.close();
+                }
+            }
+            if propostas > 0 {
+                let texto = if propostas == 1 { "1 proposta do agente…".to_string() } else { format!("{propostas} propostas do agente…") };
+                if tema::opcao_menu_com(ui, &texto, Some("aceitar"), pode) {
+                    acao = Some(("configurar", 0));
+                    ui.close();
+                }
+            }
+            // Os outros projetos do workspace, cada um com as suas.
+            for (nome_outro, lista) in &dos_outros {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new(nome_outro).color(p.suave).size(11.5));
+                });
+                for c in lista {
+                    if tema::opcao_menu_com(ui, &c.campos.nome, estado(c).as_deref(), pode) {
+                        acao = Some(("rodar-outro", c.id));
+                        ui.close();
+                    }
                 }
             }
             if let Some(c) = escolhida.as_ref() {
@@ -297,12 +348,13 @@ impl Play {
         });
         match acao {
             Some(("rodar", id)) => aviso = self.rodar(&ctx, bytes, id, tarefa),
+            // Na pasta do projeto dela, que não é o desta tarefa.
+            Some(("rodar-outro", id)) => aviso = self.rodar(&ctx, bytes, id, 0),
             Some(("parar", id)) => aviso = self.parar(id),
             Some(("ver", id)) => self.mostrar_no_painel(&ctx, bytes, id),
             Some(("configurar", _)) => self.abrir_configuracoes(projeto, nome),
             _ => {}
         }
-        let _ = p;
         aviso
     }
 
@@ -433,24 +485,64 @@ impl Play {
                         ui.add_space(16.0);
                     }
 
-                    // As gravadas.
-                    if lista.is_empty() {
-                        ui.label(RichText::new("Nenhuma configuração ainda.").color(p.suave).size(13.0));
-                    }
+                    // As propostas dos agentes, à espera de você.
                     let mut editar = None;
                     let mut remover = None;
-                    for c in &lista {
-                        linha(ui, &c.campos, if c.origem == "intellij" { "IntelliJ" } else { "" }, |ui| {
+                    let mut aceitar = None;
+                    let propostas: Vec<&Comando> = lista.iter().filter(|c| c.proposta).collect();
+                    if !propostas.is_empty() {
+                        ui.label(tema::texto_forte("Propostas do agente", 14.0).color(p.texto));
+                        ui.add_space(2.0);
+                        ui.label(RichText::new("Leia o comando antes de aceitar: ele roda na sua máquina quando você clica em Rodar.").color(p.suave).size(12.5));
+                        ui.add_space(8.0);
+                        for c in &propostas {
+                            linha(ui, &c.campos, &format!("proposto por {}", c.proposta_por), |ui| {
+                                if tema::botao_principal(ui, "Aceitar", true).clicked() {
+                                    aceitar = Some(c.id);
+                                }
+                                if tema::botao_secundario(ui, "Editar").clicked() {
+                                    editar = Some((*c).clone());
+                                }
+                                if tema::botao_secundario(ui, "Descartar").clicked() {
+                                    remover = Some(c.id);
+                                }
+                            });
+                        }
+                        ui.add_space(14.0);
+                        ui.label(tema::texto_forte("Gravadas", 14.0).color(p.texto));
+                        ui.add_space(8.0);
+                    }
+                    // As gravadas.
+                    let gravadas: Vec<&Comando> = lista.iter().filter(|c| !c.proposta).collect();
+                    if gravadas.is_empty() {
+                        ui.label(RichText::new("Nenhuma configuração ainda.").color(p.suave).size(13.0));
+                    }
+                    for c in &gravadas {
+                        let fonte = match c.origem.as_str() {
+                            "intellij" => "IntelliJ",
+                            "agente" => "do agente",
+                            _ => "",
+                        };
+                        linha(ui, &c.campos, fonte, |ui| {
                             if tema::botao_secundario(ui, "Remover").clicked() {
                                 remover = Some(c.id);
                             }
                             if tema::botao_secundario(ui, "Editar").clicked() {
-                                editar = Some(c.clone());
+                                editar = Some((*c).clone());
                             }
                         });
                     }
                     if let Some(c) = editar {
                         d.editando = Some((c.id, Edicao::de(&c.campos)));
+                    }
+                    if let Some(id) = aceitar {
+                        match api::aceitar_comando(id) {
+                            Ok(c) => {
+                                self.escolhido.insert(projeto, c.id);
+                                recarregar = true;
+                            }
+                            Err(e) => d.erro = Some(e),
+                        }
                     }
                     if let Some(id) = remover {
                         match api::remover_comando(id) {
@@ -574,6 +666,11 @@ fn linha(ui: &mut egui::Ui, c: &CamposComando, fonte: &str, botoes: impl FnOnce(
                         onde = format!("{}  ·  {onde}", c.pasta);
                     }
                     ui.add(egui::Label::new(RichText::new(onde).color(p.suave).size(12.0).monospace()).truncate());
+                    // As variáveis, só pelo nome (o valor pode ser um segredo seu).
+                    if !c.ambiente.is_empty() {
+                        let nomes = c.ambiente.iter().map(|v| v.nome.as_str()).collect::<Vec<_>>().join(", ");
+                        ui.add(egui::Label::new(RichText::new(format!("variáveis: {nomes}")).color(p.suave).size(11.5)).truncate());
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), botoes);
             });

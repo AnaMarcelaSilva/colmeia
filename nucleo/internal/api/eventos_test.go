@@ -336,10 +336,11 @@ func TestLinhaDoTempoEResumos(t *testing.T) {
 	if status != http.StatusOK || len(dias) != 1 {
 		t.Fatalf("linha do tempo: %d %v", status, linha)
 	}
-	// A frase da reunião (montada, sem agente) pode entrar logo depois.
+	// A frase da reunião (montada, sem agente) pode entrar logo depois, na
+	// daily e na sprint: até dois itens antes do concluir.
 	itens := dias[0].(map[string]any)["itens"].([]any)
 	concluiu := false
-	for _, item := range itens[:min(2, len(itens))] {
+	for _, item := range itens[:min(3, len(itens))] {
 		concluiu = concluiu || item.(map[string]any)["texto"] == "Concluiu “Analisar”." && item.(map[string]any)["tipo"] == "concluiu"
 	}
 	if !concluiu {

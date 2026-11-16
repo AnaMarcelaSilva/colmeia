@@ -1,7 +1,7 @@
 //! A árvore das conexões: pasta › conexão › banco › esquema › Tabelas/Views ›
 //! tabela › colunas. Cada nível é pedido ao núcleo quando abre (e fica em
 //! cache até "Atualizar"); o filtro corta pelo nome o que já foi carregado.
-//! A lista é virtual (`show_rows`): 1007 tabelas não pesam.
+//! A lista é virtual (só as linhas à vista são pintadas): 1007 tabelas não pesam.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +11,11 @@ use crate::api;
 use crate::registro;
 use crate::tema::{self, Icone, cores, forte};
 
-pub const ALTURA_LINHA: f32 = 26.0;
+pub const ALTURA_LINHA: f32 = 28.0;
+/// A conexão tem duas linhas: o nome e, embaixo, o tipo e o servidor.
+const ALTURA_CONEXAO: f32 = 44.0;
+/// A pasta é um título de seção, com respiro em cima.
+const ALTURA_PASTA: f32 = 34.0;
 
 /// O erro de um nível que espera a senha (clicar nele abre o diálogo).
 pub const PEDE_SENHA: &str = "Digite a senha da conexão.";
@@ -78,7 +82,15 @@ pub enum Acao {
     Desconectar(i64),
     Remover(i64),
     TrocarSenha(i64),
+    /// Leva a conexão para a pasta (vazia: sem pasta).
+    Mover(i64, String),
+    /// Abre o editar com o campo de pasta nova à vista.
+    NovaPasta(i64),
 }
+
+/// O que vai na mão quando você arrasta uma conexão.
+#[derive(Clone, Copy)]
+struct Arrastando(i64);
 
 #[derive(Default)]
 pub struct Arvore {
@@ -103,7 +115,7 @@ pub struct Arvore {
 #[derive(Clone, Debug)]
 enum Linha<'a> {
     Pasta { nome: &'a str, n: usize, aberta: bool },
-    Conexao { c: &'a api::ConexaoBanco, nivel: usize, aberta: bool, carregando: bool, erro: Option<&'a str> },
+    Conexao { c: &'a api::ConexaoBanco, nivel: usize, aberta: bool, carregando: bool, conectada: bool, erro: Option<&'a str> },
     Banco { con: i64, nome: &'a str, nivel: usize, aberta: bool, carregando: bool },
     MostrarTodos { con: i64, nivel: usize },
     Esquema { con: i64, banco: &'a str, nome: &'a str, nivel: usize, aberta: bool, carregando: bool },
@@ -114,6 +126,22 @@ enum Linha<'a> {
     Erro { con: i64, texto: &'a str, nivel: usize },
     Cortado { mostrando: usize, total: usize, nivel: usize },
     Vazio { texto: &'static str, nivel: usize },
+}
+
+impl Linha<'_> {
+    /// A conexão a que a linha pertence (a pasta não tem uma).
+    fn conexao(&self) -> Option<i64> {
+        match self {
+            Linha::Conexao { c, .. } => Some(c.id),
+            Linha::Banco { con, .. }
+            | Linha::MostrarTodos { con, .. }
+            | Linha::Esquema { con, .. }
+            | Linha::Grupo { con, .. }
+            | Linha::Tabela { con, .. }
+            | Linha::Erro { con, .. } => Some(*con),
+            _ => None,
+        }
+    }
 }
 
 impl Arvore {
@@ -310,7 +338,9 @@ impl Arvore {
             let aberta = self.abertos.contains(&No::Conexao(c.id));
             let carregando = matches!(self.bancos.get(&c.id), Some(Carga::Carregando))
                 || matches!(self.objetos.get(&(c.id, String::new(), String::new())), Some(Carga::Carregando)) && c.tipo == "sqlite";
-            saida.push(Linha::Conexao { c, nivel, aberta, carregando, erro: self.erros.get(&c.id).map(String::as_str) });
+            let conectada = matches!(self.bancos.get(&c.id), Some(Carga::Pronta(_)))
+                || c.tipo == "sqlite" && matches!(self.objetos.get(&(c.id, String::new(), String::new())), Some(Carga::Pronta(_)));
+            saida.push(Linha::Conexao { c, nivel, aberta, carregando, conectada, erro: self.erros.get(&c.id).map(String::as_str) });
             if !aberta {
                 continue;
             }
@@ -471,16 +501,31 @@ impl Arvore {
         if linhas.is_empty() {
             return acoes;
         }
+        let mut pastas: Vec<&str> = conexoes.iter().map(|c| c.pasta.as_str()).filter(|p| !p.is_empty()).collect();
+        pastas.dedup();
         let tem_tabela = linhas.iter().any(|l| matches!(l, Linha::Tabela { .. }));
         let filtrando = !self.filtro.is_empty();
         let tem_objetos_carregados = !self.objetos.is_empty();
         let mut clique: Option<(usize, Clique)> = None;
         let mut limpar = false;
-        let saida = egui::ScrollArea::vertical().id_salt("arvore-banco").auto_shrink(false).show_rows(ui, ALTURA_LINHA, linhas.len(), |ui, faixa| {
+        // As alturas variam (conexão em duas linhas, pasta com respiro): o
+        // topo de cada linha é somado uma vez e só as que estão à vista são pintadas.
+        let mut topos = Vec::with_capacity(linhas.len() + 1);
+        let mut y = 0.0;
+        for l in &linhas {
+            topos.push(y);
+            y += altura(l);
+        }
+        topos.push(y);
+        let saida = egui::ScrollArea::vertical().id_salt("arvore-banco").auto_shrink(false).show_viewport(ui, |ui, vista| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for i in faixa {
-                let pedido = matches!(&linhas[i], Linha::Conexao { c, .. } if self.pedidos.contains(&c.id));
-                if let Some(c) = linha(ui, &linhas[i], self.escolhido.as_ref(), &self.filtro, i, pedido) {
+            ui.set_height(y);
+            let primeira = topos.partition_point(|t| *t <= vista.min.y).saturating_sub(1).min(linhas.len());
+            let ultima = topos.partition_point(|t| *t < vista.max.y).min(linhas.len());
+            ui.add_space(topos[primeira]);
+            for (i, l) in linhas.iter().enumerate().take(ultima).skip(primeira) {
+                let pedido = matches!(l, Linha::Conexao { c, .. } if self.pedidos.contains(&c.id));
+                if let Some(c) = linha(ui, l, self.escolhido.as_ref(), &self.filtro, i, pedido, &pastas) {
                     clique = Some((i, c));
                 }
             }
@@ -501,6 +546,29 @@ impl Arvore {
             }
             return acoes;
         };
+        // Soltou uma conexão: vai para a pasta da linha de baixo (a própria
+        // pasta, ou a da conexão e do que está dentro dela).
+        if let Clique::Soltar(id) = clique {
+            let destino = match &linhas[i] {
+                Linha::Pasta { nome, .. } => Some(nome.to_string()),
+                l => l.conexao().and_then(|con| conexoes.iter().find(|c| c.id == con)).map(|c| c.pasta.clone()),
+            };
+            drop(linhas);
+            if let Some(pasta) = destino
+                && conexoes.iter().any(|c| c.id == id && c.pasta != pasta)
+            {
+                acoes.push(Acao::Mover(id, pasta));
+            }
+            return acoes;
+        }
+        if let Clique::MoverPara(pasta) = clique {
+            if let Linha::Conexao { c, .. } = &linhas[i]
+                && c.pasta != pasta
+            {
+                acoes.push(Acao::Mover(c.id, pasta));
+            }
+            return acoes;
+        }
         let tipo_de = |con: i64| conexoes.iter().find(|c| c.id == con).map(|c| (c.tipo.clone(), c.banco.clone())).unwrap_or_default();
         // As linhas emprestam a árvore: a ação vira dados próprios antes de mexer nela.
         let alvo: Option<No> = match &linhas[i] {
@@ -564,6 +632,7 @@ impl Arvore {
                 acoes.push(Acao::Escolher(no.conexao()));
                 self.escolhido = Some(no);
             }
+            Clique::Soltar(_) | Clique::MoverPara(_) => {}
             Clique::Menu(m) => {
                 let c = no.conexao();
                 match (m, &no) {
@@ -585,6 +654,7 @@ impl Arvore {
                     }
                     (Menu::Remover, _) => acoes.push(Acao::Remover(c)),
                     (Menu::TrocarSenha, _) => acoes.push(Acao::TrocarSenha(c)),
+                    (Menu::NovaPasta, _) => acoes.push(Acao::NovaPasta(c)),
                     _ => {}
                 }
             }
@@ -606,6 +676,10 @@ enum Clique {
     Escolher,
     Duplo,
     Menu(Menu),
+    /// Uma conexão (pelo id) foi solta nesta linha.
+    Soltar(i64),
+    /// "Mover para pasta" no menu da conexão (vazia: sem pasta).
+    MoverPara(String),
 }
 
 #[derive(Clone, Copy)]
@@ -621,10 +695,38 @@ enum Menu {
     Primeiras,
     Gerar,
     CopiarNome,
+    NovaPasta,
 }
 
 /// Os selos da conexão: o ícone, a cor e a dica.
 type Selos = Vec<(Icone, egui::Color32, &'static str)>;
+
+/// A altura de cada linha na lista.
+fn altura(linha: &Linha) -> f32 {
+    match linha {
+        Linha::Pasta { .. } => ALTURA_PASTA,
+        Linha::Conexao { .. } => ALTURA_CONEXAO,
+        _ => ALTURA_LINHA,
+    }
+}
+
+/// A cor de cada tipo de banco no selo da conexão.
+fn cor_do_tipo(tipo: &str) -> egui::Color32 {
+    let e = cores().etiquetas;
+    match tipo {
+        "postgres" => e[1],
+        "mysql" => e[2],
+        "sqlserver" => e[4],
+        _ => e[0],
+    }
+}
+
+/// O que vai embaixo do nome da conexão: o tipo e onde ela está.
+fn subtitulo(c: &api::ConexaoBanco) -> String {
+    let tipo = super::conexao::TIPOS.iter().find(|(t, _)| *t == c.tipo).map_or("SQLite", |(_, n)| *n);
+    let onde = if c.tipo == "sqlite" { c.arquivo.rsplit('/').next().unwrap_or_default().to_string() } else { c.host.clone() };
+    if onde.is_empty() { tipo.to_string() } else { format!("{tipo} · {onde}") }
+}
 
 /// Seta de abrir, como na gaveta de arquivos.
 fn seta(pintor: &egui::Painter, c: egui::Pos2, aberta: bool, cor: egui::Color32) {
@@ -657,10 +759,10 @@ fn nome_com_filtro(pintor: &egui::Painter, nome: &str, filtro: &str, fonte: Font
     }
 }
 
-fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str, i: usize, pedido: bool) -> Option<Clique> {
+fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str, i: usize, pedido: bool, pastas: &[&str]) -> Option<Clique> {
     let p = cores();
     let largura = ui.available_width() - registro::MARGEM_ROLAGEM;
-    let (rect, _) = ui.allocate_exact_size(vec2(largura, ALTURA_LINHA), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(largura, altura(linha)), Sense::hover());
     let pintor = ui.painter().clone();
     let recuo = |nivel: usize| rect.left() + 10.0 + nivel as f32 * 16.0;
     let texto_apagado = |x: f32, texto: &str| {
@@ -738,11 +840,9 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
     }
     // Linhas clicáveis.
     let (nivel, aberta, abre, icone, nome, fonte, cor_icone, no): (usize, bool, bool, Option<Icone>, String, FontId, egui::Color32, No) = match linha {
-        Linha::Pasta { nome, aberta, .. } => (0, *aberta, true, None, nome.to_string(), forte(13.0), p.suave, No::Pasta(nome.to_string())),
-        Linha::Conexao { c, nivel, aberta, erro, .. } => {
-            let cor = if erro.is_some() { p.erro } else { p.texto };
-            (*nivel, *aberta, true, Some(Icone::Banco), c.nome.clone(), forte(13.0), cor, No::Conexao(c.id))
-        }
+        Linha::Pasta { nome, aberta, .. } => (0, *aberta, true, None, nome.to_uppercase(), forte(11.0), p.suave, No::Pasta(nome.to_string())),
+        // O ícone da conexão é o selo do tipo, pintado à parte.
+        Linha::Conexao { c, nivel, aberta, .. } => (*nivel, *aberta, true, None, c.nome.clone(), forte(13.0), p.texto, No::Conexao(c.id)),
         Linha::Banco { con, nome, nivel, aberta, .. } => {
             (*nivel, *aberta, true, Some(Icone::Banco), nome.to_string(), FontId::proportional(13.0), p.suave, No::Banco(*con, nome.to_string()))
         }
@@ -778,10 +878,25 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
         ),
         _ => return None,
     };
-    let resposta = ui.interact(rect, Id::new(("linha-banco", i, &no)), Sense::click());
+    // A pasta é título de seção: o respiro fica em cima e a linha útil embaixo.
+    let rect = if matches!(linha, Linha::Pasta { .. }) { Rect::from_min_max(pos2(rect.left(), rect.bottom() - 26.0), rect.max) } else { rect };
+    // A conexão se arrasta para outra pasta; o id vem do nó para não trocar de
+    // linha no meio do arrasto quando a lista rola.
+    let sentido = if matches!(linha, Linha::Conexao { .. }) { Sense::click_and_drag() } else { Sense::click() };
+    let resposta = ui.interact(rect, Id::new(("linha-banco", &no)), sentido);
+    if let Linha::Conexao { c, .. } = linha {
+        resposta.dnd_set_drag_payload(Arrastando(c.id));
+        if resposta.dragged() {
+            etiqueta_do_arrasto(ui, &c.nome);
+        }
+    }
+    let solta_aqui = resposta.dnd_hover_payload::<Arrastando>().is_some_and(|a| !matches!(linha, Linha::Conexao { c, .. } if c.id == a.0));
     let escolhida = escolhido == Some(&no);
     let fundo = rect.shrink2(vec2(4.0, 1.0));
-    if escolhida {
+    if solta_aqui {
+        pintor.rect_filled(fundo, CornerRadius::same(tema::RAIO_ETIQUETA), tema::fundo_tingido(p, p.destaque, tema::claro()));
+        pintor.rect_stroke(fundo, CornerRadius::same(tema::RAIO_ETIQUETA), Stroke::new(1.0, p.destaque), egui::StrokeKind::Inside);
+    } else if escolhida {
         pintor.rect_filled(fundo, CornerRadius::same(tema::RAIO_ETIQUETA), tema::fundo_escolhido());
         let barra = Rect::from_min_size(fundo.min + vec2(0.0, 3.0), vec2(2.0, fundo.height() - 6.0));
         pintor.rect_filled(barra, CornerRadius::same(1), p.destaque);
@@ -798,34 +913,48 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
         tema::desenhar_icone(&pintor, pos2(x + 16.0 + 8.0, rect.center().y), icone, cor_icone);
         x_nome = x + 16.0 + 16.0 + 6.0;
     }
-    // À direita: contagem, selos ou "carregando…".
+    if let Linha::Conexao { c, conectada, erro, .. } = linha {
+        // O selo do tipo: o cilindro na cor do banco sobre o fundo tingido, e
+        // no canto o estado (verde aberta, vermelho com erro, nada fechada).
+        let cor = cor_do_tipo(&c.tipo);
+        let selo = Rect::from_center_size(pos2(x + 16.0 + 13.0, rect.center().y), vec2(26.0, 26.0));
+        pintor.rect_filled(selo, CornerRadius::same(tema::RAIO_CONTROLE), tema::fundo_tingido(p, cor, tema::claro()));
+        tema::desenhar_icone(&pintor, selo.center(), Icone::Banco, cor);
+        let estado = if erro.is_some() { Some(p.erro) } else { conectada.then_some(p.ok) };
+        if let Some(cor_estado) = estado {
+            let canto = selo.right_bottom() - vec2(2.0, 2.0);
+            pintor.circle_filled(canto, 4.5, if escolhida { tema::fundo_escolhido() } else { p.superficie });
+            pintor.circle_filled(canto, 3.0, cor_estado);
+        }
+        x_nome = selo.right() + 10.0;
+    }
+    // À direita: contagem, selos ou "carregando…". Na conexão ficam na
+    // linha do nome, para o servidor embaixo usar a largura toda.
     let mut direita = rect.right() - 8.0;
+    let cy = if matches!(linha, Linha::Conexao { .. }) { rect.center().y - 8.0 } else { rect.center().y };
     let cor_direita = if realcada { p.texto } else { p.suave };
     let (contagem, carregando, selos): (Option<String>, bool, Selos) = match linha {
         Linha::Pasta { n, .. } => (Some(n.to_string()), false, Vec::new()),
         Linha::Grupo { n, de, .. } => (Some(if !filtro.is_empty() { format!("{n} de {de}") } else { de.to_string() }), false, Vec::new()),
         Linha::Conexao { c, carregando, erro, .. } => {
+            // A escrita vira etiqueta de texto (um lápis parecia botão de editar).
             let mut selos = Vec::new();
-            if erro.is_none() {
-                if c.escrita {
-                    selos.push((Icone::Lapis, p.alerta, "Alterações permitidas"));
-                }
-                if c.agentes {
-                    selos.push((Icone::Agente, p.suave, "Agentes podem pedir consultas"));
-                }
+            if erro.is_none() && c.agentes {
+                let dica = match (c.agentes_livre, c.agentes_escrita) {
+                    (true, true) => "Agentes consultam e alteram sem pedir",
+                    (true, false) => "Agentes consultam sem pedir",
+                    (false, true) => "Agentes podem pedir consultas e alterações",
+                    (false, false) => "Agentes podem pedir consultas",
+                };
+                selos.push((Icone::Agente, if c.agentes_livre || c.agentes_escrita { p.alerta } else { p.suave }, dica));
             }
             (None, *carregando, selos)
         }
         Linha::Banco { carregando, .. } | Linha::Esquema { carregando, .. } | Linha::Tabela { carregando, .. } => (None, *carregando, Vec::new()),
         _ => (None, false, Vec::new()),
     };
-    if let Linha::Conexao { erro: Some(e), .. } = linha {
-        pintor.circle_filled(pos2(direita - 4.0, rect.center().y), 3.5, p.erro);
-        direita -= 16.0;
-        let _ = e;
-    }
     if pedido {
-        let centro = pos2(direita - 4.0, rect.center().y);
+        let centro = pos2(direita - 4.0, cy);
         pintor.circle_filled(centro, 3.5, p.alerta);
         ui.interact(Rect::from_center_size(centro, vec2(14.0, 14.0)), Id::new(("pedido-conexao", i)), Sense::hover())
             .on_hover_text("Um agente quer consultar esta conexão");
@@ -833,10 +962,19 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
     }
     // Selos e contagem terminam no mesmo x (8 px antes do fim da linha).
     for (icone, cor, dica) in selos.iter().rev() {
-        let centro = pos2(direita - 7.0, rect.center().y);
+        let centro = pos2(direita - 7.0, cy);
         tema::desenhar_icone(&pintor, centro, *icone, *cor);
         ui.interact(Rect::from_center_size(centro, vec2(16.0, 16.0)), Id::new(("selo", i, *dica)), Sense::hover()).on_hover_text(*dica);
         direita -= 20.0;
+    }
+    if let Linha::Conexao { c, erro: None, .. } = linha
+        && c.escrita
+    {
+        let largura = pintor.layout_no_wrap("escrita".into(), tema::fonte_etiqueta(), p.alerta).size().x + 12.0;
+        direita -= largura;
+        let r = tema::etiqueta(&pintor, pos2(direita, cy - 9.5), "escrita", tema::fonte_etiqueta(), p.alerta);
+        ui.interact(r, Id::new(("escrita", i)), Sense::hover()).on_hover_text("Alterações permitidas, cada uma pede confirmação");
+        direita -= 8.0;
     }
     if let Some(t) = contagem {
         let g = pintor.layout_no_wrap(t, FontId::proportional(11.5), cor_direita);
@@ -845,19 +983,36 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
         direita -= 8.0;
     }
     let mut largura_nome = (direita - x_nome - 4.0).max(20.0);
-    if carregando {
+    if carregando && !matches!(linha, Linha::Conexao { .. }) {
         largura_nome = (largura_nome - 90.0).max(20.0);
     }
-    let cor_nome = if matches!(linha, Linha::Grupo { .. }) && !realcada { p.suave } else { p.texto };
+    let cor_nome = if matches!(linha, Linha::Grupo { .. } | Linha::Pasta { .. }) && !realcada { p.suave } else { p.texto };
     let g = if matches!(linha, Linha::Tabela { .. }) {
         nome_com_filtro(&pintor, &nome, filtro, fonte, largura_nome)
     } else {
-        tema::cortar(&pintor, &nome, egui::TextFormat::simple(fonte, cor_nome), largura_nome, 1, true)
+        let mut formato = egui::TextFormat::simple(fonte, cor_nome);
+        if matches!(linha, Linha::Pasta { .. }) {
+            formato.extra_letter_spacing = 0.8;
+        }
+        tema::cortar(&pintor, &nome, formato, largura_nome, 1, true)
     };
     let fim_nome = x_nome + g.size().x;
-    pintor.galley(pos2(x_nome, rect.center().y - g.size().y / 2.0), g, cor_nome);
-    if carregando {
-        let texto = if matches!(linha, Linha::Conexao { .. }) { "conectando…" } else { "carregando…" };
+    if let Linha::Conexao { c, erro, .. } = linha {
+        // Duas linhas: o nome e, embaixo, o tipo e o servidor (ou o erro).
+        let y_nome = rect.center().y - g.size().y - 1.0;
+        pintor.galley(pos2(x_nome, y_nome), g, cor_nome);
+        let (sub, cor_sub) = match erro {
+            Some(e) => (e.to_string(), p.erro),
+            None if carregando => ("conectando…".to_string(), p.suave),
+            None => (subtitulo(c), p.suave),
+        };
+        let g = tema::cortar(&pintor, &sub, egui::TextFormat::simple(FontId::proportional(11.5), cor_sub), (rect.right() - 8.0 - x_nome).max(20.0), 1, true);
+        pintor.galley(pos2(x_nome, rect.center().y + 2.0), g, cor_sub);
+    } else {
+        pintor.galley(pos2(x_nome, rect.center().y - g.size().y / 2.0), g, cor_nome);
+    }
+    if carregando && !matches!(linha, Linha::Conexao { .. }) {
+        let texto = "carregando…";
         let formato = egui::TextFormat { font_id: FontId::proportional(12.5), color: p.suave, italics: true, ..Default::default() };
         let g = pintor.layout_job(egui::text::LayoutJob::single_section(texto.into(), formato));
         pintor.galley(pos2(fim_nome + 8.0, rect.center().y - g.size().y / 2.0), g, p.suave);
@@ -874,7 +1029,11 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
         // Na tabela, o clique simples só escolhe (a seta abre as colunas).
         clique = Some(if matches!(no, No::Tabela(..)) && !no_seta { Clique::Escolher } else { Clique::Alternar });
     }
+    if let Some(a) = resposta.dnd_release_payload::<Arrastando>() {
+        return Some(Clique::Soltar(a.0));
+    }
     let mut menu = None;
+    let mut mover = None;
     resposta.context_menu(|ui| {
         ui.set_min_width(220.0);
         let item = |ui: &mut egui::Ui, texto: &str, m: Menu, menu: &mut Option<Menu>| {
@@ -894,6 +1053,23 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
                 item(ui, "Abrir console", Menu::Console, &mut menu);
                 item(ui, "Editar…", Menu::Editar, &mut menu);
                 item(ui, "Duplicar…", Menu::Duplicar, &mut menu);
+                if let Linha::Conexao { c, .. } = linha {
+                    tema::submenu(ui, "Mover para pasta", |ui| {
+                        ui.set_min_width(200.0);
+                        if !c.pasta.is_empty() && tema::opcao_menu(ui, "Sem pasta", false) {
+                            mover = Some(String::new());
+                            ui.close();
+                        }
+                        for pasta in pastas.iter().filter(|p| **p != c.pasta) {
+                            if tema::opcao_menu(ui, pasta, false) {
+                                mover = Some(pasta.to_string());
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        item(ui, "Nova pasta…", Menu::NovaPasta, &mut menu);
+                    });
+                }
                 item(ui, "Testar", Menu::Testar, &mut menu);
                 item(ui, "Atualizar", Menu::Atualizar, &mut menu);
                 item(ui, "Trocar senha…", Menu::TrocarSenha, &mut menu);
@@ -906,7 +1082,22 @@ fn linha(ui: &mut egui::Ui, linha: &Linha, escolhido: Option<&No>, filtro: &str,
     if let Some(m) = menu {
         clique = Some(Clique::Menu(m));
     }
+    if let Some(pasta) = mover {
+        clique = Some(Clique::MoverPara(pasta));
+    }
     clique
+}
+
+/// O nome da conexão acompanha o ponteiro enquanto você arrasta.
+fn etiqueta_do_arrasto(ui: &egui::Ui, nome: &str) {
+    let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
+    let p = cores();
+    let pintor = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("arrasto-conexao")));
+    let g = pintor.layout_no_wrap(nome.to_string(), forte(13.0), p.texto);
+    let r = Rect::from_min_size(pos + vec2(14.0, 6.0), g.size() + vec2(20.0, 12.0));
+    pintor.rect_filled(r, CornerRadius::same(tema::RAIO_CONTROLE), p.superficie_alta);
+    pintor.rect_stroke(r, CornerRadius::same(tema::RAIO_CONTROLE), Stroke::new(1.0, p.destaque), egui::StrokeKind::Inside);
+    pintor.galley(r.min + vec2(10.0, 6.0), g, p.texto);
 }
 
 /// O nome curto do tipo, o mesmo que a grade mostra: "character varying(200)"
