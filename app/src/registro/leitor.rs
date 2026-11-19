@@ -456,14 +456,16 @@ impl Registro {
         tema::marca(pintor, pos2(x + 4.0, y + 7.0 * e), 4.0 * e, cor, marca);
         let mut xx = x + 14.0 * e;
         let texto_estado = if self.mostrar_datas { estado_com_data(nome_estado, s) } else { nome_estado.to_string() };
+        // Tudo da linha do estado alinhado pelo meio da etiqueta (19 px).
+        let meio = y + 9.5;
         let g = pintor.layout_no_wrap(texto_estado, FontId::proportional(12.5 * e), p.suave);
-        pintor.galley(pos2(xx, y), g.clone(), p.suave);
+        pintor.galley(pos2(xx, meio - g.size().y / 2.0), g.clone(), p.suave);
         xx += g.size().x + 10.0 * e;
         if !projeto.is_empty() {
             xx = tema::etiqueta(pintor, pos2(xx, y), projeto, FontId::monospace(11.0 * e), p.suave).right() + 10.0 * e;
         }
         let sub = format!("#{} · {}", s.tarefa_id, s.titulo.trim_end_matches('.'));
-        texto_cortado(pintor, pos2(xx, y), &sub, FontId::proportional(12.5 * e), p.suave, cab.right() - xx);
+        texto_cortado(pintor, pos2(xx, meio), &sub, FontId::proportional(12.5 * e), p.suave, cab.right() - xx);
         ui.add_space(8.0 * e);
 
         // O corpo rola: a frase, os cartões e a galeria.

@@ -828,6 +828,8 @@ impl Registro {
                 pedido = Some(PedidoCheio::Sair);
             } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Q)) {
                 pedido = Some(PedidoCheio::Lousa);
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D)) {
+                self.alternar_datas();
             } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
                 && let Some(id) = escolhida
             {
