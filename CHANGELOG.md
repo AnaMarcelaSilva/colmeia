@@ -21,6 +21,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e as
 
 ### Mudado
 
+- **As datas da sprint são suas:** mudar o começo ou o fim de uma sprint deixou de ser recusado quando o período cruza o de outra ("o período cruza a sprint de 09/11 a 13/11"). A sprint é um recorte de tarefas num período, e cruzar a vizinha não atrapalha: no dia que duas têm, a atual é a que começou por último. Só repetir exatamente as datas de outra continua recusado, porque as notas da sprint são guardadas pelo período. O campo de data também aceita o que você digita com folga: "1/9/2026", "12//11/2026" ou "12.11.2026" valem.
 - **"O agente parou. E a tarefa?":** a caixa que aparece ao parar e remover um agente deixou de ser uma fileira de colunas coloridas e virou uma escolha explicada, uma opção por linha com a consequência embaixo (deixar onde está, que vem marcada; enviar para revisão; concluir; voltar ao backlog) e um Confirmar só (Enter). "Agente trabalhando" saiu, porque sem agente a tarefa não vai para lá. "Excluir tarefa…" ficou como um link vermelho, longe dos botões, e continua pedindo confirmação.
 
 ### Corrigido

@@ -53,9 +53,23 @@ func TestSprintsDoPerfil(t *testing.T) {
 	if deNovo, _ := b.SprintAtual(ctx, p.ID, "2026-10-05"); deNovo.ID != atual.ID {
 		t.Fatalf("criou outra sprint para um dia da mesma: %+v", deNovo)
 	}
-	// Não cruza outra sprint do perfil; outro perfil é livre.
-	if _, err := b.CriarSprint(ctx, p.ID, "2026-10-08", "2026-10-14"); err == nil {
-		t.Fatal("criou uma sprint por cima de outra")
+	// Cruzar outra sprint do perfil pode (as datas são suas); repetir as datas de uma, não.
+	cruzada, err := b.CriarSprint(ctx, p.ID, "2026-10-08", "2026-10-14")
+	if err != nil {
+		t.Fatalf("sprint cruzando outra: %v", err)
+	}
+	if _, err := b.CriarSprint(ctx, p.ID, "2026-10-02", "2026-10-08"); err == nil {
+		t.Fatal("criou uma sprint com as mesmas datas de outra")
+	}
+	if _, err := b.EditarSprint(ctx, cruzada.ID, "2026-10-02", "2026-10-08"); err == nil {
+		t.Fatal("editou uma sprint para as mesmas datas de outra")
+	}
+	// No dia que as duas têm, a atual é a que começou por último.
+	if hoje, _ := b.SprintAtual(ctx, p.ID, "2026-10-08"); hoje.ID != cruzada.ID {
+		t.Fatalf("atual no dia em comum: %+v", hoje)
+	}
+	if err := b.RemoverSprint(ctx, cruzada.ID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := b.CriarSprint(ctx, o.ID, "2026-10-01", "2026-10-31"); err != nil {
 		t.Fatalf("outro perfil: %v", err)

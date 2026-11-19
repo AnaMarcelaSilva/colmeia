@@ -78,18 +78,21 @@ func (b *Banco) SprintPorID(ctx context.Context, id int64) (Sprint, error) {
 	return lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE id = ?`, id))
 }
 
-// sobrepoe diz se o período cruza outra sprint do perfil (menos `exceto`).
-func sobrepoe(ctx context.Context, tx *transacao, perfil, exceto int64, inicio, fim string) error {
-	var outra Sprint
-	err := tx.QueryRowContext(ctx, `SELECT inicio, fim FROM sprints WHERE perfil_id = ? AND id != ? AND inicio <= ? AND fim >= ? LIMIT 1`,
-		perfil, exceto, fim, inicio).Scan(&outra.Inicio, &outra.Fim)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
+// mesmoPeriodo diz se já há outra sprint do perfil (menos `exceto`) com
+// exatamente estas datas. Cruzar outra sprint pode: a sprint é um recorte seu
+// de tarefas num período, e as datas são as que você quiser. Só o período
+// idêntico é recusado, porque as notas da sprint são guardadas pelo período e
+// as duas passariam a dividir as mesmas.
+func mesmoPeriodo(ctx context.Context, tx *transacao, perfil, exceto int64, inicio, fim string) error {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sprints WHERE perfil_id = ? AND id != ? AND inicio = ? AND fim = ?`,
+		perfil, exceto, inicio, fim).Scan(&n); err != nil {
 		return err
 	}
-	return ErrInvalido{"o período cruza a sprint de " + dataCurta(outra.Inicio) + " a " + dataCurta(outra.Fim)}
+	if n > 0 {
+		return ErrInvalido{"já existe uma sprint de " + dataCurta(inicio) + " a " + dataCurta(fim)}
+	}
+	return nil
 }
 
 // dataCurta: AAAA-MM-DD vira DD/MM.
@@ -100,7 +103,8 @@ func dataCurta(d string) string {
 	return d[8:10] + "/" + d[5:7]
 }
 
-// CriarSprint cria uma sprint no perfil; ela não pode cruzar outra.
+// CriarSprint cria uma sprint no perfil; ela pode cruzar outra, mas não
+// repetir as datas de uma.
 func (b *Banco) CriarSprint(ctx context.Context, perfil int64, inicio, fim string) (Sprint, error) {
 	if err := periodoSprintValido(inicio, fim); err != nil {
 		return Sprint{}, err
@@ -114,7 +118,7 @@ func (b *Banco) CriarSprint(ctx context.Context, perfil int64, inicio, fim strin
 		if existe == 0 {
 			return ErrNaoEncontrado
 		}
-		if err := sobrepoe(ctx, tx, perfil, 0, inicio, fim); err != nil {
+		if err := mesmoPeriodo(ctx, tx, perfil, 0, inicio, fim); err != nil {
 			return err
 		}
 		r, err := tx.ExecContext(ctx, `INSERT INTO sprints (perfil_id, inicio, fim, criada_em) VALUES (?, ?, ?, ?)`, perfil, inicio, fim, agora())
@@ -132,11 +136,13 @@ func (b *Banco) CriarSprint(ctx context.Context, perfil int64, inicio, fim strin
 // seguinte ao fim dela, com a mesma duração) ou, na primeira, é a semana que
 // termina na próxima quinta, o dia da reunião. Dias sem uso entre a última e
 // hoje ficam fora de qualquer sprint (dá para olhar pelos 7 ou 14 dias).
+// Quando mais de uma sprint tem o dia (as datas são livres), vale a que
+// começou por último.
 func (b *Banco) SprintAtual(ctx context.Context, perfil int64, hoje string) (Sprint, error) {
 	s, err := b.sprintAtual(ctx, perfil, hoje)
 	if err != nil {
 		// Outra chamada pode ter criado a sprint de hoje ao mesmo tempo: vale a dela.
-		if criada, errDeNovo := lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE perfil_id = ? AND inicio <= ? AND fim >= ?`, perfil, hoje, hoje)); errDeNovo == nil {
+		if criada, errDeNovo := lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE perfil_id = ? AND inicio <= ? AND fim >= ? ORDER BY inicio DESC, id DESC LIMIT 1`, perfil, hoje, hoje)); errDeNovo == nil {
 			return criada, nil
 		}
 	}
@@ -148,7 +154,7 @@ func (b *Banco) sprintAtual(ctx context.Context, perfil int64, hoje string) (Spr
 	if err != nil {
 		return Sprint{}, ErrInvalido{"o dia precisa estar no formato AAAA-MM-DD"}
 	}
-	s, err := lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE perfil_id = ? AND inicio <= ? AND fim >= ?`, perfil, hoje, hoje))
+	s, err := lerSprint(b.db.QueryRowContext(ctx, `SELECT id, perfil_id, inicio, fim FROM sprints WHERE perfil_id = ? AND inicio <= ? AND fim >= ? ORDER BY inicio DESC, id DESC LIMIT 1`, perfil, hoje, hoje))
 	if !errors.Is(err, ErrNaoEncontrado) {
 		return s, err
 	}
@@ -206,7 +212,7 @@ func (b *Banco) EditarSprint(ctx context.Context, id int64, inicio, fim string) 
 		if err != nil {
 			return err
 		}
-		if err := sobrepoe(ctx, tx, antes.Perfil, id, inicio, fim); err != nil {
+		if err := mesmoPeriodo(ctx, tx, antes.Perfil, id, inicio, fim); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE sprints SET inicio = ?, fim = ? WHERE id = ?`, inicio, fim, id); err != nil {

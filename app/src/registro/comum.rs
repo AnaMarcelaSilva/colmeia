@@ -20,12 +20,16 @@ pub fn em_segundo_plano<T: Send + 'static>(envio: &Sender<T>, ctx: &egui::Contex
     });
 }
 
-/// "25/09/2026" vira "2026-09-25"; outra coisa é recusada aqui mesmo.
+/// "25/09/2026" vira "2026-09-25". Aceita o que você digita com folga: dia
+/// e mês com um dígito, barra repetida, ponto ou traço no lugar da barra
+/// ("1/9/2026", "12//11/2026", "12.11.2026"); outra coisa é recusada aqui
+/// mesmo.
 pub fn data_da_tela(texto: &str) -> Option<String> {
-    let partes: Vec<&str> = texto.trim().split('/').collect();
+    let partes: Vec<&str> = texto.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).collect();
     match partes[..] {
-        [d, m, a] if d.len() == 2 && m.len() == 2 && a.len() == 4 && texto.trim().chars().all(|c| c.is_ascii_digit() || c == '/') => {
-            Some(format!("{a}-{m}-{d}"))
+        [d, m, a] if d.len() <= 2 && m.len() <= 2 && a.len() == 4 => {
+            let (dia, mes) = (d.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+            ((1..=31).contains(&dia) && (1..=12).contains(&mes)).then(|| format!("{a}-{mes:02}-{dia:02}"))
         }
         _ => None,
     }
@@ -706,8 +710,12 @@ mod testes {
     fn datas_da_tela_viram_datas_do_nucleo() {
         assert_eq!(data_da_tela("25/09/2026").as_deref(), Some("2026-09-25"));
         assert_eq!(data_da_tela(" 01/10/2026 ").as_deref(), Some("2026-10-01"));
+        assert_eq!(data_da_tela("1/9/2026").as_deref(), Some("2026-09-01"));
+        assert_eq!(data_da_tela("12//11/2026").as_deref(), Some("2026-11-12"));
+        assert_eq!(data_da_tela("12.11.2026").as_deref(), Some("2026-11-12"));
         assert!(data_da_tela("2026-09-25").is_none());
-        assert!(data_da_tela("1/9/2026").is_none());
+        assert!(data_da_tela("32/01/2026").is_none());
+        assert!(data_da_tela("12/13/2026").is_none());
         assert!(data_da_tela("aa/bb/cccc").is_none());
     }
 
