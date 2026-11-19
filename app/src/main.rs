@@ -1613,6 +1613,7 @@ impl Colmeia {
         let mut slides = false;
         let mut mudar_tempo = None;
         let mut mudar_montador = None;
+        let mut mudar_datas = false;
         let mut alternar_lousa = false;
         let mut barra_arranjo: Option<ArranjoBarra> = None;
         ui.horizontal(|ui| {
@@ -1788,6 +1789,10 @@ impl Colmeia {
                                         mudar_montador = Some(!montador);
                                         ui.close();
                                     }
+                                    if tema::opcao_menu(ui, "Mostrar as datas das tarefas", self.registro.mostrar_datas) {
+                                        mudar_datas = true;
+                                        ui.close();
+                                    }
                                     if tema::opcao_menu_com(ui, "Apresentar em slides", Some("Shift+F5"), self.registro.deck(aba).is_some() && !atualizando) {
                                         slides = true;
                                         ui.close();
@@ -1860,6 +1865,9 @@ impl Colmeia {
         ui.add_space(10.0);
         if let Some(mostrar) = mudar_tempo {
             self.mudar_tempo(ui.ctx(), mostrar);
+        }
+        if mudar_datas {
+            self.registro.alternar_datas();
         }
         if let Some(ligado) = mudar_montador {
             self.mudar_montador(ui.ctx(), ligado);

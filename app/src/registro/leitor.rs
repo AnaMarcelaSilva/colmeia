@@ -455,7 +455,8 @@ impl Registro {
         let (cor, nome_estado, marca) = comum::estado_do_slide(s);
         tema::marca(pintor, pos2(x + 4.0, y + 7.0 * e), 4.0 * e, cor, marca);
         let mut xx = x + 14.0 * e;
-        let g = pintor.layout_no_wrap(estado_com_data(nome_estado, s), FontId::proportional(12.5 * e), p.suave);
+        let texto_estado = if self.mostrar_datas { estado_com_data(nome_estado, s) } else { nome_estado.to_string() };
+        let g = pintor.layout_no_wrap(texto_estado, FontId::proportional(12.5 * e), p.suave);
         pintor.galley(pos2(xx, y), g.clone(), p.suave);
         xx += g.size().x + 10.0 * e;
         if !projeto.is_empty() {

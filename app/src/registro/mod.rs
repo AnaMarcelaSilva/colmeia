@@ -357,6 +357,10 @@ pub struct Registro {
     /// cada quadro) e a última vista aqui, para notar a troca.
     pub mostrar_tempo: bool,
     tempo_visto: Option<bool>,
+    /// "Mostrar as datas das tarefas" no "⋯": a linha do estado do painel diz
+    /// quando a tarefa concluiu ou foi criada. Ligada por padrão; fica no
+    /// arquivo `datas-tarefas` da pasta de dados.
+    pub mostrar_datas: bool,
     /// Desligou o tempo e a resposta sem ele ainda não chegou: nada de copiar
     /// nem apresentar (o que havia na memória tinha os tempos).
     atualizando: bool,
@@ -431,6 +435,7 @@ impl Default for Registro {
             montando: HashSet::new(),
             mostrar_tempo: false,
             tempo_visto: None,
+            mostrar_datas: ler_datas(),
             atualizando: false,
             refazer_sem_tempo: false,
             ao_topo: [false; 2],
@@ -448,7 +453,28 @@ pub fn tem_tempo(texto: &str) -> bool {
     ["trabalhou", "esperou", "trabalharam", "Tempo de agentes", "Agentes: ", "Agentes no total"].iter().any(|t| texto.contains(t)) || desde_hora
 }
 
+/// A preferência das datas das tarefas: "0" no arquivo esconde; sem o
+/// arquivo (ou nos testes), aparecem.
+fn ler_datas() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    crate::lateral::pasta_de_dados().and_then(|p| std::fs::read_to_string(p.join("datas-tarefas")).ok()).is_none_or(|t| t.trim() != "0")
+}
+
 impl Registro {
+    /// Liga ou desliga as datas das tarefas no painel e guarda a escolha.
+    pub fn alternar_datas(&mut self) {
+        self.mostrar_datas = !self.mostrar_datas;
+        if cfg!(test) {
+            return;
+        }
+        if let Some(pasta) = crate::lateral::pasta_de_dados() {
+            let _ = std::fs::create_dir_all(&pasta);
+            let _ = std::fs::write(pasta.join("datas-tarefas"), if self.mostrar_datas { "1" } else { "0" });
+        }
+    }
+
     /// Um registro pronto para as fotos das telas: sem núcleo (nada é
     /// pedido) e com os decks dados.
     #[cfg(test)]

@@ -267,6 +267,12 @@ impl Default for Lateral {
 /// Onde fica a largura do painel: na pasta de dados da Colmeia, como a
 /// posição da abelha fixa.
 fn arquivo_largura() -> Option<std::path::PathBuf> {
+    Some(pasta_de_dados()?.join("lateral-largura"))
+}
+
+/// A pasta de dados da Colmeia (a mesma do núcleo), onde a tela guarda as
+/// suas preferências pequenas: a largura da lateral, as datas das tarefas.
+pub(crate) fn pasta_de_dados() -> Option<std::path::PathBuf> {
     let pasta = if let Some(d) = std::env::var_os("COLMEIA_DADOS") {
         std::path::PathBuf::from(d)
     } else if cfg!(windows) {
@@ -276,7 +282,7 @@ fn arquivo_largura() -> Option<std::path::PathBuf> {
     } else {
         std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local").join("share").join("colmeia")
     };
-    Some(pasta.join("lateral-largura"))
+    Some(pasta)
 }
 
 fn ler_largura() -> Option<f32> {
