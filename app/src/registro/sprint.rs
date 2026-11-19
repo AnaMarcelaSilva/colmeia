@@ -137,6 +137,8 @@ impl Registro {
         let mut pedidos = Vec::new();
         let mut soltas = None;
         let mut lista = ui.new_child(egui::UiBuilder::new().max_rect(esquerda).layout(egui::Layout::top_down(egui::Align::Min)));
+        // Nada da pauta passa por baixo do painel (ele é translúcido).
+        lista.set_clip_rect(esquerda.intersect(lista.clip_rect()));
         egui::ScrollArea::vertical().id_salt("pauta-sprint").auto_shrink(false).show(&mut lista, |ui| {
             ui.set_max_width(leitor::PAUTA - comum::MARGEM_ROLAGEM);
             pedidos = self.pauta(ui, &deck, &secoes, &mut leitor, &op);

@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, Id, Rect, RichText, UiBuilder, pos2, vec2};
+use eframe::egui::{self, FontId, Id, Rect, RichText, UiBuilder, pos2, vec2};
 
 use super::{Acao, Escopo, Registro, comum, leitor, lista, sprint};
 use crate::api;
@@ -197,6 +197,8 @@ impl Registro {
         let mut pedidos = Vec::new();
         let esperando = deck.slides.iter().filter(|s| s.grupo == "aguardando" && !s.removida).count();
         let mut lista = ui.new_child(UiBuilder::new().max_rect(esquerda).layout(egui::Layout::top_down(egui::Align::Min)));
+        // Nada da pauta passa por baixo do painel (ele é translúcido).
+        lista.set_clip_rect(esquerda.intersect(lista.clip_rect()));
         egui::ScrollArea::vertical().id_salt("pauta-daily").auto_shrink(false).show(&mut lista, |ui| {
             ui.set_max_width(leitor::PAUTA - comum::MARGEM_ROLAGEM);
             if esperando > 0 {
@@ -307,13 +309,20 @@ pub(super) fn tiradas(ui: &mut egui::Ui, fora: &[api::TarefaFora], com_projeto: 
     let onde = if daily { "daily" } else { "sprint" };
     ui.label(RichText::new(format!("Tiradas desta {onde} · {}", fora.len())).color(p.suave).size(13.5));
     ui.add_space(4.0);
+    // O título cabe na largura da pauta, cortado com "…" (o inteiro no
+    // hover), e o "Trazer de volta" fica sempre à vista no fim da linha.
+    let largura_link = ui.painter().layout_no_wrap("Trazer de volta".into(), FontId::proportional(13.5), p.texto).size().x + 16.0;
     for t in fora {
         ui.horizontal(|ui| {
             let mut texto = format!("“{}”", t.titulo);
             if com_projeto && !t.projeto.is_empty() {
                 texto = format!("{texto} · {}", t.projeto);
             }
-            ui.label(RichText::new(texto).color(p.texto).size(13.5));
+            let largura = (ui.available_width() - largura_link).max(60.0);
+            ui.scope(|ui| {
+                ui.set_max_width(largura);
+                ui.add(egui::Label::new(RichText::new(&texto).color(p.texto).size(13.5)).truncate()).on_hover_text(&texto);
+            });
             let r = tema::link_com(ui, "Trazer de volta", conectado);
             if r.on_hover_text(if daily { "Volta para a daily de hoje" } else { "Volta para esta sprint" }).clicked() {
                 voltar = Some(t.tarefa_id);

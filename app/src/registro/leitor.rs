@@ -286,7 +286,10 @@ impl Registro {
                 }
                 x += VISTO + 10.0;
                 let (cor, _, marca) = comum::estado_do_slide(s);
-                tema::marca(pintor, pos2(x + 4.0, if op.compacta { meio } else { meio - 9.0 }), 4.0, tom(cor), marca);
+                // Na pauta de duas linhas, o bloco do tópico e do número fica
+                // centrado na linha, como o visto e o ícone: o tópico 8 px
+                // acima do meio e o número 8 px abaixo.
+                tema::marca(pintor, pos2(x + 4.0, if op.compacta { meio } else { meio - 8.0 }), 4.0, tom(cor), marca);
                 x += 14.0;
                 let direita = r.right() - 10.0;
                 let mut largura = direita - x;
@@ -297,7 +300,7 @@ impl Registro {
                 let apagado = s.apresentada && !ativa;
                 let cor_titulo = tom(if apagado { p.suave } else { p.texto });
                 let fonte = if ativa { forte(13.5) } else { FontId::proportional(13.5) };
-                let y_titulo = if op.compacta { meio - 9.0 } else { meio - 16.0 };
+                let y_titulo = if op.compacta { meio - 9.0 } else { meio - 8.0 };
                 let cortou = texto_cortado(pintor, pos2(x, y_titulo), topico(s), fonte.clone(), cor_titulo, largura);
                 if apagado {
                     let w = tema::cortar(pintor, topico(s), egui::TextFormat::simple(fonte, cor_titulo), largura, 1, true).size().x;
@@ -305,7 +308,7 @@ impl Registro {
                 }
                 if !op.compacta {
                     let sub = format!("#{} · {}", s.tarefa_id, s.titulo.trim_end_matches('.'));
-                    texto_cortado(pintor, pos2(x, meio + 3.0), &sub, FontId::proportional(11.5), tom(p.suave), largura);
+                    texto_cortado(pintor, pos2(x, meio + 8.0), &sub, FontId::proportional(11.5), tom(p.suave), largura);
                 }
                 let resposta = if cortou { resposta.on_hover_text(topico(s)) } else { resposta };
                 if resposta.clicked() {
