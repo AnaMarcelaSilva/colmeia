@@ -598,6 +598,12 @@ pub struct Slide {
     pub grupo: String,
     #[serde(default)]
     pub removida: bool,
+    /// Os dias (AAAA-MM-DD) em que a tarefa foi criada e em que concluiu
+    /// (vazio fora do Concluído), para situar a tarefa no tempo.
+    #[serde(default)]
+    pub criada_em: String,
+    #[serde(default)]
+    pub concluida_em: String,
     /// O projeto da tarefa ("estudos · loja-web" com mais de um workspace):
     /// com mais de uma seção, a página e a apresentação separam por ela.
     #[serde(default)]

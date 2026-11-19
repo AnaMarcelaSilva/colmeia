@@ -113,6 +113,11 @@ type Slide struct {
 	Status         string `json:"status"`
 	Grupo          string `json:"grupo"`
 	Removida       bool   `json:"removida"`
+	// CriadaEm e ConcluidaEm são os dias locais (AAAA-MM-DD) em que a tarefa
+	// foi criada e em que entrou no Concluído (vazio fora de lá), para a
+	// reunião situar cada tarefa no tempo.
+	CriadaEm    string `json:"criada_em,omitempty"`
+	ConcluidaEm string `json:"concluida_em,omitempty"`
 	// Secao é o nome do projeto da tarefa ("estudos · loja-web" com mais de
 	// um workspace no recorte): com mais de uma seção, a tela põe um título
 	// (e um slide divisor) quando muda. SecaoID é o projeto e Workspace, o
@@ -330,11 +335,26 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 
 	// Coluna de cada tarefa no fim do período (a sprint pode ser do passado).
 	coluna := map[int64]string{}
+	concluidaEm := map[int64]string{}
 	for _, mc := range m.colunas {
 		if diaDe(mc.quando, fuso) > fim {
 			break
 		}
 		coluna[mc.tarefa] = mc.coluna
+		if mc.coluna == "concluido" {
+			concluidaEm[mc.tarefa] = diaDe(mc.quando, fuso)
+		} else {
+			delete(concluidaEm, mc.tarefa)
+		}
+	}
+	// O dia em que cada tarefa foi criada, mesmo antes do período.
+	criadaEm := map[int64]string{}
+	for _, item := range itens {
+		if item.Tipo == TipoCriou && item.TarefaID != 0 {
+			if _, ok := criadaEm[item.TarefaID]; !ok {
+				criadaEm[item.TarefaID] = diaDe(item.quando, fuso)
+			}
+		}
 	}
 
 	slides := map[int64]*Slide{}
@@ -456,6 +476,10 @@ func Apresentacao(eventos []dados.Evento, de, ate time.Time, c Contexto, tipo st
 		s.Coluna = coluna[s.TarefaID]
 		if tipo == "daily" && existe {
 			s.Coluna = atual.Coluna
+		}
+		s.CriadaEm = criadaEm[s.TarefaID]
+		if s.Coluna == "concluido" {
+			s.ConcluidaEm = concluidaEm[s.TarefaID]
 		}
 		if existe {
 			s.Titulo = atual.Titulo

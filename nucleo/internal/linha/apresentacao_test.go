@@ -44,6 +44,13 @@ func TestApresentacaoDaDaily(t *testing.T) {
 	if desconto.Numeros.Erros != 1 || desconto.Numeros.Sessoes != 1 || desconto.Numeros.Capturas != 1 || desconto.Numeros.TempoS != 300 {
 		t.Errorf("números do desconto: %+v", desconto.Numeros)
 	}
+	// O dia de criação vem mesmo de antes do período; o de conclusão só no Concluído.
+	if desconto.CriadaEm != "2026-09-21" || desconto.ConcluidaEm != "2026-09-25" {
+		t.Errorf("datas do desconto: criada %q, concluída %q", desconto.CriadaEm, desconto.ConcluidaEm)
+	}
+	if tela.CriadaEm != "2026-09-21" || tela.ConcluidaEm != "" {
+		t.Errorf("datas da tela: criada %q, concluída %q", tela.CriadaEm, tela.ConcluidaEm)
+	}
 	if tela.Grupo != GrupoAguardando || strings.Join(tela.Partes, ",") != "Sexta,Hoje" || len(tela.Feito) != 2 {
 		t.Fatalf("slide da tela: %+v", tela)
 	}

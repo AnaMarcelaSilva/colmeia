@@ -32,6 +32,8 @@ fn slide(
         projeto: projeto.into(),
         coluna: coluna.into(),
         grupo: grupo.into(),
+        criada_em: "2026-11-12".into(),
+        concluida_em: if coluna == "concluido" { "2026-11-16".into() } else { String::new() },
         secao: projeto.into(),
         secao_id,
         partes: vec!["Hoje".into()],

@@ -114,6 +114,19 @@ fn frase_do(s: &api::Slide) -> String {
     }
 }
 
+/// O estado com o dia que situa a tarefa na reunião: "Concluída em 17/11"
+/// ou, aberta, "Em revisão · criada em 12/11".
+fn estado_com_data(nome_estado: &str, s: &api::Slide) -> String {
+    let curta = |d: &str| if d.len() == 10 { format!("{}/{}", &d[8..10], &d[5..7]) } else { d.to_string() };
+    if !s.concluida_em.is_empty() {
+        format!("{nome_estado} em {}", curta(&s.concluida_em))
+    } else if !s.criada_em.is_empty() {
+        format!("{nome_estado} · criada em {}", curta(&s.criada_em))
+    } else {
+        nome_estado.to_string()
+    }
+}
+
 impl Registro {
     /// A pauta: um grupo por seção do deck, com o visto, a bolinha do
     /// estado, o tópico e o número da tarefa. Devolve o que foi pedido.
@@ -442,7 +455,7 @@ impl Registro {
         let (cor, nome_estado, marca) = comum::estado_do_slide(s);
         tema::marca(pintor, pos2(x + 4.0, y + 7.0 * e), 4.0 * e, cor, marca);
         let mut xx = x + 14.0 * e;
-        let g = pintor.layout_no_wrap(nome_estado.to_string(), FontId::proportional(12.5 * e), p.suave);
+        let g = pintor.layout_no_wrap(estado_com_data(nome_estado, s), FontId::proportional(12.5 * e), p.suave);
         pintor.galley(pos2(xx, y), g.clone(), p.suave);
         xx += g.size().x + 10.0 * e;
         if !projeto.is_empty() {
